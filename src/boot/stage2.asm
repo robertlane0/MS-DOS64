@@ -11,7 +11,7 @@ org 0x7E00
     ; To avoid duplication, we rely on the jmpover: GDT sits between jump and entry, not executed.
 
 KERNEL_LBA       equ 16
-KERNEL_SECTORS   equ 16         ; 8 KiB — covers kernel (195B) + growth; use 16 for QEMU compat
+KERNEL_SECTORS   equ 64         ; 32 KiB — covers Phase3 kernel (~12-20K) growth; 64 sectors
 KERNEL_STAGING_SEG  equ 0x8000
 KERNEL_STAGING_OFF  equ 0x0000  ; linear 0x80000 - staging buffer in low memory
 KERNEL_DEST_LINEAR  equ 0x100000
