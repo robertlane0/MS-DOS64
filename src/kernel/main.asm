@@ -1,8 +1,10 @@
-; MS-DOS64 64-bit kernel — Phase 3: Register & Instruction Conversion verification
-; Phase 2 long-mode entry at 0x100000 plus Phase 3 comprehensive tests
-; Demonstrates: RAX/RBX/RCX/RDX/RSI/RDI/RBP/RSP 64-bit, R8-R15, REP with RCX,
-;               AAM/AAD->DIV/MUL, XLAT->MOV, LES/LDS->flat, PUSH seg elimination,
-;               operand sizes, 64-bit stack, flat DMA, DISPATCH table
+; MS-DOS64 64-bit kernel — Phase 4: Addressing Mode Transformation (segmented -> flat)
+; Phase 2 long-mode entry at 0x100000 plus Phase 3 + Phase 4 comprehensive tests
+; Phase 3: RAX/RBX/RCX/RDX/RSI/RDI/RBP/RSP 64-bit, R8-R15, REP with RCX,
+;          AAM/AAD->DIV/MUL, XLAT->MOV, LES/LDS->flat, PUSH seg elimination
+; Phase 4: seg:off->linear (seg<<4+off), OFFSET DOSGROUP->rel, RIP-relative,
+;          FAR PTR BIOS*->near dispatch, DIRBUF/BUFFER dq, segment overrides
+;          eliminated, stack flat, canonical addresses
 
 bits 64
 default rel
@@ -56,6 +58,14 @@ extern syscall_dispatch64
 extern handler_conout
 extern handler_prtbuf
 
+extern seg_off_to_linear
+extern addr_test_all
+extern addr_test_seg_off
+extern addr_test_rip
+extern addr_test_far_near
+extern addr_test_buffer
+extern addr_test_canonical
+
 _start:
     mov rsp, 0x90000
     and rsp, -16
@@ -70,8 +80,11 @@ _start:
     mov rsi, hello_phase3
     call vga_print
     call serial_print64
+    mov rsi, hello_phase4
+    call vga_print
+    call serial_print64
 
-    ; Run Phase 3 tests, count passes
+    ; Run Phase 3+4 tests, count passes
     xor r12, r12          ; passed count in R12 (callee-saved, demonstrates R8-R15)
     xor r13, r13          ; failed count in R13
     mov r14, 0            ; test index
@@ -195,20 +208,103 @@ _start:
     call vga_print
     call serial_print64
 
+    ; ---- Test 8: Addressing seg:off -> linear (seg<<4+off, DMA split, para) ----
+    mov rsi, msg_test8
+    call vga_print
+    call serial_print64
+    call addr_test_seg_off
+    test rax, rax
+    jz .t8_pass
+    inc r13
+    mov rsi, msg_fail
+    jmp .t8_done
+.t8_pass:
+    inc r12
+    mov rsi, msg_pass
+.t8_done:
+    call vga_print
+    call serial_print64
+
+    ; ---- Test 9: RIP-relative / OFFSET DOSGROUP -> rel ----
+    mov rsi, msg_test9
+    call vga_print
+    call serial_print64
+    call addr_test_rip
+    test rax, rax
+    jz .t9_pass
+    inc r13
+    mov rsi, msg_fail
+    jmp .t9_done
+.t9_pass:
+    inc r12
+    mov rsi, msg_pass
+.t9_done:
+    call vga_print
+    call serial_print64
+
+    ; ---- Test 10: FAR PTR BIOS jump table -> near dispatch ----
+    mov rsi, msg_test10
+    call vga_print
+    call serial_print64
+    call addr_test_far_near
+    test rax, rax
+    jz .t10_pass
+    inc r13
+    mov rsi, msg_fail
+    jmp .t10_done
+.t10_pass:
+    inc r12
+    mov rsi, msg_pass
+.t10_done:
+    call vga_print
+    call serial_print64
+
+    ; ---- Test 11: Flat buffers DIRBUF/BUFFER dq, segment override elimination ----
+    mov rsi, msg_test11
+    call vga_print
+    call serial_print64
+    call addr_test_buffer
+    test rax, rax
+    jz .t11_pass
+    inc r13
+    mov rsi, msg_fail
+    jmp .t11_done
+.t11_pass:
+    inc r12
+    mov rsi, msg_pass
+.t11_done:
+    call vga_print
+    call serial_print64
+
+    ; ---- Test 12: Canonical addresses & flat stack ----
+    mov rsi, msg_test12
+    call vga_print
+    call serial_print64
+    call addr_test_canonical
+    test rax, rax
+    jz .t12_pass
+    inc r13
+    mov rsi, msg_fail
+    jmp .t12_done
+.t12_pass:
+    inc r12
+    mov rsi, msg_pass
+.t12_done:
+    call vga_print
+    call serial_print64
+
     ; ---- Summary ----
     mov rsi, msg_summary
     call vga_print
     call serial_print64
-    ; Print passed count (single digit for demo, up to 7)
-    mov al, r12b
-    add al, '0'
-    call print_char_vga_serial
+    ; Print passed count (up to 12, handle two digits)
+    movzx rax, r12w
+    call print_num_vga_serial
     mov rsi, msg_summary2
     call vga_print
     call serial_print64
-    mov al, r13b
-    add al, '0'
-    call print_char_vga_serial
+    movzx rax, r13w
+    call print_num_vga_serial
     mov rsi, msg_nl
     call vga_print
     call serial_print64
@@ -218,9 +314,15 @@ _start:
     mov rsi, msg_phase3_fail
     call vga_print
     call serial_print64
+    mov rsi, msg_phase4_fail
+    call vga_print
+    call serial_print64
     jmp .hlt
 .all_pass:
     mov rsi, msg_phase3_ok
+    call vga_print
+    call serial_print64
+    mov rsi, msg_phase4_ok
     call vga_print
     call serial_print64
 
@@ -256,6 +358,58 @@ print_char_vga_serial:
     out dx, al
     pop r8
     pop rdx
+    pop rax
+    ret
+
+; Helper: print RAX 0-99 as decimal to VGA+serial
+print_num_vga_serial:
+    push rax
+    push rbx
+    push rcx
+    push rdx
+    push r8
+    mov rcx, 10
+    xor rdx, rdx
+    div rcx              ; RAX = tens, RDX = ones
+    test rax, rax
+    jz .ones_only
+    ; print tens
+    add al, '0'
+    push rdx
+    mov r8b, al
+    movzx edi, r8b
+    mov al, r8b
+    call vga_putc
+    mov al, r8b
+.wait1:
+    mov dx, 0x3FD
+    in al, dx
+    test al, 0x20
+    jz .wait1
+    mov al, r8b
+    mov dx, 0x3F8
+    out dx, al
+    pop rdx
+.ones_only:
+    mov al, dl
+    add al, '0'
+    mov r8b, al
+    movzx edi, r8b
+    mov al, r8b
+    call vga_putc
+    mov al, r8b
+.wait2:
+    mov dx, 0x3FD
+    in al, dx
+    test al, 0x20
+    jz .wait2
+    mov al, r8b
+    mov dx, 0x3F8
+    out dx, al
+    pop r8
+    pop rdx
+    pop rcx
+    pop rbx
     pop rax
     ret
 
@@ -589,6 +743,7 @@ vga_print_stub:
 section .rodata
 hello_phase2 db "Hello from 64-bit DOS64 kernel: Phase2 long mode OK!",13,10,0
 hello_phase3 db "Phase3: Register & Instruction Conversion Test Suite",13,10,0
+hello_phase4 db "Phase4: Addressing Mode Transformation (segmented->flat) Test Suite",13,10,0
 msg_test1 db " [1] Register mapping (AX->RAX, R8-R15)... ",0
 msg_test2 db " [2] String ops (REP MOVSB, SCASB, LOOP->DEC)... ",0
 msg_test3 db " [3] BCD (AAM/AAD -> DIV/MUL, CBW, MUL/DIV)... ",0
@@ -596,6 +751,11 @@ msg_test4 db " [4] FAT12 UNPACK/PACK (BX->RBX, SHL, LES)... ",0
 msg_test5 db " [5] Memory MCB64 (para*16->byte, alloc)... ",0
 msg_test6 db " [6] DMA flat (LES/LDS elimination)... ",0
 msg_test7 db " [7] Syscall dispatch (SAVREGS, far->near)... ",0
+msg_test8 db " [8] Seg:off->linear (seg<<4+off, DMA, para)... ",0
+msg_test9 db " [9] RIP-relative/OFFSET DOSGROUP->rel... ",0
+msg_test10 db " [10] FAR PTR BIOS -> near dispatch... ",0
+msg_test11 db " [11] Flat buffers DIRBUF/BUFFER, seg override elim... ",0
+msg_test12 db " [12] Canonical & flat stack... ",0
 msg_pass db "PASS",13,10,0
 msg_fail db "FAIL",13,10,0
 msg_summary db 13,10,"Summary: ",0
@@ -603,6 +763,8 @@ msg_summary2 db " passed, ",0
 msg_nl db 13,10,0
 msg_phase3_ok db "Phase3 register conversion: ALL TESTS PASS",13,10,0
 msg_phase3_fail db "Phase3: SOME TESTS FAILED",13,10,0
+msg_phase4_ok db "Phase4 addressing transformation: ALL TESTS PASS",13,10,0
+msg_phase4_fail db "Phase4: SOME TESTS FAILED",13,10,0
 
 str_hello db "Hello64",0
 str_lower db "hello",0
