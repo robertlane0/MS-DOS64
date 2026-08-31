@@ -1,0 +1,9 @@
+build/
+*.img
+*.bin
+*.elf
+*.o
+bochs.log
+serial.log
+*.log
+*~
