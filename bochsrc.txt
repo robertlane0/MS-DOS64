@@ -1,13 +1,13 @@
-# Bochs 2.8+ x86-64 BIOS boot config for MS-DOS64
-# See docs/05-boot-and-testing-strategy.md
+# Bochs 3.0 x86-64 BIOS boot config for MS-DOS64
+# See docs/05-boot-and-testing-strategy.md — updated for Bochs 3.0 model presets
 megs: 256
 romimage: file=$BXSHARE/BIOS-bochs-latest
-vgaromimage: file=$BXSHARE/VGABIOS-lgpl-latest
-ata0-master: type=disk, path="build/dos64.img", mode=flat, cylinders=20, heads=16, spt=63
+vgaromimage: file=$BXSHARE/VGABIOS-lgpl-latest.bin
+ata0-master: type=disk, path="build/dos64.img", mode=flat
 boot: disk
 log: bochs.log
-cpu: count=1, ips=50000000, reset_on_triple_fault=1, ignore_bad_msrs=1
-cpuid: level=6, mmx=1, sep=1, sse=sse4_2, xapic=1, aes=1, movbe=1, xsave=1, x86_64=1
+cpu: model=ryzen, count=1, ips=50000000, reset_on_triple_fault=1, ignore_bad_msrs=1
+panic: action=report
 magic_break: enabled=1
 com1: enabled=1, mode=file, dev=serial.log
 display_library: nogui

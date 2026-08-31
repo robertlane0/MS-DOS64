@@ -35,12 +35,12 @@ gdt64_start:
     db 0x9A
     db 0xAF             ; L=1 (bit5 of flags), G=1 — 0xAF = 10101111
     db 0x00
-    ; 64-bit data 0x10: writable
+    ; 64-bit data 0x10: writable - L must be 0 for data
     dw 0x0000
     dw 0x0000
     db 0x00
     db 0x92
-    db 0xAF
+    db 0xCF             ; G=1, D=1, L=0, limit F
     db 0x00
 gdt64_end:
 gdt64_ptr:
