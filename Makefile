@@ -1,5 +1,5 @@
-# MS-DOS64 – 64-bit BIOS boot build (Phase 4 - flat addressing)
-# Phase 4: seg:off->linear, RIP-relative, far->near, DQ buffers, segment elimination
+# MS-DOS64 – 64-bit BIOS boot build (Phase 6 - memory management overhaul)
+# Phase 6: MCB64 coalesce/resize/validate/protect, para/page helpers, AH=48h/49h/4Ah
 # Requires: nasm >=2.15, ld (binutils), qemu or bochs
 BUILD := build
 SRC_BOOT := src/boot

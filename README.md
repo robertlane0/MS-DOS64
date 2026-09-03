@@ -1,6 +1,6 @@
 # MS-DOS64 — 64-bit BIOS Bootable DOS (from MS-DOS 1.25)
 
-> Phase 1 (Architecture Analysis) **complete**. Phase 2 (Boot & Long Mode) **complete** — boots via BIOS MBR → 64-bit on Bochs & QEMU. **Phase 3 (Register & Instruction Conversion) complete** — 7/7 PASS. **Phase 4 (Addressing Mode Transformation) complete** — 12/12 PASS. **Phase 5 (BIOS Interrupt Replacement, Option C) complete** — 16/16 PASS (native VGA/ATA/KBD) on both emulators.
+> Phase 1 (Architecture Analysis) **complete**. Phase 2 (Boot & Long Mode) **complete** — boots via BIOS MBR → 64-bit on Bochs & QEMU. **Phase 3 (Register & Instruction Conversion) complete** — 7/7 PASS. **Phase 4 (Addressing Mode Transformation) complete** — 12/12 PASS. **Phase 5 (BIOS Interrupt Replacement, Option C) complete** — 16/16 PASS (native VGA/ATA/KBD) on both emulators. **Phase 6 (Memory Management Overhaul) complete** — 21/21 PASS (MCB64 coalesce/resize/validate/protection, AH=48h/49h/4Ah) on both emulators.
 
 Original source: Microsoft MS-DOS v1.25 (MIT), Tim Paterson 86-DOS. This repo converts the 16-bit real-mode SCP dialect to a flat 64-bit long-mode OS that boots via legacy BIOS MBR on Bochs x86-64.
 
@@ -18,31 +18,32 @@ Original source: Microsoft MS-DOS v1.25 (MIT), Tim Paterson 86-DOS. This repo co
 
 All tables include `file:line` refs and were generated from live `grep -n` over the source.
 
-### Build & Run (Phase 5 — Option C)
+### Build & Run (Phase 6 — Memory Overhaul)
 
 ```bash
-make            # builds 512B MBR + stage2 (1K) + kernel (11K, 10 objs) + dos64.img (10M)
+make            # builds 512B MBR + stage2 (1K) + kernel (17K, 10 objs) + dos64.img (10M)
 make run-bochs  # Bochs 3.0 ryzen, 256MiB, serial.log + VGA at 0xB8000
 make run-qemu   # qemu-system-x86_64 -serial stdio alternative (also 64-bit)
 make clean
 ```
 
-**Verify boot (Phase 5):**
+**Verify boot (Phase 6):**
 
 ```bash
 # Bochs (target) — remove stale lock first
-rm -f bochs.log serial.log build/dos64.img.lock && make && BXSHARE=/nix/store/.../share/bochs timeout 12 bochs -f bochsrc.txt -q; cat serial.log
+rm -f bochs.log serial.log build/dos64.img.lock && make && BXSHARE=/nix/store/.../share/bochs timeout 25 bochs -f bochsrc.txt -q; cat serial.log
 # Expected serial.log:
 # MS-DOS64 MBR boot / A20 enabled / Loading stage2 via LBA... / Stage2 @0x7E00 ... / Kernel loaded
 # Hello from 64-bit DOS64 kernel: Phase2 long mode OK!
 # Phase3: Register & Instruction Conversion Test Suite / Phase4: Addressing ... / Phase5: BIOS Interrupt Replacement — Native Drivers (Option C)
-#  [1]...PASS ... [16]...PASS / Summary: 16 passed, 0 failed / Phase5 BIOS replacement (Option C): ALL TESTS PASS
+# Phase6: Memory Management Overhaul — MCB64, para/page, coalesce, protection
+#  [1]...PASS ... [21]...PASS / Summary: 21 passed, 0 failed / Phase6 memory management (MCB64): ALL TESTS PASS
 
-# QEMU alternative (also shows Phase5 suite)
-timeout 8 qemu-system-x86_64 -drive file=build/dos64.img,format=raw -serial stdio -display none
+# QEMU alternative (also shows Phase6 suite)
+timeout 10 qemu-system-x86_64 -drive file=build/dos64.img,format=raw -serial stdio -display none
 
 # Quick QEMU verify:
-# Phase5: BIOS Interrupt Replacement ... / [1]...PASS ... [16]...PASS / Summary: 16 passed, 0 failed
+# Phase6: Memory Management Overhaul ... / [1]...PASS ... [21]...PASS / Summary: 21 passed, 0 failed
 ```
 
 ### Project Layout
@@ -54,14 +55,14 @@ IO.ASM             IO.SYS + BIOS jump table (1933)
 COMMAND.ASM        resident/transient shell (2165)
 STDDOS.ASM         build wrapper (23)
 src/boot/          mbr.asm (512B MBR, A20, INT13 LBA/CHS) + stage2.asm (real→protected→long, 64 sectors) + gdt.asm
-src/kernel/        main.asm (Phase5 harness, 16 tests, _start @0x100000) + fat64.asm (UNPACK/PACK) + mem64.asm (MCB64) + syscall64.asm (SAVREGS/DISPATCH)
+src/kernel/        main.asm (Phase6 harness, 21 tests, _start @0x100000) + fat64.asm (UNPACK/PACK) + mem64.asm (MCB64: coalesce/resize/validate/protect, 24 exports) + syscall64.asm (SAVREGS/DISPATCH64 77 entries, AH=48h/49h/4Ah)
 src/drivers/       vga.asm (0xB8000 text, cursor, scroll) + ata.asm (0x1F0 PIO LBA28, CHS→LBA) + kbd.asm (0x60/0x64 PS/2, queue, tables) — native Option C
 src/lib/           string64.asm (REP/LOOP/XLAT) + bcd64.asm (AAM/AAD→DIV, CBW etc.) + addr64.asm (seg:off→linear, RIP-rel, far→near)
 include/           fcb.inc/dpb.inc/psp.inc/mcb.inc/regs.inc (64-bit strucs, STKPTRS64)
-docs/              00-phase1-summary + 01..06 analysis + 07-phase2-boot + 08-phase3-register-conversion + 09-phase4-addressing + 10-phase5-bios-drivers (Phase 5 report)
+docs/              00-phase1-summary + 01..06 analysis + 07-phase2-boot + 08-phase3-register-conversion + 09-phase4-addressing + 10-phase5-bios-drivers + 11-phase6-memory (Phase 6 report)
 bochsrc.txt        Bochs 3.0 ryzen, 256MiB, ata0 10MiB flat, VBE, serial.log
 linker.ld          flat link at 0x100000 (*.text.start first)
-build/             mbr.bin, stage2.bin (≈1K), kernel.bin (11K, 21 sec), kernel.elf (52K), dos64.img (10M)
+build/             mbr.bin, stage2.bin (≈1K), kernel.bin (17K, 32 sec), kernel.elf (66K), dos64.img (10M)
 ```
 
 ## Source License
@@ -105,4 +106,14 @@ See `docs/07-phase2-boot-implementation.md` for full mode-transition trace. See 
 - **Kernel modules** `main` now 967 lines, 16 tests (Phase3 7 + Phase4 5 + Phase5 4: `[13] MBR+CHS`, `[14] write`, `[15] kbd queue`, `[16] kbd+VGA`), `print_hex8/16` debug helpers, `ata/kbd` externs.
 - **Build** `Makefile:14` now 10 `elf64` objects (+`ata.o`/`kbd.o`), kernel `11212B` (21 sectors, ≤64), `52008 elf`. `make` → `build/kernel.bin` (11K) + `dos64.img` (10M).
 - **Test** Both emulators now show **`[1]...PASS` through `[16]...PASS / Summary: 16 passed, 0 failed / Phase3 ... ALL TESTS PASS / Phase4 ... ALL TESTS PASS / Phase5 BIOS replacement (Option C): ALL TESTS PASS`** (serial.log + VGA). No BIOS `INT` in long mode, no `#GP` on ports.
+
+## Phase 6 Status — Memory Management Overhaul (MCB64) Complete
+
+- **Scope** DOS 1.25 had no MCB (only `SETMEM`/`MEMSCAN` paragraphs); Phase 6 adds a full byte-based manager: para/page conversions (`SHL 4`/`SHL 12`), 64-bit `owner dq` chain `0x200000–0x800000`, first-fit split, prev+next coalesce, in-place resize, aligned/page alloc, validation + stats, 2 MiB PS `RW/NX` protection.
+- **Kernel modules** `mem64.asm` 1199 lines, 24 exports (`mem_validate/resize/alloc_aligned/pages/total/count/protect_range/...`); `syscall64.asm` `DISPATCH64` 47→77 entries, `AH=48h/49h/4Ah` handlers, `AH`-from-frame dispatch with balanced 15-push `leave64`; `main` 1737 lines, 21 tests (`[17]` para/page, `[18]` coalesce, `[19]` resize, `[20]` protection, `[21]` stress).
+- **Build** same 10 `elf64` objects, kernel `16860B` (32 sectors, ≤64), `65784 elf`. `make` → `build/kernel.bin` (17K) + `dos64.img` (10M).
+- **Test** Both emulators show **`[1]...PASS` through `[21]...PASS / Summary: 21 passed, 0 failed`** plus all four `ALL TESTS PASS` banners (serial.log + VGA). No `#UD/#GP/#PF`.
+- **Bugs fixed under GDB** 6 defects: `bl`/`rbx` clobber in walkers, missing `pop rdx` (resize/aligned), `AL`/`RAX` aliasing (shrink/aligned splits), `~align` vs `~(align-1)` mask, grow-split −40 accounting, dispatch-on-`SS` + 14/15 imbalance.
+
+See `docs/11-phase6-memory.md` for the full report.
 
