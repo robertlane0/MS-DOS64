@@ -1,5 +1,5 @@
-# MS-DOS64 – 64-bit BIOS boot build (Phase 6 - memory management overhaul)
-# Phase 6: MCB64 coalesce/resize/validate/protect, para/page helpers, AH=48h/49h/4Ah
+# MS-DOS64 – 64-bit BIOS boot build (Phase 7 - filesystem adaptation)
+# Phase 7: FAT12 on LBA (BPB->DPB, cluster->LBA, FAT chain, dir, FCB64) + all prior phases
 # Requires: nasm >=2.15, ld (binutils), qemu or bochs
 BUILD := build
 SRC_BOOT := src/boot

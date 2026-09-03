@@ -1,6 +1,6 @@
 # MS-DOS64 — 64-bit BIOS Bootable DOS (from MS-DOS 1.25)
 
-> Phase 1 (Architecture Analysis) **complete**. Phase 2 (Boot & Long Mode) **complete** — boots via BIOS MBR → 64-bit on Bochs & QEMU. **Phase 3 (Register & Instruction Conversion) complete** — 7/7 PASS. **Phase 4 (Addressing Mode Transformation) complete** — 12/12 PASS. **Phase 5 (BIOS Interrupt Replacement, Option C) complete** — 16/16 PASS (native VGA/ATA/KBD) on both emulators. **Phase 6 (Memory Management Overhaul) complete** — 21/21 PASS (MCB64 coalesce/resize/validate/protection, AH=48h/49h/4Ah) on both emulators.
+> Phase 1 (Architecture Analysis) **complete**. Phase 2 (Boot & Long Mode) **complete** — boots via BIOS MBR → 64-bit on Bochs & QEMU. **Phase 3 (Register & Instruction Conversion) complete** — 7/7 PASS. **Phase 4 (Addressing Mode Transformation) complete** — 12/12 PASS. **Phase 5 (BIOS Interrupt Replacement, Option C) complete** — 16/16 PASS (native VGA/ATA/KBD) on both emulators. **Phase 6 (Memory Management Overhaul) complete** — 21/21 PASS (MCB64 coalesce/resize/validate/protection, AH=48h/49h/4Ah) on both emulators. **Phase 7 (File System Adaptation) complete** — 27/27 PASS (FAT12 on LBA: BPB→DPB, chain, dir, FCB64) on both emulators.
 
 Original source: Microsoft MS-DOS v1.25 (MIT), Tim Paterson 86-DOS. This repo converts the 16-bit real-mode SCP dialect to a flat 64-bit long-mode OS that boots via legacy BIOS MBR on Bochs x86-64.
 
@@ -18,16 +18,16 @@ Original source: Microsoft MS-DOS v1.25 (MIT), Tim Paterson 86-DOS. This repo co
 
 All tables include `file:line` refs and were generated from live `grep -n` over the source.
 
-### Build & Run (Phase 6 — Memory Overhaul)
+### Build & Run (Phase 7 — Filesystem Adaptation)
 
 ```bash
-make            # builds 512B MBR + stage2 (1K) + kernel (17K, 10 objs) + dos64.img (10M)
+make            # builds 512B MBR + stage2 (1K) + kernel (23K, 11 objs) + dos64.img (10M)
 make run-bochs  # Bochs 3.0 ryzen, 256MiB, serial.log + VGA at 0xB8000
 make run-qemu   # qemu-system-x86_64 -serial stdio alternative (also 64-bit)
 make clean
 ```
 
-**Verify boot (Phase 6):**
+**Verify boot (Phase 7):**
 
 ```bash
 # Bochs (target) — remove stale lock first
@@ -37,13 +37,14 @@ rm -f bochs.log serial.log build/dos64.img.lock && make && BXSHARE=/nix/store/..
 # Hello from 64-bit DOS64 kernel: Phase2 long mode OK!
 # Phase3: Register & Instruction Conversion Test Suite / Phase4: Addressing ... / Phase5: BIOS Interrupt Replacement — Native Drivers (Option C)
 # Phase6: Memory Management Overhaul — MCB64, para/page, coalesce, protection
-#  [1]...PASS ... [21]...PASS / Summary: 21 passed, 0 failed / Phase6 memory management (MCB64): ALL TESTS PASS
+# Phase7: File System Adaptation — FAT12 on LBA, DPB/DIR/FCB64
+#  [1]...PASS ... [27]...PASS / Summary: 27 passed, 0 failed / Phase7 filesystem adaptation (FAT12): ALL TESTS PASS
 
-# QEMU alternative (also shows Phase6 suite)
+# QEMU alternative (also shows Phase7 suite)
 timeout 10 qemu-system-x86_64 -drive file=build/dos64.img,format=raw -serial stdio -display none
 
 # Quick QEMU verify:
-# Phase6: Memory Management Overhaul ... / [1]...PASS ... [21]...PASS / Summary: 21 passed, 0 failed
+# Phase7: File System Adaptation ... / [1]...PASS ... [27]...PASS / Summary: 27 passed, 0 failed
 ```
 
 ### Project Layout
@@ -55,14 +56,14 @@ IO.ASM             IO.SYS + BIOS jump table (1933)
 COMMAND.ASM        resident/transient shell (2165)
 STDDOS.ASM         build wrapper (23)
 src/boot/          mbr.asm (512B MBR, A20, INT13 LBA/CHS) + stage2.asm (real→protected→long, 64 sectors) + gdt.asm
-src/kernel/        main.asm (Phase6 harness, 21 tests, _start @0x100000) + fat64.asm (UNPACK/PACK) + mem64.asm (MCB64: coalesce/resize/validate/protect, 24 exports) + syscall64.asm (SAVREGS/DISPATCH64 77 entries, AH=48h/49h/4Ah)
+src/kernel/        main.asm (Phase7 harness, 27 tests, _start @0x100000) + fat64.asm (UNPACK/PACK) + fs64.asm (FAT12 on LBA: BPB/chain/dir/FCB64, 19 exports) + mem64.asm (MCB64: coalesce/resize/validate/protect, 24 exports) + syscall64.asm (SAVREGS/DISPATCH64 77 entries, AH=48h/49h/4Ah)
 src/drivers/       vga.asm (0xB8000 text, cursor, scroll) + ata.asm (0x1F0 PIO LBA28, CHS→LBA) + kbd.asm (0x60/0x64 PS/2, queue, tables) — native Option C
 src/lib/           string64.asm (REP/LOOP/XLAT) + bcd64.asm (AAM/AAD→DIV, CBW etc.) + addr64.asm (seg:off→linear, RIP-rel, far→near)
-include/           fcb.inc/dpb.inc/psp.inc/mcb.inc/regs.inc (64-bit strucs, STKPTRS64)
-docs/              00-phase1-summary + 01..06 analysis + 07-phase2-boot + 08-phase3-register-conversion + 09-phase4-addressing + 10-phase5-bios-drivers + 11-phase6-memory (Phase 6 report)
+include/           fcb.inc/dpb.inc/psp.inc/mcb.inc/regs.inc/fs.inc (64-bit strucs, STKPTRS64, DIRENT, BPB)
+docs/              00-phase1-summary + 01..06 analysis + 07-phase2-boot + 08-phase3-register-conversion + 09-phase4-addressing + 10-phase5-bios-drivers + 11-phase6-memory + 12-phase7-filesystem (Phase 7 report)
 bochsrc.txt        Bochs 3.0 ryzen, 256MiB, ata0 10MiB flat, VBE, serial.log
 linker.ld          flat link at 0x100000 (*.text.start first)
-build/             mbr.bin, stage2.bin (≈1K), kernel.bin (17K, 32 sec), kernel.elf (66K), dos64.img (10M)
+build/             mbr.bin, stage2.bin (≈1K), kernel.bin (23K, 44 sec), kernel.elf (79K), dos64.img (10M)
 ```
 
 ## Source License
@@ -116,4 +117,14 @@ See `docs/07-phase2-boot-implementation.md` for full mode-transition trace. See 
 - **Bugs fixed under GDB** 6 defects: `bl`/`rbx` clobber in walkers, missing `pop rdx` (resize/aligned), `AL`/`RAX` aliasing (shrink/aligned splits), `~align` vs `~(align-1)` mask, grow-split −40 accounting, dispatch-on-`SS` + 14/15 imbalance.
 
 See `docs/11-phase6-memory.md` for the full report.
+
+## Phase 7 Status — File System Adaptation (FAT12 on LBA) Complete
+
+- **Scope** DOS 1.25 FAT12 (`UNPACK/PACK`, `GETENTRY`, `FATREAD`, `DIRREAD`, `DREAD/DWRITE` via BIOS, CHS) → flat 64-bit on native ATA LBA28 PIO: BPB→DPB init, cluster→LBA (`firrec+(c-2)*spc`), 12-bit chain with EOF/free, root-dir find (deleted/end/wildcard), `DREAD/DWRITE/DIRREAD` wrappers, multi-cluster file read, `FCB64` open with 64-bit `filsiz/rr`/DMA-linear.
+- **Kernel modules** `fs64.asm` 19 exports (`fs_bpb_parse64/cluster_to_lba/fat_sector/get/set_cluster/is_eof/free/dir_find/dir_get_*/dread/dwrite/dir_read/write/fcb_open/file_read_cluster` + 6 `fs_test_*`); `include/fs.inc` (`DIRENT`, BPB offsets, `FAT12_*`, scratch LBAs 500–511); `main` 27 tests (`[22]` BPB/LBA, `[23]` chain, `[24]` dir, `[25]` LBA I/O, `[26]` file read, `[27]` FCB64).
+- **Build** 11 `elf64` objects (+`fs64.o`), kernel `22644B` (44 sectors, ≤64). `make` → `build/kernel.bin` (23K) + `dos64.img` (10M).
+- **Test** Both emulators show **`[1]...PASS` through `[27]...PASS / Summary: 27 passed, 0 failed`** plus all five `ALL TESTS PASS` banners (serial.log + VGA). No `#UD/#GP/#PF`.
+- **Bugs fixed** 6 defects: LBA return clobbered by `pop rcx`, HELLO test-entry typo (`OM ` vs `COM`), FAT-base `RSI` clobbered across ATA reads, `DH`-with-REX encoding, `cmp r64,imm64` bounds, 4-byte stores over `attr`/`extent`.
+
+See `docs/12-phase7-filesystem.md` for the full report.
 

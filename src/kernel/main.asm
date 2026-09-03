@@ -1,5 +1,5 @@
-; MS-DOS64 64-bit kernel — Phase 6: Memory Management Overhaul (MCB64)
-; Phase 2 long-mode entry at 0x100000 plus Phase 3 + Phase 4 + Phase 5 + Phase 6 tests
+; MS-DOS64 64-bit kernel — Phase 7: File System Adaptation (FAT12 on LBA)
+; Phase 2 long-mode entry at 0x100000 plus Phase 3 + Phase 4 + Phase 5 + Phase 6 + Phase 7 tests
 ; Phase 3: RAX/RBX/RCX/RDX/RSI/RDI/RBP/RSP 64-bit, R8-R15, REP with RCX,
 ;          AAM/AAD->DIV/MUL, XLAT->MOV, LES/LDS->flat, PUSH seg elimination
 ; Phase 4: seg:off->linear (seg<<4+off), OFFSET DOSGROUP->rel, RIP-relative,
@@ -11,6 +11,8 @@
 ;   - PS/2 8042 0x60/0x64 -> INT16h
 ; Phase 6: MCB64 overhaul — byte-based, para/page conversion, first-fit coalesce,
 ;          resize (AH=4Ah), page-table protection (2MiB PS, RW/NX), validation
+; Phase 7: FAT12 on LBA — BPB->DPB, cluster->LBA, FAT chain, dir entries,
+;          DREAD/DWRITE via ATA, FCB64 with 64-bit filsiz/rr/DMA
 
 bits 64
 default rel
@@ -117,6 +119,14 @@ extern kbd_test_status
 extern kbd_test_translation
 extern kbd_test_queue
 
+; Phase 7 filesystem (FAT12 on LBA)
+extern fs_test_bpb
+extern fs_test_chain
+extern fs_test_dir
+extern fs_test_lba_io
+extern fs_test_file_read
+extern fs_test_fcb
+
 _start:
     mov rsp, 0x90000
     and rsp, -16
@@ -140,8 +150,11 @@ _start:
     mov rsi, hello_phase6
     call vga_print
     call serial_print64
+    mov rsi, hello_phase7
+    call vga_print
+    call serial_print64
 
-    ; Run Phase 3+4+5+6 tests, count passes
+    ; Run Phase 3+4+5+6+7 tests, count passes
     xor r12, r12          ; passed count in R12 (callee-saved, demonstrates R8-R15)
     xor r13, r13          ; failed count in R13
     mov r14, 0            ; test index
@@ -503,6 +516,108 @@ _start:
     call vga_print
     call serial_print64
 
+    ; ---- Test 22: BPB->DPB + cluster->LBA + FAT sector (Phase7) ----
+    mov rsi, msg_test22
+    call vga_print
+    call serial_print64
+    call fs_test_bpb
+    test rax, rax
+    jz .t22_pass
+    inc r13
+    mov rsi, msg_fail
+    jmp .t22_done
+.t22_pass:
+    inc r12
+    mov rsi, msg_pass
+.t22_done:
+    call vga_print
+    call serial_print64
+
+    ; ---- Test 23: FAT12 chain pack/unpack + EOF/free (Phase7) ----
+    mov rsi, msg_test23
+    call vga_print
+    call serial_print64
+    call fs_test_chain
+    test rax, rax
+    jz .t23_pass
+    inc r13
+    mov rsi, msg_fail
+    jmp .t23_done
+.t23_pass:
+    inc r12
+    mov rsi, msg_pass
+.t23_done:
+    call vga_print
+    call serial_print64
+
+    ; ---- Test 24: Root-dir find/delete/end/wildcard (Phase7) ----
+    mov rsi, msg_test24
+    call vga_print
+    call serial_print64
+    call fs_test_dir
+    test rax, rax
+    jz .t24_pass
+    inc r13
+    mov rsi, msg_fail
+    jmp .t24_done
+.t24_pass:
+    inc r12
+    mov rsi, msg_pass
+.t24_done:
+    call vga_print
+    call serial_print64
+
+    ; ---- Test 25: ATA-backed DREAD/DWRITE + DIRREAD (Phase7) ----
+    mov rsi, msg_test25
+    call vga_print
+    call serial_print64
+    call fs_test_lba_io
+    test rax, rax
+    jz .t25_pass
+    inc r13
+    mov rsi, msg_fail
+    jmp .t25_done
+.t25_pass:
+    inc r12
+    mov rsi, msg_pass
+.t25_done:
+    call vga_print
+    call serial_print64
+
+    ; ---- Test 26: Multi-cluster file read via chain (Phase7) ----
+    mov rsi, msg_test26
+    call vga_print
+    call serial_print64
+    call fs_test_file_read
+    test rax, rax
+    jz .t26_pass
+    inc r13
+    mov rsi, msg_fail
+    jmp .t26_done
+.t26_pass:
+    inc r12
+    mov rsi, msg_pass
+.t26_done:
+    call vga_print
+    call serial_print64
+
+    ; ---- Test 27: FCB64 open + 64-bit filsiz/rr/DMA (Phase7) ----
+    mov rsi, msg_test27
+    call vga_print
+    call serial_print64
+    call fs_test_fcb
+    test rax, rax
+    jz .t27_pass
+    inc r13
+    mov rsi, msg_fail
+    jmp .t27_done
+.t27_pass:
+    inc r12
+    mov rsi, msg_pass
+.t27_done:
+    call vga_print
+    call serial_print64
+
     ; ---- Summary ----
     mov rsi, msg_summary
     call vga_print
@@ -532,6 +647,9 @@ _start:
     mov rsi, msg_phase6_fail
     call vga_print
     call serial_print64
+    mov rsi, msg_phase7_fail
+    call vga_print
+    call serial_print64
     jmp .hlt
 .all_pass:
     mov rsi, msg_phase3_ok
@@ -544,6 +662,9 @@ _start:
     call vga_print
     call serial_print64
     mov rsi, msg_phase6_ok
+    call vga_print
+    call serial_print64
+    mov rsi, msg_phase7_ok
     call vga_print
     call serial_print64
 
@@ -1679,6 +1800,7 @@ hello_phase3 db "Phase3: Register & Instruction Conversion Test Suite",13,10,0
 hello_phase4 db "Phase4: Addressing Mode Transformation (segmented->flat) Test Suite",13,10,0
 hello_phase5 db "Phase5: BIOS Interrupt Replacement — Native Drivers (Option C)",13,10,0
 hello_phase6 db "Phase6: Memory Management Overhaul — MCB64, para/page, coalesce, protection",13,10,0
+hello_phase7 db "Phase7: File System Adaptation — FAT12 on LBA, DPB/DIR/FCB64",13,10,0
 msg_test1 db " [1] Register mapping (AX->RAX, R8-R15)... ",0
 msg_test2 db " [2] String ops (REP MOVSB, SCASB, LOOP->DEC)... ",0
 msg_test3 db " [3] BCD (AAM/AAD -> DIV/MUL, CBW, MUL/DIV)... ",0
@@ -1700,6 +1822,12 @@ msg_test18 db " [18] MCB coalesce (split, prev+next merge)... ",0
 msg_test19 db " [19] Resize SETBLK (shrink/grow via AH=4Ah)... ",0
 msg_test20 db " [20] Page protection (2MiB PS RW/NX)... ",0
 msg_test21 db " [21] Stress/validate (totals, double-free)... ",0
+msg_test22 db " [22] BPB->DPB + cluster->LBA + FAT sector... ",0
+msg_test23 db " [23] FAT12 chain pack/unpack + EOF/free... ",0
+msg_test24 db " [24] Root-dir find/delete/end/wildcard... ",0
+msg_test25 db " [25] ATA DREAD/DWRITE + DIRREAD (LBA)... ",0
+msg_test26 db " [26] Multi-cluster file read via chain... ",0
+msg_test27 db " [27] FCB64 open + 64-bit filsiz/rr/DMA... ",0
 msg_pass db "PASS",13,10,0
 msg_fail db "FAIL",13,10,0
 msg_summary db 13,10,"Summary: ",0
@@ -1713,6 +1841,8 @@ msg_phase5_ok db "Phase5 BIOS replacement (Option C): ALL TESTS PASS",13,10,0
 msg_phase5_fail db "Phase5: SOME TESTS FAILED",13,10,0
 msg_phase6_ok db "Phase6 memory management (MCB64): ALL TESTS PASS",13,10,0
 msg_phase6_fail db "Phase6: SOME TESTS FAILED",13,10,0
+msg_phase7_ok db "Phase7 filesystem adaptation (FAT12): ALL TESTS PASS",13,10,0
+msg_phase7_fail db "Phase7: SOME TESTS FAILED",13,10,0
 
 str_hello db "Hello64",0
 str_lower db "hello",0
