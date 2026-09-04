@@ -11,6 +11,12 @@ extern mem_resize64
 extern mem_max_free64
 extern mem_bytes_to_para
 extern mem_para_to_bytes
+extern proc_spawn64
+extern proc_terminate64
+extern proc_exit_current64
+extern proc_init64
+extern proc_get_psp64
+extern proc_get_current64
 section .text
 global syscall_init
 global syscall_dispatch64
@@ -28,11 +34,13 @@ global handler_abort
 global handler_alloc_mem
 global handler_free_mem
 global handler_resize_mem
+global handler_exec
+global handler_exit_process
 
 %define MAXCOM 0x4C    ; 76 — extend for Phase6 alloc/free/resize (DOS 2.0 48h/49h/4Ah)
 %define MAXCALL 36
-%define IOSTACK_SIZE 1024
-%define DSKSTACK_SIZE 1024
+%define IOSTACK_SIZE 4096
+%define DSKSTACK_SIZE 4096
 
 section .bss
 align 16
@@ -48,6 +56,10 @@ EXITHOLD64: resq 2
 DMAADD64_SC: resq 1
 THISDRV64: resb 1
 CURDRV64: resb 1
+exec_ret_pid: resq 1
+exec_ret_psp: resq 1
+global exec_dbg_pid
+exec_dbg_pid: resq 1
 
 section .text
 syscall_init:
@@ -92,27 +104,30 @@ savregs64:
 .sav_done:
     and rsp, ~15
     sti
-    movzx ebx, byte [rel SPSAVE64]
+    mov rbx, [rel SPSAVE64]
+    movzx ebx, byte [rbx+1]   ; AH = function (was byte [SPSAVE64] = pointer low byte, Phase8 fix)
     ret
 
 syscall_dispatch64:
-    cmp eax, MAXCOM
+    cmp ah, MAXCOM         ; AH=function (was cmp eax,MAXCOM which compared 0x4B00>0x4C, always bad; Phase8 fix)
     ja .dispatch_bad
-    push rbx
-    push rcx
-    push rdx
-    push rsi
-    push rdi
-    push rbp
-    push r8
-    push r9
-    push r10
-    push r11
-    push r12
-    push r13
-    push r14
     push r15
+    push r14
+    push r13
+    push r12
+    push r11
+    push r10
+    push r9
+    push r8
+    push rbp
+    push rdi
+    push rsi
+    push rdx
+    push rcx
+    push rbx
     push rax          ; 15th push balances leave64's 15 pops; [rsp] = func (AH)
+                      ; Order matches savregs64/STKPTRS64: [rsp]=RAX,+8=RBX,+16=RCX...
+                      ; (Phase8 fix: was rbx..rax scrambled, corrupted R12/R13 counts)
     mov [rel SPSAVE64], rsp
     mov rax, ss
     mov [rel SSSAVE64], rax
@@ -146,21 +161,21 @@ leave64:
     mov rsp, [rel SPSAVE64]
     mov rax, [rel SSSAVE64]
     mov ss, ax
-    pop r15
-    pop r14
-    pop r13
-    pop r12
-    pop r11
-    pop r10
-    pop r9
-    pop r8
-    pop rbp
-    pop rdi
-    pop rsi
-    pop rdx
-    pop rcx
-    pop rbx
     pop rax
+    pop rbx
+    pop rcx
+    pop rdx
+    pop rsi
+    pop rdi
+    pop rbp
+    pop r8
+    pop r9
+    pop r10
+    pop r11
+    pop r12
+    pop r13
+    pop r14
+    pop r15
     ret
 
 iretq64:
@@ -270,13 +285,25 @@ DISPATCH64:
     dq handler_alloc_mem  ; 48 72 AH=48h ALLOC (paragraphs->bytes)
     dq handler_free_mem   ; 49 73 AH=49h FREE
     dq handler_resize_mem ; 4A 74 AH=4Ah SETBLK/RESIZE
-    dq handler_inuse      ; 4B 75
-    dq handler_abort      ; 4C 76 exit
+    dq handler_exec       ; 4B 75 AH=4Bh EXEC (Phase8: proc_spawn64)
+    dq handler_exit_process ; 4C 76 AH=4Ch EXIT (Phase8: proc_exit_current64)
 
 section .text
+; Phase8: INT20h ABORT (MSDOS.ASM:1356) — terminate current with code 0.
+; Old code jmp [EXITHOLD64] (zero -> #GP). Now calls proc_exit_current(0).
+; If current is kernel (pid0), just returns AL=0 (no halt, test-safe).
 handler_abort:
-    mov rsi, [rel SPSAVE64]
-    jmp qword [rel EXITHOLD64]
+    push rdi
+    push rsi
+    push rcx
+    xor edi, edi
+    call proc_exit_current64
+    ; RAX 0 exited child, 1 was kernel -> both OK for abort path
+    xor eax, eax
+    pop rcx
+    pop rsi
+    pop rdi
+    ret
 
 handler_conin:
     call handler_in
@@ -464,6 +491,117 @@ handler_bufin:
 
 handler_setdma:
     mov [rel DMAADD64_SC], rdx
+    ret
+
+; ------------------------------------------------------------
+; Phase8: EXEC (AH=4Bh) — spawn process from memory image
+;   Direct: RDI=src linear, RSI=size bytes, RDX=cmdline (0=none),
+;           RCX=cmdlen, R8=env_src (0=default)
+;   Trap via DISPATCH64: same regs live (push preserves values),
+;           RAX=0x4B00 (AH=4Bh). Returns pid.
+;   Out: RAX=pid (0 fail), RDX=psp (0 fail), CF 0 ok / 1 fail.
+;   Success = CF=0 + RAX!=0 (pid 1..). Fail = CF=1 + RAX=0.
+;   Trap frame: writes pid to [SPSAVE+rax_save] + [rbx_save] for parent.
+; ------------------------------------------------------------
+handler_exec:
+    push rbx
+    push rcx
+    push rdx
+    push rsi
+    push rdi
+    push r8
+    push r9
+    ; RDI/RSI/RDX/RCX/R8 already hold args (push preserves values, regs unchanged)
+    call proc_spawn64
+    ; RAX=pid, RDX=psp
+    mov [rel exec_dbg_pid], rax
+    test rax, rax
+    jz .fail_e
+    mov r9, rax          ; save pid
+    mov rbx, [rel SPSAVE64]
+    test rbx, rbx
+    jz .no_frame_e
+    mov [rbx + STKPTRS64.rax_save], rax
+    mov [rbx + STKPTRS64.rbx_save], rax
+.no_frame_e:
+    mov rax, r9          ; restore pid (proc_spawn used RAX/RDX returns; pushes didn't clobber regs except RAX/RDX)
+    ; RDX already holds psp from proc_spawn? proc_spawn returns RDX=psp, but our pushes saved orig RDX.
+    ; After call, RDX=psp (return). Our push/pop of rdx will restore orig RDX on pop, losing psp!
+    ; So save psp in R9 as well before pops.
+    mov r9, rdx          ; psp (overwrites pid save; need both) -> use stack slots
+    ; Actually need both pid and psp across pops. Save to frame or static:
+    mov [rel exec_ret_pid], rax
+    mov [rel exec_ret_psp], r9
+    clc
+    pop r9
+    pop r8
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rcx
+    pop rbx
+    mov rax, [rel exec_ret_pid]
+    mov rdx, [rel exec_ret_psp]
+    ret
+.fail_e:
+    mov rbx, [rel SPSAVE64]
+    test rbx, rbx
+    jz .no_frame_ef
+    mov qword [rbx + STKPTRS64.rax_save], 0
+    mov qword [rbx + STKPTRS64.rbx_save], 0
+.no_frame_ef:
+    xor eax, eax
+    xor edx, edx
+    stc
+    pop r9
+    pop r8
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rcx
+    pop rbx
+    ret
+
+; ------------------------------------------------------------
+; Phase8: EXIT (AH=4Ch) — terminate current process
+;   Direct: RDI=exit_code (or AL from RAX=0x4Cxx for trap compat)
+;   Trap: RAX=0x4Cxx, AL=code (RDI ignored if 0? we prefer AL when RDI holds stale?)
+;   Out: RAX 0 ok (child exited), 1 fail (kernel current), CF accordingly.
+; ------------------------------------------------------------
+handler_exit_process:
+    push rbx
+    push rdi
+    push rcx
+    ; Prefer RDI if caller set it non-trivially? Trap sets RDI=stale (whatever caller RDI was).
+    ; DOS passes code in AL. For 64-bit, support both: if RDI >255, use AL; else use DIL?
+    ; Simplest: if RDI <256 and RAX high AH==0x4C, use AL (trap); else use RDI.
+    ; Check AH:
+    mov ebx, eax
+    shr ebx, 8
+    and ebx, 0xFF
+    cmp bl, 0x4C
+    jne .use_rdi
+    ; AH==4Ch -> trap or direct-with-RAX: use AL
+    movzx edi, al
+    jmp .do_exit
+.use_rdi:
+    ; keep RDI as is
+.do_exit:
+    call proc_exit_current64
+    test rax, rax
+    jnz .fail_x
+    xor eax, eax
+    clc
+    pop rcx
+    pop rdi
+    pop rbx
+    ret
+.fail_x:
+    mov rax, 1
+    stc
+    pop rcx
+    pop rdi
+    pop rbx
     ret
 
 demo_les_lds:

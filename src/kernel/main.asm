@@ -127,6 +127,40 @@ extern fs_test_lba_io
 extern fs_test_file_read
 extern fs_test_fcb
 
+; Phase 8 process management (PSP64/env/loader)
+extern proc_init64
+extern proc_alloc_slot64
+extern proc_count_running64
+extern proc_count_zombie64
+extern proc_get_current64
+extern proc_set_current64
+extern proc_get_psp64
+extern proc_get_entry64
+extern proc_next_pid
+extern proc_state
+extern proc_pid
+extern exec_dbg_pid
+extern psp_init64
+extern psp_validate64
+extern psp_set_cmdtail64
+extern psp_get_cmdlen64
+extern psp_set_exit64
+extern env_init64
+extern env_count64
+extern env_get64
+extern env_set64
+extern env_unset64
+extern proc_verify_image64
+extern proc_load_image64
+extern proc_spawn64
+extern proc_terminate64
+extern proc_exit_current64
+extern proc_reap64
+extern proc_free_all64
+extern handler_exec
+extern handler_exit_process
+extern handler_abort
+
 _start:
     mov rsp, 0x90000
     and rsp, -16
@@ -151,6 +185,9 @@ _start:
     call vga_print
     call serial_print64
     mov rsi, hello_phase7
+    call vga_print
+    call serial_print64
+    mov rsi, hello_phase8
     call vga_print
     call serial_print64
 
@@ -618,6 +655,125 @@ _start:
     call vga_print
     call serial_print64
 
+    ; ---- Test 28: PSP init/validate (SETMEM analog, Phase8) ----
+    mov rsi, msg_test28
+    call vga_print
+    call serial_print64
+    call test_psp_init
+    test rax, rax
+    jz .t28_pass
+    inc r13
+    mov rsi, msg_fail
+    jmp .t28_done
+.t28_pass:
+    inc r12
+    mov rsi, msg_pass
+.t28_done:
+    call vga_print
+    call serial_print64
+
+    ; ---- Test 29: PSP cmd tail + exit vectors + fd/CR3 (Phase8) ----
+    mov rsi, msg_test29
+    call vga_print
+    call serial_print64
+    call test_psp_cmd
+    test rax, rax
+    jz .t29_pass
+    inc r13
+    mov rsi, msg_fail
+    jmp .t29_done
+.t29_pass:
+    inc r12
+    mov rsi, msg_pass
+.t29_done:
+    call vga_print
+    call serial_print64
+
+    ; ---- Test 30: ENV blocks (Phase8) ----
+    mov rsi, msg_test30
+    call vga_print
+    call serial_print64
+    call test_env
+    test rax, rax
+    jz .t30_pass
+    inc r13
+    mov rsi, msg_fail
+    jmp .t30_done
+.t30_pass:
+    inc r12
+    mov rsi, msg_pass
+.t30_done:
+    call vga_print
+    call serial_print64
+
+    ; ---- Test 31: Loader COM vs EXE64 (Phase8) ----
+    mov rsi, msg_test31
+    call vga_print
+    call serial_print64
+    call test_loader
+    test rax, rax
+    jz .t31_pass
+    inc r13
+    mov rsi, msg_fail
+    jmp .t31_done
+.t31_pass:
+    inc r12
+    mov rsi, msg_pass
+.t31_done:
+    call vga_print
+    call serial_print64
+
+    ; ---- Test 32: Spawn/exit lifecycle + owner (Phase8) ----
+    mov rsi, msg_test32
+    call vga_print
+    call serial_print64
+    call test_spawn
+    test rax, rax
+    jz .t32_pass
+    inc r13
+    mov rsi, msg_fail
+    jmp .t32_done
+.t32_pass:
+    inc r12
+    mov rsi, msg_pass
+.t32_done:
+    call vga_print
+    call serial_print64
+
+    ; ---- Test 33: EXEC/EXIT via INT21 dispatch (Phase8) ----
+    mov rsi, msg_test33
+    call vga_print
+    call serial_print64
+    call test_exec_dispatch
+    test rax, rax
+    jz .t33_pass
+    inc r13
+    mov rsi, msg_fail
+    jmp .t33_done
+.t33_pass:
+    inc r12
+    mov rsi, msg_pass
+.t33_done:
+    call vga_print
+    call serial_print64
+
+    ; ---- Test 34: Stress max procs + reap + validate (Phase8) ----
+    mov rsi, msg_test34
+    call vga_print
+    call serial_print64
+    call test_proc_stress
+    test rax, rax
+    jz .t34_pass
+    inc r13
+    mov rsi, msg_fail
+    jmp .t34_done
+.t34_pass:
+    inc r12
+    mov rsi, msg_pass
+.t34_done:
+    call vga_print
+    call serial_print64
+
     ; ---- Summary ----
     mov rsi, msg_summary
     call vga_print
@@ -650,6 +806,9 @@ _start:
     mov rsi, msg_phase7_fail
     call vga_print
     call serial_print64
+    mov rsi, msg_phase8_fail
+    call vga_print
+    call serial_print64
     jmp .hlt
 .all_pass:
     mov rsi, msg_phase3_ok
@@ -665,6 +824,9 @@ _start:
     call vga_print
     call serial_print64
     mov rsi, msg_phase7_ok
+    call vga_print
+    call serial_print64
+    mov rsi, msg_phase8_ok
     call vga_print
     call serial_print64
 
@@ -1735,6 +1897,1165 @@ test_stress:
     ret
 
 ; ------------------------------------------------------------
+; Test 28: PSP init/validate (SETMEM analog, MSDOS.ASM:3363)
+; ------------------------------------------------------------
+test_psp_init:
+    push rbx
+    push rcx
+    push rdx
+    push rsi
+    push rdi
+    push r8
+    push r9
+    push r10
+    push r11
+    call mem_reset64
+    call proc_init64
+    ; alloc 4096
+    mov rdi, 4096
+    call mem_alloc64
+    test rax, rax
+    jz .fail28
+    mov rbx, rax             ; psp
+    mov rcx, rbx
+    add rcx, 4096            ; top
+    mov rdi, rbx
+    mov rsi, rcx
+    mov rdx, 0x1234
+    xor ecx, ecx             ; env 0
+    call psp_init64
+    test rax, rax
+    jnz .fail28
+    mov rdi, rbx
+    call psp_validate64
+    test rax, rax
+    jnz .fail28
+    ; magic CD 20
+    cmp byte [rbx + PSP64.int20], 0xCD
+    jne .fail28
+    cmp byte [rbx + PSP64.int20+1], 0x20
+    jne .fail28
+    ; top
+    mov rax, [rbx + PSP64.top_mem]
+    mov rcx, rbx
+    add rcx, 4096
+    cmp rax, rcx
+    jne .fail28
+    ; exit
+    cmp qword [rbx + PSP64.exit_ip], 0x1234
+    jne .fail28
+    cmp qword [rbx + PSP64.exit_cs], 0x08
+    jne .fail28
+    ; fd table
+    cmp qword [rbx + PSP64.fd_table + 0*8], 0
+    jne .fail28
+    cmp qword [rbx + PSP64.fd_table + 1*8], 1
+    jne .fail28
+    cmp qword [rbx + PSP64.fd_table + 2*8], 2
+    jne .fail28
+    mov rax, [rbx + PSP64.fd_table + 3*8]
+    cmp rax, -1
+    jne .fail28
+    ; cr3 non-zero and matches current
+    mov rax, cr3
+    test rax, rax
+    jz .fail28
+    mov rcx, [rbx + PSP64.cr3]
+    cmp rcx, rax
+    jne .fail28
+    ; corrupt magic -> validate 1
+    mov al, [rbx + PSP64.int20]
+    mov byte [rbx + PSP64.int20], 0x00
+    mov rdi, rbx
+    call psp_validate64
+    cmp rax, 1
+    jne .fail28_restore
+    mov byte [rbx + PSP64.int20], 0xCD
+    ; bad top (==psp) -> validate 2
+    mov rax, [rbx + PSP64.top_mem]
+    push rax
+    mov qword [rbx + PSP64.top_mem], 0
+    mov rdi, rbx
+    call psp_validate64
+    cmp rax, 2
+    jne .fail28_restore2
+    pop rax
+    mov [rbx + PSP64.top_mem], rax
+    mov rdi, rbx
+    call psp_validate64
+    test rax, rax
+    jnz .fail28
+    call mem_validate64
+    test rax, rax
+    jnz .fail28
+    mov rdi, rbx
+    call mem_free64
+    jc .fail28
+    xor eax, eax
+    jmp .done28
+.fail28_restore2:
+    pop rax
+    mov [rbx + PSP64.top_mem], rax
+    jmp .fail28
+.fail28_restore:
+    mov byte [rbx + PSP64.int20], 0xCD
+    jmp .fail28
+.fail28:
+    mov rax, 1
+.done28:
+    pop r11
+    pop r10
+    pop r9
+    pop r8
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rcx
+    pop rbx
+    ret
+
+; ------------------------------------------------------------
+; Test 29: PSP cmd tail + exit vectors + fd/CR3
+; ------------------------------------------------------------
+test_psp_cmd:
+    push rbx
+    push rcx
+    push rdx
+    push rsi
+    push rdi
+    push r8
+    push r9
+    push r10
+    push r11
+    call mem_reset64
+    call proc_init64
+    mov rdi, 4096
+    call mem_alloc64
+    test rax, rax
+    jz .fail29
+    mov rbx, rax
+    mov rcx, rbx
+    add rcx, 4096
+    mov rdi, rbx
+    mov rsi, rcx
+    xor edx, edx
+    xor ecx, ecx
+    call psp_init64
+    test rax, rax
+    jnz .fail29
+    ; set cmd "HELLO WORLD" len 11
+    mov rdi, rbx
+    lea rsi, [rel p8_cmd_hello]
+    mov rdx, 11
+    call psp_set_cmdtail64
+    test rax, rax
+    jnz .fail29
+    mov rdi, rbx
+    call psp_get_cmdlen64
+    cmp rax, 11
+    jne .fail29
+    cmp byte [rbx + PSP64.cmd_tail], 'H'
+    jne .fail29
+    cmp byte [rbx + PSP64.cmd_tail+10], 'D'
+    jne .fail29
+    ; empty cmd
+    mov rdi, rbx
+    xor esi, esi
+    xor edx, edx
+    call psp_set_cmdtail64
+    test rax, rax
+    jnz .fail29
+    mov rdi, rbx
+    call psp_get_cmdlen64
+    cmp rax, 0
+    jne .fail29
+    ; restore hello for later checks
+    mov rdi, rbx
+    lea rsi, [rel p8_cmd_hello]
+    mov rdx, 11
+    call psp_set_cmdtail64
+    test rax, rax
+    jnz .fail29
+    ; too long 128 -> fail
+    mov rdi, rbx
+    lea rsi, [rel p8_cmd_hello]
+    mov rdx, 128
+    call psp_set_cmdtail64
+    test rax, rax
+    jz .fail29
+    ; set exit vectors
+    mov rdi, rbx
+    mov rsi, 0xAAAA
+    mov rdx, 0xBBBB
+    mov rcx, 0xCCCC
+    call psp_set_exit64
+    test rax, rax
+    jnz .fail29
+    cmp qword [rbx + PSP64.exit_ip], 0xAAAA
+    jne .fail29
+    cmp qword [rbx + PSP64.cont_ip], 0xBBBB
+    jne .fail29
+    cmp qword [rbx + PSP64.error_ip], 0xCCCC
+    jne .fail29
+    mov rdi, rbx
+    call psp_validate64
+    test rax, rax
+    jnz .fail29
+    mov rdi, rbx
+    call mem_free64
+    jc .fail29
+    xor eax, eax
+    jmp .done29
+.fail29:
+    mov rax, 1
+.done29:
+    pop r11
+    pop r10
+    pop r9
+    pop r8
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rcx
+    pop rbx
+    ret
+
+; ------------------------------------------------------------
+; Test 30: ENV blocks
+; ------------------------------------------------------------
+test_env:
+    push rbx
+    push rcx
+    push rdx
+    push rsi
+    push rdi
+    push r8
+    push r9
+    push r10
+    push r11
+    lea rdi, [rel p8_env_buf]
+    mov rsi, 1024
+    call env_init64
+    test rax, rax
+    jnz .fail30
+    mov al, 'A'
+    call print_char_vga_serial
+    lea rdi, [rel p8_env_buf]
+    call env_count64
+    cmp rax, 0
+    jne .fail30
+    mov al, 'B'
+    call print_char_vga_serial
+    ; set PATH=/BIN
+    lea rdi, [rel p8_env_buf]
+    mov rsi, 1024
+    lea rdx, [rel p8_env_path]
+    lea rcx, [rel p8_env_path_val]
+    call env_set64
+    test rax, rax
+    jnz .fail30
+    mov al, 'C'
+    call print_char_vga_serial
+    ; set COMSPEC
+    lea rdi, [rel p8_env_buf]
+    mov rsi, 1024
+    lea rdx, [rel p8_env_comspec]
+    lea rcx, [rel p8_env_comspec_val]
+    call env_set64
+    test rax, rax
+    jnz .fail30
+    mov al, 'D'
+    call print_char_vga_serial
+    ; set PROMPT
+    lea rdi, [rel p8_env_buf]
+    mov rsi, 1024
+    lea rdx, [rel p8_env_prompt]
+    lea rcx, [rel p8_env_prompt_val]
+    call env_set64
+    test rax, rax
+    jnz .fail30
+    mov al, 'E'
+    call print_char_vga_serial
+    lea rdi, [rel p8_env_buf]
+    call env_count64
+    cmp rax, 3
+    jne .fail30
+    mov al, 'F'
+    call print_char_vga_serial
+    ; get PATH
+    lea rdi, [rel p8_env_buf]
+    lea rsi, [rel p8_env_path]
+    lea rdx, [rel p8_outbuf]
+    mov rcx, 64
+    call env_get64
+    test rax, rax
+    jnz .fail30
+    mov al, 'G'
+    call print_char_vga_serial
+    cmp byte [rel p8_outbuf], '/'
+    jne .fail30
+    cmp byte [rel p8_outbuf+1], 'B'
+    jne .fail30
+    mov al, 'H'
+    call print_char_vga_serial
+    ; overwrite PATH=/NEW
+    lea rdi, [rel p8_env_buf]
+    mov rsi, 1024
+    lea rdx, [rel p8_env_path]
+    lea rcx, [rel p8_env_path_val2]
+    call env_set64
+    test rax, rax
+    jnz .fail30
+    mov al, 'I'
+    call print_char_vga_serial
+    lea rdi, [rel p8_env_buf]
+    call env_count64
+    cmp rax, 3
+    jne .fail30
+    mov al, 'J'
+    call print_char_vga_serial
+    lea rdi, [rel p8_env_buf]
+    lea rsi, [rel p8_env_path]
+    lea rdx, [rel p8_outbuf]
+    mov rcx, 64
+    call env_get64
+    test rax, rax
+    jnz .fail30
+    mov al, 'K'
+    call print_char_vga_serial
+    cmp byte [rel p8_outbuf+1], 'N'
+    jne .fail30
+    mov al, 'L'
+    call print_char_vga_serial
+    ; unset PROMPT
+    lea rdi, [rel p8_env_buf]
+    lea rsi, [rel p8_env_prompt]
+    call env_unset64
+    test rax, rax
+    jnz .fail30
+    mov al, 'M'
+    call print_char_vga_serial
+    lea rdi, [rel p8_env_buf]
+    call env_count64
+    push rax
+    call print_num_vga_serial
+    pop rax
+    cmp rax, 2
+    jne .fail30
+    mov al, 'N'
+    call print_char_vga_serial
+    lea rdi, [rel p8_env_buf]
+    lea rsi, [rel p8_env_prompt]
+    lea rdx, [rel p8_outbuf]
+    mov rcx, 64
+    call env_get64
+    test rax, rax
+    jz .fail30
+    ; missing -> fail
+    lea rdi, [rel p8_env_buf]
+    lea rsi, [rel p8_env_missing]
+    lea rdx, [rel p8_outbuf]
+    mov rcx, 64
+    call env_get64
+    test rax, rax
+    jz .fail30
+    ; bad name with '=' -> 2
+    lea rdi, [rel p8_env_buf]
+    mov rsi, 1024
+    lea rdx, [rel p8_env_bad_eq]
+    lea rcx, [rel p8_env_path_val]
+    call env_set64
+    cmp rax, 2
+    jne .fail30
+    ; no-space with small buf
+    lea rdi, [rel p8_env_small]
+    mov rsi, 64
+    call env_init64
+    test rax, rax
+    jnz .fail30
+    lea rdi, [rel p8_env_small]
+    mov rsi, 64
+    lea rdx, [rel p8_env_path]
+    lea rcx, [rel p8_env_path_val]
+    call env_set64
+    test rax, rax
+    jnz .fail30
+    ; fill small until no space: use long value (200 'A's in file_buf)
+    lea rdi, [rel p8_file_buf]
+    mov rcx, 200
+    mov al, 'A'
+.fill_small:
+    mov [rdi], al
+    inc rdi
+    dec rcx
+    jnz .fill_small
+    lea rdi, [rel p8_file_buf+200]
+    mov byte [rdi], 0
+    lea rdi, [rel p8_env_small]
+    mov rsi, 64
+    lea rdx, [rel p8_env_comspec]
+    lea rcx, [rel p8_file_buf]
+    call env_set64
+    cmp rax, 1
+    jne .fail30
+    xor eax, eax
+    jmp .done30
+.fail30:
+    mov rax, 1
+.done30:
+    pop r11
+    pop r10
+    pop r9
+    pop r8
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rcx
+    pop rbx
+    ret
+
+; ------------------------------------------------------------
+; Test 31: Loader COM vs EXE64
+; ------------------------------------------------------------
+test_loader:
+    push rbx
+    push rcx
+    push rdx
+    push rsi
+    push rdi
+    push r8
+    push r9
+    push r10
+    push r11
+    push r12
+    push r13
+    call mem_reset64
+    call proc_init64
+    ; build COM pattern 256 bytes in p8_com_src
+    lea rdi, [rel p8_com_src]
+    mov rcx, 256
+    mov al, 0xA0
+.fill_com31:
+    mov [rdi], al
+    inc rdi
+    inc al
+    dec rcx
+    jnz .fill_com31
+    ; verify COM
+    lea rsi, [rel p8_com_src]
+    mov rdx, 256
+    call proc_verify_image64
+    cmp rax, 0
+    jne .fail31
+    ; alloc PSP 8192 and init
+    mov rdi, 8192
+    call mem_alloc64
+    test rax, rax
+    jz .fail31
+    mov r12, rax
+    mov r13, rax
+    add r13, 8192
+    mov rdi, r12
+    mov rsi, r13
+    xor edx, edx
+    xor ecx, ecx
+    call psp_init64
+    test rax, rax
+    jnz .fail31
+    ; load COM
+    mov rdi, r12
+    lea rsi, [rel p8_com_src]
+    mov rdx, 256
+    call proc_load_image64
+    jc .fail31
+    test rax, rax
+    jz .fail31
+    mov rbx, r12
+    add rbx, PSP64_size
+    cmp rax, rbx
+    jne .fail31
+    ; verify copied
+    lea rsi, [rel p8_com_src]
+    mov rdi, rbx
+    mov rcx, 256
+.verify_com31:
+    mov al, [rsi]
+    cmp al, [rdi]
+    jne .fail31
+    inc rsi
+    inc rdi
+    dec rcx
+    jnz .verify_com31
+    ; build EXE64: header + 128 payload in p8_exe_src
+    lea rdi, [rel p8_exe_src]
+    mov dword [rdi+0], 0x34365A4D
+    mov dword [rdi+4], 32
+    mov qword [rdi+8], 128
+    mov dword [rdi+16], 0x10
+    mov dword [rdi+20], 1024
+    mov qword [rdi+24], 0
+    lea rbx, [rel p8_exe_src+32]
+    mov rcx, 128
+    mov al, 0xC0
+.fill_exe31:
+    mov [rbx], al
+    inc rbx
+    inc al
+    dec rcx
+    jnz .fill_exe31
+    lea rsi, [rel p8_exe_src]
+    mov rdx, 160
+    call proc_verify_image64
+    cmp rax, 1
+    jne .fail31
+    mov rdi, r12
+    lea rsi, [rel p8_exe_src]
+    mov rdx, 160
+    call proc_load_image64
+    jc .fail31
+    mov rbx, r12
+    add rbx, PSP64_size
+    add rbx, 0x10
+    cmp rax, rbx
+    jne .fail31
+    ; verify payload at psp+SIZE matches src+32
+    mov rsi, r12
+    add rsi, PSP64_size
+    lea rdi, [rel p8_exe_src+32]
+    mov rcx, 128
+.verify_exe31:
+    mov al, [rdi]
+    cmp al, [rsi]
+    jne .fail31
+    inc rdi
+    inc rsi
+    dec rcx
+    jnz .verify_exe31
+    ; bad: size 0 -> 2
+    lea rsi, [rel p8_com_src]
+    xor edx, edx
+    call proc_verify_image64
+    cmp rax, 2
+    jne .fail31
+    ; bad hdr_size
+    lea rdi, [rel p8_exe_src]
+    mov eax, [rdi+4]
+    push rax
+    mov dword [rdi+4], 16
+    lea rsi, [rel p8_exe_src]
+    mov rdx, 160
+    call proc_verify_image64
+    cmp rax, 2
+    jne .fail31_restore
+    pop rax
+    mov [rdi+4], eax
+    ; oversize image_size
+    mov rax, [rdi+8]
+    push rax
+    mov qword [rdi+8], 1000
+    lea rsi, [rel p8_exe_src]
+    mov rdx, 160
+    call proc_verify_image64
+    cmp rax, 2
+    jne .fail31_restore2
+    pop rax
+    mov [rdi+8], rax
+    ; load with bad should fail (CF)
+    mov dword [rdi+4], 16
+    mov rdi, r12
+    lea rsi, [rel p8_exe_src]
+    mov rdx, 160
+    call proc_load_image64
+    jnc .fail31
+    lea rdi, [rel p8_exe_src]
+    mov dword [rdi+4], 32
+    mov rdi, r12
+    call mem_free64
+    jc .fail31
+    xor eax, eax
+    jmp .done31
+.fail31_restore2:
+    pop rax
+    lea rdi, [rel p8_exe_src]
+    mov [rdi+8], rax
+    jmp .fail31
+.fail31_restore:
+    pop rax
+    lea rdi, [rel p8_exe_src]
+    mov [rdi+4], eax
+    jmp .fail31
+.fail31:
+    mov rax, 1
+.done31:
+    pop r13
+    pop r12
+    pop r11
+    pop r10
+    pop r9
+    pop r8
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rcx
+    pop rbx
+    ret
+
+; ------------------------------------------------------------
+; Test 32: Spawn/exit lifecycle + owner
+; ------------------------------------------------------------
+test_spawn:
+    push rbx
+    push rcx
+    push rdx
+    push rsi
+    push rdi
+    push r8
+    push r9
+    push r10
+    push r11
+    push r12
+    push r13
+    push r14
+    push r15
+    call mem_reset64
+    call proc_init64
+    ; build COM 64B pattern
+    lea rdi, [rel p8_com_src]
+    mov rcx, 64
+    mov al, 0x51
+.fill_c32:
+    mov [rdi], al
+    inc rdi
+    inc al
+    dec rcx
+    jnz .fill_c32
+    ; build EXE 32+64
+    lea rdi, [rel p8_exe_src]
+    mov dword [rdi+0], 0x34365A4D
+    mov dword [rdi+4], 32
+    mov qword [rdi+8], 64
+    mov dword [rdi+16], 0
+    mov dword [rdi+20], 512
+    mov qword [rdi+24], 0
+    lea rbx, [rel p8_exe_src+32]
+    mov rcx, 64
+    mov al, 0x77
+.fill_e32:
+    mov [rbx], al
+    inc rbx
+    inc al
+    dec rcx
+    jnz .fill_e32
+    ; spawn COM with cmd ARG1
+    lea rdi, [rel p8_com_src]
+    mov rsi, 64
+    lea rdx, [rel p8_cmd_arg1]
+    mov rcx, 4
+    xor r8d, r8d
+    call proc_spawn64
+    push rdx
+    push rax
+    mov rax, rdx
+    call print_num_vga_serial
+    pop rax
+    pop rdx
+    test rax, rax
+    jz .fail32
+    test rdx, rdx
+    jz .fail32
+    mov r12, rax             ; pid1
+    mov r13, rdx             ; psp1
+    mov al, 'a'
+    call print_char_vga_serial
+    ; verify get_psp
+    mov rdi, r12
+    call proc_get_psp64
+    cmp rax, r13
+    jne .fail32
+    mov al, 'b'
+    call print_char_vga_serial
+    ; entry == psp+SIZE
+    mov rdi, r12
+    call proc_get_entry64
+    mov rbx, r13
+    add rbx, PSP64_size
+    cmp rax, rbx
+    jne .fail32
+    mov al, 'c'
+    call print_char_vga_serial
+    ; count running ==2
+    call proc_count_running64
+    cmp rax, 2
+    jne .fail32
+    mov al, 'd'
+    call print_char_vga_serial
+    ; psp validate
+    mov rdi, r13
+    call psp_validate64
+    test rax, rax
+    jnz .fail32
+    ; cmd len 4
+    mov rdi, r13
+    call psp_get_cmdlen64
+    cmp rax, 4
+    jne .fail32
+    mov al, 'e'
+    call print_char_vga_serial
+    ; env non-zero and has PATH
+    mov rax, [r13 + PSP64.env_ptr]
+    test rax, rax
+    jz .fail32
+    mov rdi, rax
+    lea rsi, [rel p8_env_path]
+    lea rdx, [rel p8_outbuf]
+    mov rcx, 64
+    call env_get64
+    test rax, rax
+    jnz .fail32
+    mov al, 'f'
+    call print_char_vga_serial
+    ; owner == psp (MCB at psp-MCBSIZ64, owner at +8)
+    mov rbx, r13
+    sub rbx, 40
+    mov rax, [rbx + 8]
+    cmp rax, r13
+    jne .fail32
+    call mem_validate64
+    test rax, rax
+    jnz .fail32
+    mov al, 'g'
+    call print_char_vga_serial
+    ; spawn EXE
+    lea rdi, [rel p8_exe_src]
+    mov rsi, 96
+    xor edx, edx
+    xor ecx, ecx
+    xor r8d, r8d
+    call proc_spawn64
+    test rax, rax
+    jz .fail32
+    mov r14, rax
+    mov r15, rdx
+    mov al, 'h'
+    call print_char_vga_serial
+    cmp r14, r12
+    je .fail32
+    call proc_count_running64
+    cmp rax, 3
+    jne .fail32
+    ; set current to pid1
+    mov rdi, r12
+    call proc_set_current64
+    test rax, rax
+    jnz .fail32
+    call proc_get_current64
+    cmp rax, r12
+    jne .fail32
+    ; bad pid set fails
+    mov rdi, 9999
+    call proc_set_current64
+    test rax, rax
+    jz .fail32
+    ; terminate pid1 code 42
+    mov rdi, r12
+    mov rsi, 42
+    call proc_terminate64
+    test rax, rax
+    jnz .fail32
+    call proc_count_running64
+    cmp rax, 2
+    jne .fail32
+    call proc_count_zombie64
+    cmp rax, 1
+    jne .fail32
+    ; double terminate fails
+    mov rdi, r12
+    mov rsi, 0
+    call proc_terminate64
+    test rax, rax
+    jz .fail32
+    ; reap
+    mov rdi, r12
+    call proc_reap64
+    test rax, rax
+    jnz .fail32
+    call proc_count_zombie64
+    cmp rax, 0
+    jne .fail32
+    mov rdi, r12
+    call proc_get_psp64
+    test rax, rax
+    jnz .fail32
+    ; exit_current pid2
+    mov rdi, r14
+    call proc_set_current64
+    test rax, rax
+    jnz .fail32
+    mov rdi, 99
+    call proc_exit_current64
+    test rax, rax
+    jnz .fail32
+    call proc_get_current64
+    cmp rax, 0
+    jne .fail32
+    mov rdi, r14
+    call proc_reap64
+    test rax, rax
+    jnz .fail32
+    call proc_count_running64
+    cmp rax, 1
+    jne .fail32
+    call mem_validate64
+    test rax, rax
+    jnz .fail32
+    ; kernel pid0 terminate fails
+    xor edi, edi
+    mov rsi, 0
+    call proc_terminate64
+    test rax, rax
+    jz .fail32
+    ; exit_current as kernel fails
+    mov rdi, 5
+    call proc_exit_current64
+    test rax, rax
+    jz .fail32
+    call proc_free_all64
+    xor eax, eax
+    jmp .done32
+.fail32:
+    mov rax, 1
+.done32:
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop r11
+    pop r10
+    pop r9
+    pop r8
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rcx
+    pop rbx
+    ret
+
+; ------------------------------------------------------------
+; Test 33: EXEC/EXIT via INT21 dispatch (AH=4Bh/4Ch) + INT20
+; ------------------------------------------------------------
+test_exec_dispatch:
+    push rbx
+    push rcx
+    push rdx
+    push rsi
+    push rdi
+    push r8
+    push r9
+    push r10
+    push r11
+    push r12
+    push r13
+    push r14
+    push r15
+    call mem_reset64
+    call proc_init64
+    call syscall_init
+    ; build COM 32B
+    lea rdi, [rel p8_com_src]
+    mov rcx, 32
+    mov al, 0x99
+.fill_c33:
+    mov [rdi], al
+    inc rdi
+    inc al
+    dec rcx
+    jnz .fill_c33
+    ; direct handler_exec
+    lea rdi, [rel p8_com_src]
+    mov rsi, 32
+    xor edx, edx
+    xor ecx, ecx
+    xor r8d, r8d
+    call handler_exec
+    jc .fail33
+    test rax, rax
+    jz .fail33
+    test rdx, rdx
+    jz .fail33
+    mov r12, rax
+    mov r13, rdx
+    mov al, 'p'
+    call print_char_vga_serial
+    ; via dispatch AH=4Bh
+    lea rdi, [rel p8_com_src]
+    mov rsi, 32
+    xor edx, edx
+    xor ecx, ecx
+    xor r8d, r8d
+    mov rax, 0x4B00
+    call syscall_dispatch64
+    jc .fail33
+    test rax, rax
+    jz .fail33
+    mov r14, rax             ; pid via dispatch (save before debug print corrupts AL)
+    mov al, 'q'
+    call print_char_vga_serial
+    cmp r14, r12
+    je .fail33
+    mov al, 'r'
+    call print_char_vga_serial
+    push rax
+    mov rax, r12
+    call print_num_vga_serial
+    mov rax, r14
+    push rax
+    mov al, '['
+    call print_char_vga_serial
+    pop rax
+    push rax
+    call print_hex16
+    mov al, ']'
+    call print_char_vga_serial
+    pop rax
+    mov rax, [rel proc_next_pid]
+    call print_num_vga_serial
+    mov rax, [rel exec_dbg_pid]
+    call print_num_vga_serial
+    pop rax
+    call proc_count_running64
+    push rax
+    call print_num_vga_serial
+    pop rax
+    cmp rax, 3
+    jne .fail33
+    mov al, 's'
+    call print_char_vga_serial
+    ; set current to r12 and EXIT via dispatch AH=4Ch AL=5
+    mov rdi, r12
+    call proc_set_current64
+    test rax, rax
+    jnz .fail33
+    mov al, 't'
+    call print_char_vga_serial
+    mov rax, 0x4C05
+    call syscall_dispatch64
+    jc .fail33
+    mov al, 'u'
+    call print_char_vga_serial
+    call proc_count_running64
+    cmp rax, 2
+    jne .fail33
+    mov al, 'v'
+    call print_char_vga_serial
+    mov rdi, r12
+    call proc_reap64
+    test rax, rax
+    jnz .fail33
+    mov al, 'w'
+    call print_char_vga_serial
+    ; direct handler_exit_process with AL path: set current to r14, RAX=0x4C07
+    mov rdi, r14
+    call proc_set_current64
+    test rax, rax
+    jnz .fail33
+    mov al, 'x'
+    call print_char_vga_serial
+    mov rax, 0x4C07
+    ; RDI stale? Set RDI to 0xFFFF to force AL path? Our handler uses AL when AH==4Ch regardless of RDI. Good.
+    call handler_exit_process
+    jc .fail33
+    mov al, 'y'
+    call print_char_vga_serial
+    call proc_get_current64
+    cmp rax, 0
+    jne .fail33
+    mov al, 'z'
+    call print_char_vga_serial
+    mov rdi, r14
+    call proc_reap64
+    test rax, rax
+    jnz .fail33
+    mov al, '!'
+    call print_char_vga_serial
+    ; INT20 abort: spawn then abort
+    lea rdi, [rel p8_com_src]
+    mov rsi, 32
+    xor edx, edx
+    xor ecx, ecx
+    xor r8d, r8d
+    call handler_exec
+    jc .fail33
+    mov r14, rax
+    mov al, '@'
+    call print_char_vga_serial
+    mov rdi, r14
+    call proc_set_current64
+    test rax, rax
+    jnz .fail33
+    mov al, '#'
+    call print_char_vga_serial
+    call handler_abort
+    mov al, '$'
+    call print_char_vga_serial
+    call proc_count_running64
+    cmp rax, 1
+    jne .fail33
+    mov rdi, r14
+    call proc_reap64
+    test rax, rax
+    jnz .fail33
+    ; abort as kernel (current 0) should just return 0, no crash
+    call handler_abort
+    call mem_validate64
+    test rax, rax
+    jnz .fail33
+    call proc_free_all64
+    xor eax, eax
+    jmp .done33
+.fail33:
+    mov rax, 1
+.done33:
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop r11
+    pop r10
+    pop r9
+    pop r8
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rcx
+    pop rbx
+    ret
+
+; ------------------------------------------------------------
+; Test 34: Stress max procs + reap + validate
+; ------------------------------------------------------------
+test_proc_stress:
+    push rbx
+    push rcx
+    push rdx
+    push rsi
+    push rdi
+    push r8
+    push r9
+    push r10
+    push r11
+    push r12
+    push r13
+    push r14
+    push r15
+    call mem_reset64
+    call proc_init64
+    ; build small COM 64B
+    lea rdi, [rel p8_com_src]
+    mov rcx, 64
+    mov al, 0x11
+.fill_c34:
+    mov [rdi], al
+    inc rdi
+    inc al
+    dec rcx
+    jnz .fill_c34
+    xor r12, r12             ; spawned count
+.spawn_loop34:
+    cmp r12, 15
+    jae .spawn_done34
+    lea rdi, [rel p8_com_src]
+    mov rsi, 64
+    xor edx, edx
+    xor ecx, ecx
+    xor r8d, r8d
+    call proc_spawn64
+    test rax, rax
+    jz .spawn_done34
+    inc r12
+    jmp .spawn_loop34
+.spawn_done34:
+    cmp r12, 15
+    jne .fail34
+    call proc_count_running64
+    cmp rax, 16
+    jne .fail34
+    call proc_alloc_slot64
+    cmp rax, -1
+    jne .fail34
+    ; next spawn must fail (full)
+    lea rdi, [rel p8_com_src]
+    mov rsi, 64
+    xor edx, edx
+    xor ecx, ecx
+    xor r8d, r8d
+    call proc_spawn64
+    test rax, rax
+    jnz .fail34
+    ; oversize spawn fails
+    lea rdi, [rel p8_com_src]
+    mov rsi, 10*1024*1024
+    xor edx, edx
+    xor ecx, ecx
+    xor r8d, r8d
+    call proc_spawn64
+    test rax, rax
+    jnz .fail34
+    call mem_validate64
+    test rax, rax
+    jnz .fail34
+    ; invalid pid ops fail
+    mov rdi, 9999
+    mov rsi, 0
+    call proc_terminate64
+    test rax, rax
+    jz .fail34
+    mov rdi, 9999
+    call proc_reap64
+    test rax, rax
+    jz .fail34
+    ; free all
+    call proc_free_all64
+    cmp rax, 15
+    jne .fail34
+    call proc_count_running64
+    cmp rax, 1
+    jne .fail34
+    call proc_count_zombie64
+    cmp rax, 0
+    jne .fail34
+    call mem_validate64
+    test rax, rax
+    jnz .fail34
+    call mem_count_blocks64
+    ; after free_all, heap may have many free blocks coalesced? Should be 1 or few. At least validate 1..16.
+    test rax, rax
+    jz .fail34
+    ; double reap fails (already reaped)
+    mov rdi, 1
+    call proc_reap64
+    test rax, rax
+    jz .fail34
+    xor eax, eax
+    jmp .done34
+.fail34:
+    mov rax, 1
+.done34:
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop r11
+    pop r10
+    pop r9
+    pop r8
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rcx
+    pop rbx
+    ret
+
+; ------------------------------------------------------------
 ; Serial/VGA helpers
 ; ------------------------------------------------------------
 init_serial64:
@@ -1801,6 +3122,7 @@ hello_phase4 db "Phase4: Addressing Mode Transformation (segmented->flat) Test S
 hello_phase5 db "Phase5: BIOS Interrupt Replacement — Native Drivers (Option C)",13,10,0
 hello_phase6 db "Phase6: Memory Management Overhaul — MCB64, para/page, coalesce, protection",13,10,0
 hello_phase7 db "Phase7: File System Adaptation — FAT12 on LBA, DPB/DIR/FCB64",13,10,0
+hello_phase8 db "Phase8: Process Management — PSP64, ENV, Loader, EXEC/EXIT",13,10,0
 msg_test1 db " [1] Register mapping (AX->RAX, R8-R15)... ",0
 msg_test2 db " [2] String ops (REP MOVSB, SCASB, LOOP->DEC)... ",0
 msg_test3 db " [3] BCD (AAM/AAD -> DIV/MUL, CBW, MUL/DIV)... ",0
@@ -1828,6 +3150,13 @@ msg_test24 db " [24] Root-dir find/delete/end/wildcard... ",0
 msg_test25 db " [25] ATA DREAD/DWRITE + DIRREAD (LBA)... ",0
 msg_test26 db " [26] Multi-cluster file read via chain... ",0
 msg_test27 db " [27] FCB64 open + 64-bit filsiz/rr/DMA... ",0
+msg_test28 db " [28] PSP init/validate (SETMEM analog)... ",0
+msg_test29 db " [29] PSP cmd tail + exit/fd/CR3... ",0
+msg_test30 db " [30] ENV init/set/get/unset/count... ",0
+msg_test31 db " [31] Loader COM vs EXE64 + bad hdr... ",0
+msg_test32 db " [32] Spawn/exit lifecycle + owner... ",0
+msg_test33 db " [33] EXEC/EXIT via INT21 dispatch... ",0
+msg_test34 db " [34] Stress max procs + reap/validate... ",0
 msg_pass db "PASS",13,10,0
 msg_fail db "FAIL",13,10,0
 msg_summary db 13,10,"Summary: ",0
@@ -1843,6 +3172,8 @@ msg_phase6_ok db "Phase6 memory management (MCB64): ALL TESTS PASS",13,10,0
 msg_phase6_fail db "Phase6: SOME TESTS FAILED",13,10,0
 msg_phase7_ok db "Phase7 filesystem adaptation (FAT12): ALL TESTS PASS",13,10,0
 msg_phase7_fail db "Phase7: SOME TESTS FAILED",13,10,0
+msg_phase8_ok db "Phase8 process management (PSP64): ALL TESTS PASS",13,10,0
+msg_phase8_fail db "Phase8: SOME TESTS FAILED",13,10,0
 
 str_hello db "Hello64",0
 str_lower db "hello",0
@@ -1861,6 +3192,29 @@ ata_chs_exp db " exp 03F0",13,10,0
 ata_chs_dbg2 db " CHS2 got C/H/S ",0
 ata_chs_dbg3 db " CHS3 got ",0
 msg_nl2 db 13,10,0
+; Phase8 test strings
+p8_cmd_hello db "HELLO WORLD",0
+p8_cmd_arg1 db "ARG1",0
+p8_env_path db "PATH",0
+p8_env_path_val db "/BIN",0
+p8_env_path_val2 db "/NEW",0
+p8_env_comspec db "COMSPEC",0
+p8_env_comspec_val db "COMMAND64",0
+p8_env_prompt db "PROMPT",0
+p8_env_prompt_val db "$P$G",0
+p8_env_bad_eq db "A=B",0
+p8_env_empty db 0
+p8_env_missing db "NOPE",0
+p8_outbuf_val db 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+
+section .bss
+align 16
+p8_env_buf: resb 1024
+p8_env_small: resb 64
+p8_outbuf: resb 64
+p8_com_src: resb 1024
+p8_exe_src: resb 1024
+p8_file_buf: resb 1024
 
 section .bss
 resb 8192

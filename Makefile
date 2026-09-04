@@ -1,5 +1,5 @@
-# MS-DOS64 – 64-bit BIOS boot build (Phase 7 - filesystem adaptation)
-# Phase 7: FAT12 on LBA (BPB->DPB, cluster->LBA, FAT chain, dir, FCB64) + all prior phases
+# MS-DOS64 – 64-bit BIOS boot build (Phase 8 - process management)
+# Phase 8: PSP64/env/loader/spawn/exit (AH=4Bh/4Ch, INT20h) + all prior phases
 # Requires: nasm >=2.15, ld (binutils), qemu or bochs
 BUILD := build
 SRC_BOOT := src/boot
