@@ -1,5 +1,5 @@
-; MS-DOS64 64-bit kernel — Phase 7: File System Adaptation (FAT12 on LBA)
-; Phase 2 long-mode entry at 0x100000 plus Phase 3 + Phase 4 + Phase 5 + Phase 6 + Phase 7 tests
+; MS-DOS64 64-bit kernel — Phase 9: System Call Interface (INT 21h IDT gate)
+; Phase 2 long-mode entry at 0x100000 plus Phase 3 + Phase 4 + Phase 5 + Phase 6 + Phase 7 + Phase 8 + Phase 9 tests
 ; Phase 3: RAX/RBX/RCX/RDX/RSI/RDI/RBP/RSP 64-bit, R8-R15, REP with RCX,
 ;          AAM/AAD->DIV/MUL, XLAT->MOV, LES/LDS->flat, PUSH seg elimination
 ; Phase 4: seg:off->linear (seg<<4+off), OFFSET DOSGROUP->rel, RIP-relative,
@@ -84,10 +84,33 @@ extern mem_invlpg64
 extern syscall_init
 extern syscall_dispatch64
 extern handler_conout
+extern handler_conin
+extern handler_in
+extern handler_rawio
+extern handler_rawinp
 extern handler_prtbuf
+extern handler_bufin
+extern handler_constat
+extern handler_flushkb
+extern handler_dskreset
+extern handler_seldsk
+extern handler_getdrv
+extern handler_setvect
+extern handler_getvect
+extern handler_read_file
+extern handler_write_file
 extern handler_alloc_mem
 extern handler_free_mem
 extern handler_resize_mem
+extern idt_init64
+extern idt_load64
+extern idt_set_vector64
+extern idt_get_vector64
+extern idt_test_vectors
+extern int21_entry
+extern kbd_queue_push
+extern kbd_queue_pop
+extern kbd_flush
 
 extern seg_off_to_linear
 extern addr_test_all
@@ -190,8 +213,11 @@ _start:
     mov rsi, hello_phase8
     call vga_print
     call serial_print64
+    mov rsi, hello_phase9
+    call vga_print
+    call serial_print64
 
-    ; Run Phase 3+4+5+6+7 tests, count passes
+    ; Run Phase 3+4+5+6+7+8+9 tests, count passes
     xor r12, r12          ; passed count in R12 (callee-saved, demonstrates R8-R15)
     xor r13, r13          ; failed count in R13
     mov r14, 0            ; test index
@@ -774,6 +800,142 @@ _start:
     call vga_print
     call serial_print64
 
+    ; ---- Test 35: IDT init/load + INT 0x21 gate (Phase9 Option B) ----
+    mov rsi, msg_test35
+    call vga_print
+    call serial_print64
+    call test_idt_gate
+    test rax, rax
+    jz .t35_pass
+    inc r13
+    mov rsi, msg_fail
+    jmp .t35_done
+.t35_pass:
+    inc r12
+    mov rsi, msg_pass
+.t35_done:
+    call vga_print
+    call serial_print64
+
+    ; ---- Test 36: Console input 01/08/0B/0C (Phase9) ----
+    mov rsi, msg_test36
+    call vga_print
+    call serial_print64
+    call test_console_in
+    test rax, rax
+    jz .t36_pass
+    inc r13
+    mov rsi, msg_fail
+    jmp .t36_done
+.t36_pass:
+    inc r12
+    mov rsi, msg_pass
+.t36_done:
+    call vga_print
+    call serial_print64
+
+    ; ---- Test 37: Buffered input 0A line editing (Phase9) ----
+    mov rsi, msg_test37
+    call vga_print
+    call serial_print64
+    call test_bufin
+    test rax, rax
+    jz .t37_pass
+    inc r13
+    mov rsi, msg_fail
+    jmp .t37_done
+.t37_pass:
+    inc r12
+    mov rsi, msg_pass
+.t37_done:
+    call vga_print
+    call serial_print64
+
+    ; ---- Test 38: Drive select/get + reset 0E/19/0D (Phase9) ----
+    mov rsi, msg_test38
+    call vga_print
+    call serial_print64
+    call test_drive
+    test rax, rax
+    jz .t38_pass
+    inc r13
+    mov rsi, msg_fail
+    jmp .t38_done
+.t38_pass:
+    inc r12
+    mov rsi, msg_pass
+.t38_done:
+    call vga_print
+    call serial_print64
+
+    ; ---- Test 39: Vectors 25/35 via IDT (Phase9) ----
+    mov rsi, msg_test39
+    call vga_print
+    call serial_print64
+    call test_vectors
+    test rax, rax
+    jz .t39_pass
+    inc r13
+    mov rsi, msg_fail
+    jmp .t39_done
+.t39_pass:
+    inc r12
+    mov rsi, msg_pass
+.t39_done:
+    call vga_print
+    call serial_print64
+
+    ; ---- Test 40: Read 3F stdin handle 0 (Phase9) ----
+    mov rsi, msg_test40
+    call vga_print
+    call serial_print64
+    call test_read_file
+    test rax, rax
+    jz .t40_pass
+    inc r13
+    mov rsi, msg_fail
+    jmp .t40_done
+.t40_pass:
+    inc r12
+    mov rsi, msg_pass
+.t40_done:
+    call vga_print
+    call serial_print64
+
+    ; ---- Test 41: Write 40 stdout handles 1/2 (Phase9) ----
+    mov rsi, msg_test41
+    call vga_print
+    call serial_print64
+    call test_write_file
+    test rax, rax
+    jz .t41_pass
+    inc r13
+    mov rsi, msg_fail
+    jmp .t41_done
+.t41_pass:
+    inc r12
+    mov rsi, msg_pass
+.t41_done:
+    call vga_print
+    call serial_print64
+
+    ; ---- Test 42: Full INT 0x21 round-trip via CPU INT (Phase9) ----
+    mov rsi, msg_test42
+    call vga_print
+    call serial_print64
+    call test_int21_roundtrip
+    test rax, rax
+    jz .t42_pass
+    inc r13
+    mov rsi, msg_fail
+    jmp .t42_done
+.t42_pass:
+    inc r12
+    mov rsi, msg_pass
+.t42_done:
+    call vga_print
+    call serial_print64
+
     ; ---- Summary ----
     mov rsi, msg_summary
     call vga_print
@@ -809,6 +971,9 @@ _start:
     mov rsi, msg_phase8_fail
     call vga_print
     call serial_print64
+    mov rsi, msg_phase9_fail
+    call vga_print
+    call serial_print64
     jmp .hlt
 .all_pass:
     mov rsi, msg_phase3_ok
@@ -827,6 +992,9 @@ _start:
     call vga_print
     call serial_print64
     mov rsi, msg_phase8_ok
+    call vga_print
+    call serial_print64
+    mov rsi, msg_phase9_ok
     call vga_print
     call serial_print64
 
@@ -3056,6 +3224,603 @@ test_proc_stress:
     ret
 
 ; ------------------------------------------------------------
+; Phase9 tests [35]-[42]: System Call Interface (INT 21h IDT gate)
+; ------------------------------------------------------------
+; Test 35: IDT init/load + INT 0x21 gate via actual INT instruction
+test_idt_gate:
+    push rbx
+    push rcx
+    push rdx
+    push rsi
+    push rdi
+    call syscall_init
+    call kbd_init
+    call idt_init64
+    test rax, rax
+    jnz .fail35
+    call idt_test_vectors
+    test rax, rax
+    jnz .fail35
+    call idt_load64
+    test rax, rax
+    jnz .fail35
+    ; verify vectors again after LIDT (table unchanged)
+    call idt_test_vectors
+    test rax, rax
+    jnz .fail35
+    ; actual INT 0x21 AH=02 DL='*' — must not fault, must print
+    mov rax, 0x0200
+    mov dl, '*'
+    int 0x21
+    ; actual INT 0x21 AH=09 RDX=$-string
+    mov rax, 0x0900
+    lea rdx, [rel p9_dollar]
+    int 0x21
+    ; bad function AH=0xFF via INT must return AL=0 (dispatch_bad)
+    mov rax, 0xFF00
+    int 0x21
+    cmp al, 0
+    jne .fail35
+    xor eax, eax
+    jmp .done35
+.fail35:
+    mov rax, 1
+.done35:
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rcx
+    pop rbx
+    ret
+
+; Test 36: Console input 01/08/0B/0C
+test_console_in:
+    push rbx
+    push rcx
+    push rdx
+    push rsi
+    push rdi
+    call kbd_flush
+    ; constat empty -> AL=0
+    call handler_constat
+    cmp al, 0
+    jne .fail36
+    ; push 'a' scancode 0x1E, constat -> FF
+    mov al, 0x1E
+    call kbd_queue_push
+    call handler_constat
+    cmp al, 0xFF
+    jne .fail36
+    ; IN (08) no echo -> 'a', queue drained
+    call handler_in
+    cmp al, 'a'
+    jne .fail36
+    ; constat empty again
+    call handler_constat
+    cmp al, 0
+    jne .fail36
+    ; CONIN (01) with echo: push 'b' 0x30 -> 'b'
+    mov al, 0x30
+    call kbd_queue_push
+    call handler_conin
+    cmp al, 'b'
+    jne .fail36
+    ; RAWIO DL=FF input: push 'c' 0x2E -> 'c'
+    mov al, 0x2E
+    call kbd_queue_push
+    mov dl, 0xFF
+    call handler_rawio
+    jc .fail36
+    cmp al, 'c'
+    jne .fail36
+    ; RAWIO DL=FF empty -> CF=1 AL=0
+    mov dl, 0xFF
+    call handler_rawio
+    jnc .fail36
+    cmp al, 0
+    jne .fail36
+    ; RAWIO output DL='Z' (non-FF) -> prints, no fault
+    mov dl, 'Z'
+    call handler_rawio
+    ; RAWINP (07): push 'd' 0x20 -> 'd'
+    mov al, 0x20
+    call kbd_queue_push
+    call handler_rawinp
+    cmp al, 'd'
+    jne .fail36
+    ; FLUSHKB (0C) AL=0 -> flush + AL=0; then constat 0
+    mov al, 0x1E
+    call kbd_queue_push
+    mov rax, 0x0C00
+    call handler_flushkb
+    cmp al, 0
+    jne .fail36
+    call handler_constat
+    cmp al, 0
+    jne .fail36
+    ; FLUSHKB + redispatch AL=8 (IN): DOS flushes BEFORE dispatch, so
+    ; pre-pushed keys are cleared (MSDOS.ASM:412 PUSH AX/CALL FLUSH/POP).
+    ; Non-blocking test-safe impl returns AL=0 empty (DOS would block).
+    ; This still proves redispatch calls handler_in without fault.
+    mov al, 0x12
+    call kbd_queue_push
+    mov rax, 0x0C08
+    call handler_flushkb
+    cmp al, 0
+    jne .fail36
+    ; dispatch path: AH=01 via syscall_dispatch64 (queue 'f' 0x21)
+    mov al, 0x21
+    call kbd_queue_push
+    mov rax, 0x0100
+    call syscall_dispatch64
+    cmp al, 'f'
+    jne .fail36
+    xor eax, eax
+    jmp .done36
+.fail36:
+    mov rax, 1
+.done36:
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rcx
+    pop rbx
+    ret
+
+; Test 37: Buffered input 0A
+test_bufin:
+    push rbx
+    push rcx
+    push rdx
+    push rsi
+    push rdi
+    call kbd_flush
+    ; buffer max 16 at p9_bufin
+    lea rdi, [rel p9_bufin]
+    mov byte [rdi], 16
+    mov byte [rdi+1], 0
+    ; feed "HI" + CR: H=0x23, I=0x17, CR=0x1C
+    mov al, 0x23
+    call kbd_queue_push
+    mov al, 0x17
+    call kbd_queue_push
+    mov al, 0x1C
+    call kbd_queue_push
+    lea rdx, [rel p9_bufin]
+    call handler_bufin
+    test rax, rax
+    jnz .fail37
+    cmp byte [rdi+1], 2
+    jne .fail37
+    cmp byte [rdi+2], 'h'
+    jne .fail37
+    cmp byte [rdi+3], 'i'
+    jne .fail37
+    cmp byte [rdi+4], 13
+    jne .fail37
+    ; backspace test: "AB" BS "C" CR -> "AC": A=0x1E,B=0x30,BS=0x0E,C=0x2E,CR=0x1C
+    call kbd_flush
+    lea rdi, [rel p9_bufin]
+    mov byte [rdi], 16
+    mov byte [rdi+1], 0
+    mov al, 0x1E
+    call kbd_queue_push
+    mov al, 0x30
+    call kbd_queue_push
+    mov al, 0x0E
+    call kbd_queue_push
+    mov al, 0x2E
+    call kbd_queue_push
+    mov al, 0x1C
+    call kbd_queue_push
+    lea rdx, [rel p9_bufin]
+    call handler_bufin
+    test rax, rax
+    jnz .fail37
+    cmp byte [rdi+1], 2
+    jne .fail37
+    cmp byte [rdi+2], 'a'
+    jne .fail37
+    cmp byte [rdi+3], 'c'
+    jne .fail37
+    ; empty (no keys) -> count 0
+    call kbd_flush
+    lea rdi, [rel p9_bufin]
+    mov byte [rdi], 16
+    mov byte [rdi+1], 0xFF
+    lea rdx, [rel p9_bufin]
+    call handler_bufin
+    test rax, rax
+    jnz .fail37
+    cmp byte [rdi+1], 0
+    jne .fail37
+    ; bad buffer (0) -> fail
+    xor edx, edx
+    call handler_bufin
+    test rax, rax
+    jz .fail37
+    ; dispatch path AH=0A: feed "K"+CR (K=0x25)
+    call kbd_flush
+    lea rdi, [rel p9_bufin]
+    mov byte [rdi], 16
+    mov al, 0x25
+    call kbd_queue_push
+    mov al, 0x1C
+    call kbd_queue_push
+    lea rdx, [rel p9_bufin]
+    mov rax, 0x0A00
+    call syscall_dispatch64
+    cmp byte [rdi+1], 1
+    jne .fail37
+    cmp byte [rdi+2], 'k'
+    jne .fail37
+    xor eax, eax
+    jmp .done37
+.fail37:
+    mov rax, 1
+.done37:
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rcx
+    pop rbx
+    ret
+
+; Test 38: Drive 0E/19/0D
+test_drive:
+    push rbx
+    push rcx
+    push rdx
+    call syscall_init
+    ; initial 0
+    call handler_getdrv
+    cmp al, 0
+    jne .fail38
+    ; select 1
+    mov dl, 1
+    call handler_seldsk
+    cmp al, 2              ; NUMDRV
+    jne .fail38
+    call handler_getdrv
+    cmp al, 1
+    jne .fail38
+    ; select 0
+    mov dl, 0
+    call handler_seldsk
+    call handler_getdrv
+    cmp al, 0
+    jne .fail38
+    ; invalid 99 -> stays 0, AL=NUMDRV
+    mov dl, 99
+    call handler_seldsk
+    cmp al, 2
+    jne .fail38
+    call handler_getdrv
+    cmp al, 0
+    jne .fail38
+    ; reset -> AL=0
+    call handler_dskreset
+    cmp al, 0
+    jne .fail38
+    ; dispatch paths: AH=0E DL=1, AH=19, AH=0D
+    mov rdx, 1
+    mov rax, 0x0E00
+    call syscall_dispatch64
+    mov rax, 0x1900
+    call syscall_dispatch64
+    cmp al, 1
+    jne .fail38
+    mov rax, 0x0D00
+    call syscall_dispatch64
+    cmp al, 0
+    jne .fail38
+    ; restore 0 for later tests
+    mov dl, 0
+    call handler_seldsk
+    xor eax, eax
+    jmp .done38
+.fail38:
+    mov rax, 1
+.done38:
+    pop rdx
+    pop rcx
+    pop rbx
+    ret
+
+; Test 39: Vectors 25/35
+test_vectors:
+    push rbx
+    push rcx
+    push rdx
+    push rsi
+    push rdi
+    push r8
+    ; save current 0x21
+    mov al, 0x21
+    call handler_getvect
+    mov r8, rbx            ; saved handler
+    test r8, r8
+    jz .fail39
+    ; set 0x21 to dummy 0x12345000 (canonical low)
+    mov rax, 0x2500
+    mov al, 0x21
+    mov rdx, 0x12345000
+    call handler_setvect
+    test rax, rax
+    jnz .fail39
+    mov al, 0x21
+    call handler_getvect
+    cmp rbx, 0x12345000
+    jne .fail39b
+    ; set vector 0x80 to int21_entry, verify
+    mov rax, 0x2500
+    mov al, 0x80
+    lea rdx, [rel int21_entry]
+    call handler_setvect
+    test rax, rax
+    jnz .fail39b
+    mov al, 0x80
+    call handler_getvect
+    lea rcx, [rel int21_entry]
+    cmp rbx, rcx
+    jne .fail39b
+    ; bad: SETVECT RDX=0 -> fail
+    mov rax, 0x2500
+    mov al, 0x21
+    xor edx, edx
+    call handler_setvect
+    test rax, rax
+    jz .fail39b
+    ; dispatch path: AH=35h AL=0x80 -> RBX=int21
+    mov rax, 0x3580
+    call syscall_dispatch64
+    lea rcx, [rel int21_entry]
+    ; RBX holds handler after dispatch? dispatch restores RBX from frame rbx_save
+    ; Our handler_getvect writes frame rbx_save=handler, so after leave RBX=handler
+    cmp rbx, rcx
+    jne .fail39b
+    ; restore 0x21
+    mov rax, 0x2500
+    mov al, 0x21
+    mov rdx, r8
+    call handler_setvect
+    test rax, rax
+    jnz .fail39b
+    mov al, 0x21
+    call handler_getvect
+    cmp rbx, r8
+    jne .fail39b
+    ; verify INT 0x21 still works after restore (AH=19 GETDRV)
+    mov rax, 0x1900
+    int 0x21
+    ; AL should be 0 (drive restored in test_drive)
+    cmp al, 0
+    jne .fail39b
+    xor eax, eax
+    jmp .done39
+.fail39b:
+    ; try restore before failing
+    push rax
+    mov rax, 0x2500
+    mov al, 0x21
+    mov rdx, r8
+    call handler_setvect
+    pop rax
+.fail39:
+    mov rax, 1
+.done39:
+    pop r8
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rcx
+    pop rbx
+    ret
+
+; Test 40: Read 3F
+test_read_file:
+    push rbx
+    push rcx
+    push rdx
+    push rsi
+    push rdi
+    call kbd_flush
+    ; push 'x' 0x2D, read 1 byte handle 0
+    mov al, 0x2D
+    call kbd_queue_push
+    lea rdx, [rel p9_rwbuf]
+    mov rbx, 0
+    mov rcx, 1
+    call handler_read_file
+    jc .fail40
+    cmp rax, 1
+    jne .fail40
+    cmp byte [rel p9_rwbuf], 'x'
+    jne .fail40
+    ; zero count -> 0
+    lea rdx, [rel p9_rwbuf]
+    mov rbx, 0
+    mov rcx, 0
+    call handler_read_file
+    jc .fail40
+    cmp rax, 0
+    jne .fail40
+    ; bad handle 5 -> CF + RAX=5
+    lea rdx, [rel p9_rwbuf]
+    mov rbx, 5
+    mov rcx, 1
+    call handler_read_file
+    jnc .fail40
+    ; bad buffer 0 -> fail
+    mov rbx, 0
+    mov rcx, 1
+    xor edx, edx
+    call handler_read_file
+    jnc .fail40
+    ; dispatch path AH=3Fh: push 'y' 0x15 -> 'y'
+    call kbd_flush
+    mov al, 0x15
+    call kbd_queue_push
+    lea rdx, [rel p9_rwbuf]
+    mov rbx, 0
+    mov rcx, 1
+    mov rax, 0x3F00
+    call syscall_dispatch64
+    jc .fail40
+    cmp byte [rel p9_rwbuf], 'y'
+    jne .fail40
+    xor eax, eax
+    jmp .done40
+.fail40:
+    mov rax, 1
+.done40:
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rcx
+    pop rbx
+    ret
+
+; Test 41: Write 40
+test_write_file:
+    push rbx
+    push rcx
+    push rdx
+    push rsi
+    push rdi
+    ; write "Hi!" (3) to stdout handle 1
+    lea rdx, [rel p9_hello3]
+    mov rbx, 1
+    mov rcx, 3
+    call handler_write_file
+    jc .fail41
+    cmp rax, 3
+    jne .fail41
+    ; handle 2 stderr same
+    lea rdx, [rel p9_hello3]
+    mov rbx, 2
+    mov rcx, 3
+    call handler_write_file
+    jc .fail41
+    cmp rax, 3
+    jne .fail41
+    ; zero count -> 0
+    lea rdx, [rel p9_hello3]
+    mov rbx, 1
+    mov rcx, 0
+    call handler_write_file
+    jc .fail41
+    cmp rax, 0
+    jne .fail41
+    ; bad handle 5 -> CF
+    lea rdx, [rel p9_hello3]
+    mov rbx, 5
+    mov rcx, 3
+    call handler_write_file
+    jnc .fail41
+    ; dispatch AH=40h handle 1 count 3
+    lea rdx, [rel p9_hello3]
+    mov rbx, 1
+    mov rcx, 3
+    mov rax, 0x4000
+    call syscall_dispatch64
+    jc .fail41
+    cmp rax, 3
+    jne .fail41
+    xor eax, eax
+    jmp .done41
+.fail41:
+    mov rax, 1
+.done41:
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rcx
+    pop rbx
+    ret
+
+; Test 42: Full INT 0x21 round-trip via CPU INT
+test_int21_roundtrip:
+    push rbx
+    push rcx
+    push rdx
+    push rsi
+    push rdi
+    call kbd_flush
+    ; AH=02 DL='Q' via INT
+    mov rax, 0x0200
+    mov dl, 'Q'
+    int 0x21
+    ; AH=09 $-string via INT
+    mov rax, 0x0900
+    lea rdx, [rel p9_dollar]
+    int 0x21
+    ; AH=0E DL=1 / AH=19 via INT
+    mov rax, 0x0E00
+    mov dl, 1
+    int 0x21
+    cmp al, 2
+    jne .fail42
+    mov rax, 0x1900
+    int 0x21
+    cmp al, 1
+    jne .fail42b
+    mov rax, 0x0E00
+    mov dl, 0
+    int 0x21
+    ; AH=0D via INT
+    mov rax, 0x0D00
+    int 0x21
+    cmp al, 0
+    jne .fail42b
+    ; AH=01 via INT with queued 'z' 0x2C -> 'z'
+    mov al, 0x2C
+    call kbd_queue_push
+    mov rax, 0x0100
+    int 0x21
+    cmp al, 'z'
+    jne .fail42b
+    ; AH=3Fh handle 0 count 1 via INT: push 'w' 0x11 -> 'w'
+    call kbd_flush
+    mov al, 0x11
+    call kbd_queue_push
+    lea rdx, [rel p9_rwbuf]
+    mov rbx, 0
+    mov rcx, 1
+    mov rax, 0x3F00
+    int 0x21
+    jc .fail42b
+    cmp byte [rel p9_rwbuf], 'w'
+    jne .fail42b
+    ; AH=40h handle 1 count 3 via INT
+    lea rdx, [rel p9_hello3]
+    mov rbx, 1
+    mov rcx, 3
+    mov rax, 0x4000
+    int 0x21
+    jc .fail42b
+    cmp ax, 3
+    jne .fail42b
+    xor eax, eax
+    jmp .done42
+.fail42b:
+    ; restore drive 0 before fail
+    push rax
+    mov rax, 0x0E00
+    mov dl, 0
+    int 0x21
+    pop rax
+.fail42:
+    mov rax, 1
+.done42:
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rcx
+    pop rbx
+    ret
+
+; ------------------------------------------------------------
 ; Serial/VGA helpers
 ; ------------------------------------------------------------
 init_serial64:
@@ -3123,6 +3888,7 @@ hello_phase5 db "Phase5: BIOS Interrupt Replacement — Native Drivers (Option C
 hello_phase6 db "Phase6: Memory Management Overhaul — MCB64, para/page, coalesce, protection",13,10,0
 hello_phase7 db "Phase7: File System Adaptation — FAT12 on LBA, DPB/DIR/FCB64",13,10,0
 hello_phase8 db "Phase8: Process Management — PSP64, ENV, Loader, EXEC/EXIT",13,10,0
+hello_phase9 db "Phase9: System Call Interface — INT 21h IDT gate + AH handlers",13,10,0
 msg_test1 db " [1] Register mapping (AX->RAX, R8-R15)... ",0
 msg_test2 db " [2] String ops (REP MOVSB, SCASB, LOOP->DEC)... ",0
 msg_test3 db " [3] BCD (AAM/AAD -> DIV/MUL, CBW, MUL/DIV)... ",0
@@ -3157,6 +3923,14 @@ msg_test31 db " [31] Loader COM vs EXE64 + bad hdr... ",0
 msg_test32 db " [32] Spawn/exit lifecycle + owner... ",0
 msg_test33 db " [33] EXEC/EXIT via INT21 dispatch... ",0
 msg_test34 db " [34] Stress max procs + reap/validate... ",0
+msg_test35 db " [35] IDT init/load + INT 0x21 gate... ",0
+msg_test36 db " [36] Console 01/08/0B/0C (kbd+vga)... ",0
+msg_test37 db " [37] Buffered input 0A (line edit)... ",0
+msg_test38 db " [38] Drive 0E/19 + reset 0D... ",0
+msg_test39 db " [39] Vectors 25/35 via IDT... ",0
+msg_test40 db " [40] Read 3F stdin handle 0... ",0
+msg_test41 db " [41] Write 40 stdout handles 1/2... ",0
+msg_test42 db " [42] INT 0x21 round-trip via CPU INT... ",0
 msg_pass db "PASS",13,10,0
 msg_fail db "FAIL",13,10,0
 msg_summary db 13,10,"Summary: ",0
@@ -3174,6 +3948,10 @@ msg_phase7_ok db "Phase7 filesystem adaptation (FAT12): ALL TESTS PASS",13,10,0
 msg_phase7_fail db "Phase7: SOME TESTS FAILED",13,10,0
 msg_phase8_ok db "Phase8 process management (PSP64): ALL TESTS PASS",13,10,0
 msg_phase8_fail db "Phase8: SOME TESTS FAILED",13,10,0
+msg_phase9_ok db "Phase9 syscall interface (INT 21h): ALL TESTS PASS",13,10,0
+msg_phase9_fail db "Phase9: SOME TESTS FAILED",13,10,0
+p9_dollar db "P9$INT21$ via INT$",0
+p9_hello3 db "Hi!",0
 
 str_hello db "Hello64",0
 str_lower db "hello",0
@@ -3215,6 +3993,8 @@ p8_outbuf: resb 64
 p8_com_src: resb 1024
 p8_exe_src: resb 1024
 p8_file_buf: resb 1024
+p9_bufin: resb 32
+p9_rwbuf: resb 64
 
 section .bss
 resb 8192

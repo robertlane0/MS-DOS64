@@ -1,5 +1,5 @@
-# MS-DOS64 – 64-bit BIOS boot build (Phase 8 - process management)
-# Phase 8: PSP64/env/loader/spawn/exit (AH=4Bh/4Ch, INT20h) + all prior phases
+# MS-DOS64 – 64-bit BIOS boot build (Phase 9 - syscall interface)
+# Phase 9: INT 21h IDT gate (DPL3) + AH=01/02/09/0A/0D/0E/19/25/35/3F/40/4C + all prior phases
 # Requires: nasm >=2.15, ld (binutils), qemu or bochs
 BUILD := build
 SRC_BOOT := src/boot
@@ -48,7 +48,7 @@ $(BUILD)/kernel.elf: $(KERNEL_OBJS) linker.ld | $(BUILD)
 $(BUILD)/kernel.bin: $(BUILD)/kernel.elf | $(BUILD)
 	objcopy -O binary $< $@
 	@echo "Kernel binary: $$(stat -c %s $@) bytes ($$(expr $$(stat -c %s $@) / 512) sectors)"
-	@test $$(stat -c %s $@) -le $$(expr 64 \* 512) || (echo "Kernel too large for 64 sectors! Increase KERNEL_SECTORS"; exit 1)
+	@test $$(stat -c %s $@) -le $$(expr 128 \* 512) || (echo "Kernel too large for 128 sectors! Increase KERNEL_SECTORS"; exit 1)
 
 $(BUILD)/dos64.img: $(BUILD)/mbr.bin $(BUILD)/stage2.bin $(BUILD)/kernel.bin | $(BUILD)
 	dd if=/dev/zero of=$@ bs=1M count=10 status=none
