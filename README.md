@@ -59,7 +59,7 @@ are the audit trail for the last correctness pass.
 | `0x1000/0x2000/0x3000` | PML4 / PDPT / PD (identity map 0–8 MiB, 4×2 MiB pages) |
 | `0x7C00–0x7DFF` | MBR load address |
 | `0x7E00+` | Stage2 load address |
-| `0x80000` | Kernel staging buffer (copied to `0x100000`) |
+| `0x70000` | Kernel staging buffer (copied to `0x100000`; must avoid `0x90000` — BIOS `INT 13h` clobbers transfers ending there) |
 | `0x90000` | Initial `RSP` top (16-aligned); syscall `IOSTACK`/`DSKSTACK` are separate 4 KiB BSS stacks (16-aligned tops) |
 | `0xB8000` | VGA text buffer |
 | `0x100000+` | Kernel (linked flat at 1 MiB, ~64 KiB / ~129 sectors) |

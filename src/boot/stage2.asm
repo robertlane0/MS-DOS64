@@ -12,8 +12,8 @@ org 0x7E00
 
 KERNEL_LBA       equ 16
 KERNEL_SECTORS   equ 176        ; 88 KiB — shell+tests headroom (was 160)
-KERNEL_STAGING_SEG  equ 0x8000
-KERNEL_STAGING_OFF  equ 0x0000  ; linear 0x80000 - staging buffer in low memory
+KERNEL_STAGING_SEG  equ 0x7000
+KERNEL_STAGING_OFF  equ 0x0000  ; linear 0x70000 - staging buffer in low memory
 KERNEL_DEST_LINEAR  equ 0x100000
 PML4_ADDR        equ 0x1000
 PDPT_ADDR        equ 0x2000
@@ -148,18 +148,22 @@ load_kernel:
     test cl, 1
     jz .try_chs
 
-    ; LBA path — chunked DAP reads (<=64 sectors each: some BIOSes cap
-    ; a single packet at 127 sectors / dislike 64K-boundary spans).
-    ; Staging is linear 0x80000+: chunk i uses seg = 0x8000 + i*2048/16.
+    ; LBA path — chunked DAP reads (<=16 sectors each: conservative for
+    ; old BIOS 64K/DMA limits; 16*512=8KiB never spans 64K from 16B-aligned
+    ; staging). Staging linear 0x70000+: seg = 0x7000 + done*32.
+    ; NOTE: staging MUST stay clear of 0x90000 — BIOS INT 13h uses a stack
+    ; at 0x90000 that overwrites the last bytes of any transfer ending
+    ; there (corrupted shift-table TYUI -> Shift+T/Y/U/I dead, see QEMU
+    ; GUI "PE HELLO.X" bug). 0x70000-0x86000 avoids it.
     mov ebx, KERNEL_SECTORS      ; remaining
     xor ebp, ebp                 ; done
 .lba_chunk:
     test ebx, ebx
     jz .ok
     mov eax, ebx
-    cmp eax, 64
+    cmp eax, 16
     jbe .have_chunk_n
-    mov eax, 64
+    mov eax, 16
 .have_chunk_n:
     mov [dap_count], ax
     mov word [dap_off], 0
@@ -197,7 +201,7 @@ load_kernel:
 .ok:
     ret
 
-; CHS fallback: read KERNEL_SECTORS sectors 1-by-1, converting LBA->CHS -> staging 0x80000
+; CHS fallback: read KERNEL_SECTORS sectors 1-by-1, converting LBA->CHS -> staging 0x70000
 load_kernel_chs:
     push es
     push bx
@@ -414,8 +418,8 @@ long_entry:
     and rsp, ~15
     cld
 
-    ; Copy kernel from staging 0x80000 to dest 0x100000 (identity mapped 0-8MiB)
-    mov rsi, 0x80000
+    ; Copy kernel from staging 0x70000 to dest 0x100000 (identity mapped 0-8MiB)
+    mov rsi, 0x70000
     mov rdi, KERNEL_DEST_LINEAR
     mov rcx, KERNEL_SECTORS * 512 / 8   ; qwords
     rep movsq

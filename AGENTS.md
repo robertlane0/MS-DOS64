@@ -70,9 +70,9 @@ Create a modern 64-bit boot sequence:
 
 **Key Steps**:
 - **Sector 1 (512 bytes)**: Initial bootloader that loads the secondary bootloader
-- **Secondary Bootloader**: Performs mode transitions and loads the 64-bit kernel (chunked `INT 13h` LBA ≤64 sectors/packet with CHS fallback that advances ES across 64 KiB boundaries; stages at `0x80000`, copies to `0x100000` in long mode)
+- **Secondary Bootloader**: Performs mode transitions and loads the 64-bit kernel (chunked `INT 13h` LBA ≤16 sectors/packet with CHS fallback that advances ES across 64 KiB boundaries; stages at `0x70000`, copies to `0x100000` in long mode)
 - **A20 Enabling**: Use Fast A20 method or keyboard controller
-- **Page Table Setup**: Identity map 0–8 MiB via PML4 @`0x1000` → PDPT @`0x2000` → PD @`0x3000` with 4×2 MiB pages (covers stage2, staging `0x80000`, stack `0x90000`, kernel `0x100000`)
+- **Page Table Setup**: Identity map 0–8 MiB via PML4 @`0x1000` → PDPT @`0x2000` → PD @`0x3000` with 4×2 MiB pages (covers stage2, staging `0x70000`, stack `0x90000`, kernel `0x100000`)
 - **GDT**: Create 64-bit code/data segments (base=0, limit=0xFFFFF, flags for long mode)
 - **Kernel load**: `KERNEL_SECTORS 176` (LBA 16+, clear of scratch `200`/`500–511` and the FAT12 volume at LBA 512+ stamped by `tools/mkfat12.py`)
 
@@ -346,7 +346,7 @@ endstruc
 - [x] Create identity-mapped page tables (0–8 MiB via PML4 @`0x1000` → PDPT @`0x2000` → PD @`0x3000`, 4×2 MiB pages)
 - [x] Enable long mode via CR4 and EFER MSR
 - [x] Load 64-bit GDT with proper code/data segments
-- [x] Jump to 64-bit kernel entry point (`0x100000`, staged via `0x80000`, `KERNEL_SECTORS 176`)
+- [x] Jump to 64-bit kernel entry point (`0x100000`, staged via `0x70000`, `KERNEL_SECTORS 176`)
 
 ### Core Kernel Conversion
 - [x] Convert IO.SYS initialization routines to 64-bit
@@ -488,7 +488,7 @@ Recommended Kernel Load Address: 0x00100000 (1MB mark)
 ```
 
 > As built (see `README.md` Memory map): page tables PML4 @`0x1000` → PDPT
-> @`0x2000` → PD @`0x3000` (0–8 MiB, 4×2 MiB); kernel staging `0x80000` →
+> @`0x2000` → PD @`0x3000` (0–8 MiB, 4×2 MiB); kernel staging `0x70000` →
 > final `0x100000` (`KERNEL_SECTORS 176`); initial `RSP` `0x90000`;
 > `IOSTACK`/`DSKSTACK` 4 KiB BSS stacks; heap `0x200000+` (`MCB64` 40 B);
 > disk: kernel LBA 16+, scratch `200`/`500–511`, FAT12 volume LBA 512–3391.

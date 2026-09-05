@@ -84,6 +84,10 @@ vga_putc:
     push rax
     push rbx
     push rdi
+    cmp al, 8               ; BS (shell erase sequence 8,' ',8 relies on this)
+    je .bs
+    cmp al, 127             ; DEL treated as BS (shell maps DEL->BS edit)
+    je .bs
     cmp al, 10              ; LF
     je .lf
     cmp al, 13              ; CR
@@ -117,6 +121,20 @@ vga_putc:
     ; fall through to CR
 .cr:
     mov byte [rel vga_col], 0
+    jmp .cursor
+.bs:
+    ; Backspace: move cursor back one cell (wrapping to prev line end).
+    ; The shell erases via 8,' ',8 so this must NOT write, only move.
+    ; At top-left (0,0) there is nothing to erase: stay put.
+    cmp byte [rel vga_col], 0
+    jne .bs_same_line
+    cmp byte [rel vga_row], 0
+    je .cursor
+    dec byte [rel vga_row]
+    mov byte [rel vga_col], VGA_COLS-1
+    jmp .cursor
+.bs_same_line:
+    dec byte [rel vga_col]
 .cursor:
     call vga_set_cursor
     pop rdi
