@@ -1,194 +1,168 @@
-# MS-DOS64 — 64-bit BIOS Bootable DOS (from MS-DOS 1.25)
+# MS-DOS64 — 64-bit BIOS-bootable DOS
 
-> Phase 1 (Architecture Analysis) **complete**. Phase 2 (Boot & Long Mode) **complete** — boots via BIOS MBR → 64-bit on Bochs & QEMU (chunked LBA loads, CHS fallback with 64K-safe ES advance). **Phase 3 (Register & Instruction Conversion) complete** — 7/7 PASS. **Phase 4 (Addressing Mode Transformation) complete** — 12/12 PASS. **Phase 5 (BIOS Interrupt Replacement, Option C) complete** — 16/16 PASS (native VGA/ATA/KBD polling) on both emulators. **Phase 6 (Memory Management Overhaul) complete** — 21/21 PASS (MCB64 coalesce/resize/validate/protection, AH=48h/49h/4Ah) on both emulators. **Phase 7 (File System Adaptation) complete** — 27/27 PASS synthetic + a **real FAT12 volume** (mkfat12 @ LBA 512, mount + on-disk read, test 67). **Phase 8 (Process Management) complete** — 34/34 PASS (PSP64/env/loader/spawn/exit, AH=4Bh/4Ch, INT20h) on both emulators. **Phase 9 (System Call Interface) complete** — full INT 21h surface: consoles, drives, vectors, handle R/W, **plus** AUX/COM/LIST, RTC date/time, VERIFY, disk pointers and the **whole FCB file cluster** (tests 68–71); only DOS-reserved slots stay stubbed (as DOS itself does). **Phase 10 (Command Interpreter) complete** — 50/50 PASS (COMMAND64 parser/builtins/exec/batch) **plus an interactive shell** (prompt loop, volume DIR/TYPE/COPY/DEL/REN, *.COM EXEC, HELP/EXIT, test 72). **Phase 11 (Interrupt Descriptor Table) complete** — 58/58 PASS (full IDT 0-31 diagnostics, PIC **0x28/0x30** remap, IRQ0/IRQ1(installed)/IRQ14, DOS 0x21 kept) on both emulators. **Phase 12 (Stack and Calling Conventions) complete** — 66/66 PASS (RSP 16B, System V RDI/RSI/RDX/RCX/R8/R9, callee-saved, canary, IST reserve) on both emulators. **Total: 72/72 PASS**, then the shell. See `docs/18-truth-gap-analysis.md` (audit) + `docs/19-closure-g1-g6.md` (fixes, honest limitations).
+A flat 64-bit long-mode OS that boots via legacy BIOS MBR, derived from
+Microsoft MS-DOS v1.25 (MIT). It preserves DOS semantics — FAT12, FCBs,
+PSPs, `INT 21h`, `COMMAND`-style builtins — on native 64-bit code with no
+BIOS calls after the boot handoff.
 
-Original source: Microsoft MS-DOS v1.25 (MIT), Tim Paterson 86-DOS. This repo converts the 16-bit real-mode SCP dialect to a flat 64-bit long-mode OS that boots via legacy BIOS MBR on Bochs x86-64.
+On boot the kernel runs a 72-check self-test suite (serial + VGA log), then
+drops into an interactive `COMMAND64` shell.
 
-## Quick Start
+## Status
 
-### Phase 1 – Read the analysis
+Boots on QEMU (`qemu-system-x86_64 -serial stdio`) and Bochs (256 MiB,
+`ryzen` profile). Self-tests: **72/72 PASS**, then the shell prompt.
+Per-subsystem design notes live in `docs/`; `docs/18-*.md` + `docs/19-*.md`
+are the audit trail for the last correctness pass.
 
-* `docs/00-phase1-summary.md` – completion report, scaffolding, risks
-* `docs/01-architecture-overview.md` – 5-file inventory, kernel/IO/command roles
-* `docs/02-bios-interrupts-and-drivers.md` – 13 BIOS far vectors → VGA/ATA/8042 replacements
-* `docs/03-memory-layout.md` – maps 0x00000..0xFFFFF, PSP/FCB/DPB/DIRBUF, stacks
-* `docs/04-16bit-constructs-and-conversion-map.md` – SCP→NASM, seg:off→flat, invalid opcodes (AAM/LDS)
-* `docs/05-boot-and-testing-strategy.md` – MBR/stage2/paging/GDT plan + Bochs test stages
-* `docs/06-syscall-reference.md` – 47 DOS functions (AH 00-46) table
+## What works
 
-All tables include `file:line` refs and were generated from live `grep -n` over the source.
+- **Boot:** 512 B MBR (A20, `INT 13h` LBA with CHS fallback) → stage2
+  (`real → protected → long`: CPUID LM check, PAE, 4-level paging with
+  0–8 MiB identity map, `EFER.LME`, GDT64) → kernel at `0x100000`.
+- **Console:** native VGA text driver (`0xB8000`, 80×25, cursor, scroll) +
+  COM1 serial (`0x3F8`) for logging and shell I/O. No `INT 10h` in long mode.
+- **Disk:** ATA PIO LBA28 driver (`0x1F0`, polling, CHS→LBA conversion).
+  No `INT 13h` in long mode.
+- **Keyboard:** PS/2 controller (`0x60`/`0x64`) with 128-byte queue and
+  US shift/caps tables; polled in tests, IRQ-driven once the shell starts.
+  No `INT 16h` in long mode.
+- **Memory:** byte-based first-fit allocator over `0x200000+` with split,
+  prev+next coalesce, in-place resize, aligned/page allocation, validation,
+  and page-table `RW/NX` protection. `INT 21h AH=48h/49h/4Ah`.
+- **Filesystem:** FAT12 engine (BPB→DPB, 12-bit chain walk, root-dir search,
+  multi-cluster read, alloc-on-write with FAT+root write-through) mounted on
+  a real on-image volume (see Disk layout). Full FCB record I/O core
+  (sequential + random + block, `RR`-addressed).
+- **Processes:** 64-bit PSP + environment blocks, raw-`.COM` and `MZ64`
+  loaders, spawn/terminate/reap lifecycle. `INT 21h AH=4Bh/4Ch`, `INT 20h`.
+- **Syscalls:** `INT 21h` IDT gate (DPL3) with a 77-entry dispatcher covering
+  consoles, drives, interrupt vectors, handle R/W, AUX/COM/LIST, CMOS RTC
+  date/time, VERIFY, disk pointers, and the whole FCB file cluster. Only
+  DOS-reserved slots stay stubbed, as in DOS 1.25 itself.
+- **Shell:** `COMMAND64` REPL with prompt expansion, line editing over PS/2
+  and serial, volume-backed builtins, batch files (`%1`–`%9`), and `*.COM`
+  execution.
+- **Interrupts:** full 256-entry IDT; CPU vectors 0–31 with diagnostics
+  (vector/error/`RIP` counters); PIC remapped to master `0x28`/slave `0x30`
+  so IRQ1 no longer collides with DOS `0x21`; timer IRQ0, keyboard IRQ1
+  (installed), disk IRQ14.
+- **ABI:** System V AMD64 throughout — 16-byte `RSP` alignment, `RDI RSI RDX
+  RCX R8 R9` args, callee-saved `RBX RBP R12–R15`, near `CALL/RET` only,
+  stack canaries; IST stacks reserved.
 
-### Build & Run (Phase 12 — Stack and Calling Conventions)
+## Memory map
+
+| Range | Use |
+|---|---|
+| `0x0000–0x0FFF` | IVT/BDA preserved |
+| `0x1000/0x2000/0x3000` | PML4 / PDPT / PD (identity map 0–8 MiB, 4×2 MiB pages) |
+| `0x7C00–0x7DFF` | MBR load address |
+| `0x7E00+` | Stage2 load address |
+| `0x80000` | Kernel staging buffer (copied to `0x100000`) |
+| `0x90000` | Initial `RSP` top; syscall `IOSTACK`/`DSKSTACK` (4 KiB each, 16-aligned) |
+| `0xB8000` | VGA text buffer |
+| `0x100000+` | Kernel (linked flat at 1 MiB, ~64 KiB / ~129 sectors) |
+| `0x200000+` | Heap (`MCB64` chain, first-fit) |
+
+## Disk layout (`build/dos64.img`, 10 MiB)
+
+| LBA | Contents |
+|---|---|
+| 0 | MBR + boot signature `55 AA` |
+| 1–15 | Stage2 |
+| 16+ | Kernel binary (up to 176 sectors) |
+| 200, 500–511 | ATA/filesystem scratch (kept clear of kernel and volume) |
+| 512–3391 | Real FAT12 volume (1.44 M geometry, stamped at build by `tools/mkfat12.py`) |
+
+Volume files: `HELLO.TXT` (1 cluster), `README.TXT` (2-cluster chain),
+`TEST.COM` (single `RET`, EXEC target), `DATA.BIN` (512 B pattern).
+
+## Shell
+
+```
+A> DIR
+A> TYPE HELLO.TXT
+A> COPY README.TXT BACKUP.TXT
+A> DEL BACKUP.TXT
+A> REN OLD.TXT NEW.TXT
+A> DATE / TIME [MM-DD-YY / HH:MM[:SS]]
+A> CLS / VER / PROMPT / PATH / ECHO text / REM comment / PAUSE
+A> TEST            (loads TEST.COM from the volume and spawns it)
+A> HELP / EXIT
+```
+
+Batch files support `REM`, `%1`–`%9` parameters, and `%%` escapes.
+Input works from the PS/2 keyboard and over serial, so the shell is
+drivable from a pipe under QEMU.
+
+## System calls (`INT 21h`, `AH=`)
+
+Consoles `01/02/06–0C`, READER/PUNCH/LIST `03/04/05`, disk reset/select
+`0D/0E`, drive `19`, FCB files `0F–17/21–24/27–29`, pointers `1B/1C/1F`,
+attrs `1D/1E`, NEWBASE `26`, date/time `2A–2D` (CMOS RTC), VERIFY `2E`,
+vectors `25/35`, DMA `1A`, handles `3F/40`, alloc `48/49/4A`, EXEC/EXIT
+`4B/4C`, plus `INT 20h` terminate. Record I/O is `RR`-addressed;
+sequential position mirrors `extent*128+nr` exactly for the DOS 1.x
+`recsiz=128` case. DMA defaults to unset and fails honestly — set it with
+`AH=1Ah` before FCB transfers.
+
+## Quick start
+
+Requires `nasm ≥ 2.15`, `ld`/`objcopy` (binutils), `python3`, and
+`qemu-system-x86_64` or Bochs.
 
 ```bash
-make            # builds 512B MBR + stage2 + kernel (65K, 16 objs) + dos64.img (10M, FAT12 @ LBA 512)
-make run-bochs  # Bochs 3.0 ryzen, 256MiB, serial.log + VGA at 0xB8000
-make run-qemu   # qemu-system-x86_64 -serial stdio alternative (also drives the shell)
+make            # MBR + stage2 + kernel + dos64.img (stamps FAT12 volume)
+make run-qemu   # serial stdio (recommended)
+make run-bochs  # target emulator; clears stale lock first
 make clean
 ```
 
-**Verify boot:**
+Verify (QEMU is the primary proof path):
 
 ```bash
-# QEMU (primary) — 72 tests, then the shell (Ctrl-C / timeout to exit)
 timeout 25 qemu-system-x86_64 -drive file=build/dos64.img,format=raw -serial stdio -display none
-# Expected serial tail:
-#  [66]...PASS / [67] Real FAT12 volume mount + file read... PASS
-#  [68] RTC date/time get/set (INT21 2A-2D)... PASS / [69] AUX/LIST + ... PASS
-#  [70] FCB open/rndread/search/makefcb... PASS / [71] FCB create/write/read/rename/delete... PASS
-#  [72] Shell line dispatch (DIR/TYPE/EXEC)... PASS
-#  Summary: 72 passed, 0 failed / Phase12 stack/ABI (16B+SysV+canary): ALL TESTS PASS
-#  MS-DOS64 shell (COMMAND64). Type HELP for commands.
+# tail: Summary: 72 passed, 0 failed ... MS-DOS64 shell (COMMAND64). Type HELP for commands.
 
-# Drive the shell over serial stdin:
 printf '\rDIR\rTYPE HELLO.TXT\rHELP\rEXIT\r' | timeout 25 qemu-system-x86_64 -drive file=build/dos64.img,format=raw -serial stdio -display none
-# Expected: A> DIR -> 4 files (HELLO.TXT 151, README.TXT 1000, TEST.COM 1, DATA.BIN 512),
-#  TYPE prints the file, HELP lists builtins, bad names error, EXIT leaves the loop.
 
-# Bochs (target) — remove stale lock first
 rm -f bochs.log serial.log build/dos64.img.lock && make && timeout 25 bochs -f bochsrc.txt -q; cat serial.log
-# (Same 72-test suite; serial.log is the COM1 capture.)
 ```
 
-**Verify boot (full early bring-up, retained):**
-
-```bash
-# Expected serial.log head (before the test list):
-# MS-DOS64 MBR boot / A20 enabled / Loading stage2 via LBA... / Stage2 @0x7E00 ... / Kernel loaded
-# Hello from 64-bit DOS64 kernel: Phase2 long mode OK!
-# Phase3 ... Phase12 suite banners, then [1]...PASS through [72]...PASS
-# Note: [30]/[32]/[33] emit single-letter progress markers (A–N/a–h/p–$) before PASS (fail-point isolation).
-```
-
-### Project Layout
+## Source layout
 
 ```
-AGENTS.md          conversion spec (12 phases + checklist)
-MSDOS.ASM          kernel (4030 lines, DOSGROUP)
-IO.ASM             IO.SYS + BIOS jump table (1933)
-COMMAND.ASM        resident/transient shell (2165)
-STDDOS.ASM         build wrapper (23)
-src/boot/          mbr.asm (512B MBR, A20, INT13 LBA/CHS) + stage2.asm (real→protected→long, chunked LBA loads, 64K-safe CHS, 176 kernel sectors) + gdt.asm
-src/kernel/        main.asm (harness, 72 tests, _start @0x100000) + shell64.asm (REPL: prompt/line-input/volume builtins/*.COM EXEC, HELP/EXIT) + stack64.asm (stack/ABI: 16B, SysV RDI..R9, callee-saved, canary, IST1/2 reserve) + cmd64.asm (COMMAND64: parser/COMTAB64/builtins/exec/batch) + fat64.asm (UNPACK/PACK, dir-read path) + fs64.asm (FAT12: BPB/chain/dir/FCB64 + volume mount/read/flush/alloc + record-I/O core) + mem64.asm (MCB64: coalesce/resize/validate/protect) + proc64.asm (PSP64/env/loader/spawn/exit) + syscall64.asm (SAVREGS/DISPATCH64 77 entries: consoles, drives, vectors, handles, AUX/COM, RTC date/time, full FCB cluster, I/O+DSK 4K stacks 16-aligned) + idt64.asm (full IDT 0-31 diagnostics, PIC 0x28/0x30 remap, IRQ0 @0x28/IRQ1 @0x29 installed/IRQ14 @0x36, DOS 0x21 DPL3)
-src/drivers/       vga.asm (0xB8000 text, cursor, scroll) + ata.asm (0x1F0 PIO LBA28, CHS→LBA, scratch LBA200/500+) + kbd.asm (0x60/0x64 PS/2, queue, tables) — native Option C
-src/lib/           string64.asm (REP/LOOP/XLAT) + bcd64.asm (AAM/AAD→DIV, CBW etc.) + addr64.asm (seg:off→linear, RIP-rel, far→near)
-tools/             mkfat12.py (stamps the 1.44M FAT12 volume @ LBA 512 during make)
-include/           fcb.inc/dpb.inc/psp.inc/mcb.inc/regs.inc/fs.inc/stack.inc (64-bit strucs, STKPTRS64, DIRENT, BPB, STACK_TOP/ABI macros, FS_VOL_LBA)
-docs/              00-phase1-summary + 01..06 analysis + 07-phase2-boot + 08-phase3-register-conversion + 09-phase4-addressing + 10-phase5-bios-drivers + 11-phase6-memory + 12-phase7-filesystem + 13-phase8-process + 14-phase9-syscall + 15-phase10-command + 16-phase11-idt + 17-phase12-stack + 18-truth-gap-analysis (audit) + 19-closure-g1-g6 (fixes + limits)
-bochsrc.txt        Bochs 3.0 ryzen, 256MiB, ata0 10MiB flat CHS 20/16/63, VBE, serial.log
-linker.ld          flat link at 0x100000 (*.text.start first)
-build/             mbr.bin, stage2.bin (≈1K), kernel.bin (53K, 103 sec), kernel.elf (165K), dos64.img (10M)
+src/boot/      mbr.asm (A20, INT13 LBA/CHS) + stage2.asm (mode switch, chunked loads) + gdt.asm
+src/kernel/    main.asm (entry @0x100000, 72-test harness) + shell64.asm (REPL)
+               cmd64.asm (COMMAND64 parser/builtins/exec/batch) + fat64.asm (UNPACK/PACK)
+               fs64.asm (FAT12 mount/read/flush/alloc + FCB record-I/O core)
+               mem64.asm (MCB64 manager) + proc64.asm (PSP64/env/loader/spawn)
+               syscall64.asm (INT 21h dispatcher, 77 entries)
+               idt64.asm (IDT, PIC 0x28/0x30, IRQ0/IRQ1/IRQ14) + stack64.asm (ABI/canary)
+src/drivers/   vga.asm (0xB8000 text) + ata.asm (0x1F0 PIO LBA28) + kbd.asm (PS/2 0x60/0x64)
+src/lib/       string64.asm + bcd64.asm (AAM/AAD->DIV, CBW equiv.) + addr64.asm (seg:off->linear)
+include/       fcb.inc/dpb.inc/psp.inc/mcb.inc/regs.inc/fs.inc/stack.inc (64-bit structures)
+tools/         mkfat12.py (stamps the FAT12 volume during make)
+MSDOS.ASM / IO.ASM / COMMAND.ASM   original MS-DOS v1.25 sources (reference, still built by STDDOS.ASM)
+linker.ld      flat link at 0x100000 (.text.start first)   bochsrc.txt   Bochs config
 ```
 
-## Source License
+## Limitations (by design, not bugs)
 
-MIT, Copyright (c) Microsoft Corporation (see `LICENSE`).
+- ATA is PIO polling; no DMA. Disk IRQ only counts + EOIs.
+- IST stacks reserved, IDT `IST==0` (no TSS yet).
+- Executables are raw `.COM` and `MZ64` only (no MZ/PE loader); EXEC spawns
+  but does not context-switch into the image.
+- FCB sequential math is exact at `recsiz=128`; other sizes address by `RR`.
+- Writes are record-granular (`COPY` truncates to exact length).
+- Serial RX is 1 byte deep (typing is fine; paste bursts can overrun).
+- `TYPE` shows the first 4 KiB; printer output goes to the COM1 capture.
+- PIT runs at the BIOS rate.
 
-## Phase 2 Status — Boot Chain Implemented (retained)
+## Origin and license
 
-- **MBR** `src/boot/mbr.asm:1` 512B, A20 via port 0x92 + KBC 0x64/0x60, preserves `DL`, INT13h AH=42h LBA with CHS fallback, DAP at `0x7E00`, far `jmp 0:0x7E00`
-- **Stage2** `src/boot/stage2.asm:8` @`0x7E00`, GDT32 `0x08/0x10` flat 4G, `lgdt`→`CR0.PE`→`JMP 0x08:pmode`, CPUID `0x80000001` LM check (EDX:29), `CR4.PAE`, zero `0x1000/0x2000/0x3000`, `PML4[0]=0x2003`, `PDPT[0]=0x3003`, `PD[0..3]=2MiB*4` (`0x83`) covering 0–8MiB, `CR3=0x1000`, `EFER.LME` via `0xC0000080`, `CR0.PG`, `lgdt64` (code `0xAF9A`, data `0xCF92`), `JMP 0x08:long_entry`, staging copy `0x80000→0x100000` (64 sectors)
-- **Kernel (Phase2)** `_start` at `0x100000` via `*.text.start` first, `RSP=0x90000`, `init_serial64` COM1 38400, `vga_print` @`0xB8000`
-- **Drivers** `src/drivers/vga.asm:1` native 0xB8000 driver (replaces INT10h), cursor via `0x3D4/0x3D5`, scroll, 80×25
-- **Test** Bochs 3.0 `ryzen` + QEMU 11.1.1 both show `MS-DOS64 MBR boot … Hello from 64-bit DOS64 kernel: Phase2 long mode OK!`.
-
-See `docs/07-phase2-boot-implementation.md` for full mode-transition trace. See `docs/08-phase3-register-conversion.md` for Phase 3 proof. See `docs/09-phase4-addressing.md` for Phase 4 proof. See `docs/10-phase5-bios-drivers.md` for Phase 5 Option C (native drivers) proof.
-
-## Phase 3 Status — Register & Instruction Conversion Complete (retained)
-
-- **Census** 1,200+ register hits converted (`AX→RAX`/`BX→RBX`/`CX→RCX`/`DX→RDX`/`SI→RSI`/`DI→RDI`/`BP→RBP`/`SP→RSP`), `R8–R15` new temps, 47 `dw`→`dq` dispatch, flat `rel` addressing.
-- **Invalid opcodes** 8× `AAM`/`AAD` replaced via `DIV 10`/`IMUL 10` (`src/lib/bcd64.asm:1`), 13× `LDS`/`LES` replaced via `mov rsi,[rel DMAADD64]` (`src/kernel/fat64.asm:1`), `LOOP`→`DEC RCX/JNZ`, `XLAT`→`MOV [RBX+RAX]`, `CBW`→`MOVSX/CDQE/CQO` (`src/lib/string64.asm:1`).
-- **Kernel modules** `fat64` (UNPACK/PACK), `syscall64` (SAVREGS/LEAVE 64-bit stack switch `IOSTACK64/DSKSTACK64`, `SHL RBX,3` dispatch), `mem64` (MCB64 32B, para `SHL 4`→byte), `string64`/`bcd64` libs.
-- **Includes** `psp.inc` (512B), `mcb.inc` (32B), `regs.inc` (STKPTRS64 176B, IRETQ 5 qwords).
-- **Harness** `src/kernel/main.asm:16` `_start` (`section .text.start`) runs 7 self-tests: register/R8-R15, REP string, BCD, FAT, MCB, DMA, syscall. Prints via `vga_print` + `serial_print64` (polled `0x3FD`).
-- **Build** `Makefile:44` builds 7 `elf64` objects, `ld -T linker.ld` places `main.o` first, `KERNEL_SECTORS=64` (32 KiB) for 5.4K kernel (10 sectors used). `make` → `build/kernel.bin` (5440B) + `dos64.img` (10M).
-- **Test** Both emulators show **`[1]...PASS` through `[7]...PASS / Summary: 7 passed, 0 failed / Phase3 register conversion: ALL TESTS PASS`** (see serial.log). No `#UD`/`#GP` (AAM etc. would fault).
-
-## Phase 4 Status — Addressing Mode Transformation Complete (retained)
-
-- **Census** 47 `OFFSET DOSGROUP:xxx` → `lea rsi,[rel var]`, 13 `FAR PTR BIOS*` → `dq` near dispatch `SHL 3`, 19 `DMAADD` split `DW`→`dq` linear, 40 `SEG` overrides eliminated, all `LDS`/`LES` → flat `mov r64,[rel]`.
-- **Flat conversions** `seg_off_to_linear (seg<<4+off)` (`src/lib/addr64.asm:10`), `OFFSET→rel` (`offset_to_rel_demo`), `RIP-relative` (`rip_relative_demo`), `FAR→near` (`far_to_near_demo` `bios_near_table`), `DIRBUF/BUFFER/FATSIZTAB DW→dq` (`buffer_flat_demo`), `DS=CS` alias elimination (`dosgroup_alias_elimination_demo`), `segment override` → flat `REP MOVSB` (`segment_override_elimination_demo`), `stack flat` (`stack_flat_demo`), `para SHL4`/`SHL12`, `canonical` (`SAR 47`).
-- **Kernel modules** `addr64` (685 lines, 14 exports, 8 sub-demos) + updated `main` harness now 12 tests (Phase3 7 + Phase4 5).
-- **Build** `Makefile:44` now builds 8 `elf64` objects (added `addr64.o`), `ld -T linker.ld` still `main.o` first, kernel 7796B (15 sectors, ≤64). `make` → `build/kernel.bin` (7.8K) + `dos64.img` (10M).
-- **Test** Both emulators now show **`[1]...PASS` through `[12]...PASS / Summary: 12 passed, 0 failed / Phase3 ... ALL TESTS PASS / Phase4 addressing transformation: ALL TESTS PASS`** (serial.log + VGA 0xB8000). No `#GP` for non-canonical or segment-load faults.
-
-## Phase 5 Status — BIOS Interrupt Replacement (Option C) Complete
-
-- **Census** 13 `FAR PTR BIOS*` jump table eliminated, `INT 10h` → `vga.asm` `0xB8000`, `INT 13h` CHS → `ata.asm` LBA28 PIO `0x1F0`, `INT 16h` → `kbd.asm` `0x60/0x64` (docs/02). All `IN`/`OUT` to `0xF0` SCP ports gone.
-- **VGA** `src/drivers/vga.asm:1` 161 lines, `vga_init/clear/putc/print/set_cursor/scroll` — `0xB8000` `80×25×2`, `0x3D4/0x3D5`, attribute `0x0F`, verified via `[16] VGA 'V'` at `0xB8000` + CRLF.
-- **ATA** `src/drivers/ata.asm:1` 843 lines, 13 exports: `ata_init` gentle wait, `ata_read_lba28`/`ata_write_lba28` `0x20`/`0x30` 256-word `IN AX`/`OUT AX` polling `BSY/DRQ` 1M timeout, `chs_to_lba`/`lba_to_chs_demo` `IMUL` 64-bit (fix `0x10` sector bug), `ata_test_mbr_read` `0xAA55` at LBA0, `ata_test_write_readback` LBA100 pattern `0xA5`, `ATA_TIMEOUT 1M` (4M init).
-- **KBD** `src/drivers/kbd.asm:1` 368 lines, 12 exports: `kbd_init` `0xAE`+`0xF4`/`0xFA`, `kbd_poll` `OBF 0x01`, `kbd_queue` 128B `&0x7F`, `scancode_table`/`shift_table` 128B, `kbd_scancode_to_ascii` shift `0x2A/0x36` + caps `0x3A`, `kbd_test_status/queue/translation` (`'a'→'A'`, `'1'→'!'`, caps, space/enter).
-- **Kernel modules** `main` now 967 lines, 16 tests (Phase3 7 + Phase4 5 + Phase5 4: `[13] MBR+CHS`, `[14] write`, `[15] kbd queue`, `[16] kbd+VGA`), `print_hex8/16` debug helpers, `ata/kbd` externs.
-- **Build** `Makefile:14` now 10 `elf64` objects (+`ata.o`/`kbd.o`), kernel `11212B` (21 sectors, ≤64), `52008 elf`. `make` → `build/kernel.bin` (11K) + `dos64.img` (10M).
-- **Test** Both emulators now show **`[1]...PASS` through `[16]...PASS / Summary: 16 passed, 0 failed / Phase3 ... ALL TESTS PASS / Phase4 ... ALL TESTS PASS / Phase5 BIOS replacement (Option C): ALL TESTS PASS`** (serial.log + VGA). No BIOS `INT` in long mode, no `#GP` on ports.
-
-## Phase 6 Status — Memory Management Overhaul (MCB64) Complete
-
-- **Scope** DOS 1.25 had no MCB (only `SETMEM`/`MEMSCAN` paragraphs); Phase 6 adds a full byte-based manager: para/page conversions (`SHL 4`/`SHL 12`), 64-bit `owner dq` chain `0x200000–0x800000`, first-fit split, prev+next coalesce, in-place resize, aligned/page alloc, validation + stats, 2 MiB PS `RW/NX` protection.
-- **Kernel modules** `mem64.asm` 1199 lines, 24 exports (`mem_validate/resize/alloc_aligned/pages/total/count/protect_range/...`); `syscall64.asm` `DISPATCH64` 47→77 entries, `AH=48h/49h/4Ah` handlers, `AH`-from-frame dispatch with balanced 15-push `leave64`; `main` 1737 lines, 21 tests (`[17]` para/page, `[18]` coalesce, `[19]` resize, `[20]` protection, `[21]` stress).
-- **Build** same 10 `elf64` objects, kernel `16860B` (32 sectors, ≤64), `65784 elf`. `make` → `build/kernel.bin` (17K) + `dos64.img` (10M).
-- **Test** Both emulators show **`[1]...PASS` through `[21]...PASS / Summary: 21 passed, 0 failed`** plus all four `ALL TESTS PASS` banners (serial.log + VGA). No `#UD/#GP/#PF`.
-- **Bugs fixed under GDB** 6 defects: `bl`/`rbx` clobber in walkers, missing `pop rdx` (resize/aligned), `AL`/`RAX` aliasing (shrink/aligned splits), `~align` vs `~(align-1)` mask, grow-split −40 accounting, dispatch-on-`SS` + 14/15 imbalance.
-
-See `docs/11-phase6-memory.md` for the full report.
-
-## Phase 7 Status — File System Adaptation (FAT12 on LBA) Complete
-
-- **Scope** DOS 1.25 FAT12 (`UNPACK/PACK`, `GETENTRY`, `FATREAD`, `DIRREAD`, `DREAD/DWRITE` via BIOS, CHS) → flat 64-bit on native ATA LBA28 PIO: BPB→DPB init, cluster→LBA (`firrec+(c-2)*spc`), 12-bit chain with EOF/free, root-dir find (deleted/end/wildcard), `DREAD/DWRITE/DIRREAD` wrappers, multi-cluster file read, `FCB64` open with 64-bit `filsiz/rr`/DMA-linear.
-- **Kernel modules** `fs64.asm` 19 exports (`fs_bpb_parse64/cluster_to_lba/fat_sector/get/set_cluster/is_eof/free/dir_find/dir_get_*/dread/dwrite/dir_read/write/fcb_open/file_read_cluster` + 6 `fs_test_*`); `include/fs.inc` (`DIRENT`, BPB offsets, `FAT12_*`, scratch LBAs 500–511); `main` 27 tests (`[22]` BPB/LBA, `[23]` chain, `[24]` dir, `[25]` LBA I/O, `[26]` file read, `[27]` FCB64).
-- **Build** 11 `elf64` objects (+`fs64.o`), kernel `22644B` (44 sectors, ≤64). `make` → `build/kernel.bin` (23K) + `dos64.img` (10M).
-- **Test** Both emulators show **`[1]...PASS` through `[27]...PASS / Summary: 27 passed, 0 failed`** plus all five `ALL TESTS PASS` banners (serial.log + VGA). No `#UD/#GP/#PF`.
-- **Bugs fixed** 6 defects: LBA return clobbered by `pop rcx`, HELLO test-entry typo (`OM ` vs `COM`), FAT-base `RSI` clobbered across ATA reads, `DH`-with-REX encoding, `cmp r64,imm64` bounds, 4-byte stores over `attr`/`extent`.
-
-See `docs/12-phase7-filesystem.md` for the full report.
-
-## Phase 8 Status — Process Management (PSP64) Complete
-
-- **Scope** DOS 1.25 `SETMEM`/`ABORT` + `COMMAND COMLOAD/EXELOAD` → flat 64-bit: `PSP64` init/validate/cmd/exit/fd/CR3, `ENV` double-NUL blocks, COM raw + `EXE64 MZ64` loader, spawn/terminate/reap lifecycle (`owner=PSP`), `INT 21h AH=4Bh EXEC/4Ch EXIT` + `INT 20h ABORT` via `DISPATCH64`, 4 KiB trap stacks.
-- **Kernel modules** `proc64.asm` 21 exports (`psp_init/validate/cmd/exit`, `env_init/count/get/set/unset`, `verify/load/spawn/terminate/exit_current/reap/free_all` + `next_pid/current/state/pid` introspection); `syscall64.asm` `DISPATCH64[4Bh/4Ch]`, `SAVREGS/LEAVE` frame-correct, `cmp ah` dispatch; `main` 34 tests (`[28]` PSP, `[29]` cmd, `[30]` ENV, `[31]` loader, `[32]` spawn, `[33]` EXEC/EXIT, `[34]` stress).
-- **Build** 12 `elf64` objects (+`proc64.o`), kernel `31756B` (62 sectors, ≤64). `make` → `build/kernel.bin` (32K) + `dos64.img` (10M).
-- **Test** Both emulators show **`[1]...PASS` through `[34]...PASS / Summary: 34 passed, 0 failed`** plus all six `ALL TESTS PASS` banners (serial.log + VGA). No `#UD/#GP/#PF`. `[30]/[32]/[33]` emit single-letter progress markers before `PASS` (fail-point isolation).
-- **Bugs fixed** 10 defects: local-dot `strlen` scoping, RIP+SIB ×37, `RSI` vs `RDI` helper ABI, `env_unset` stack + find-miss, `bl`/`RBX=out_size` clobber, `MCB-32` vs `40` owner smash, `cmp eax` vs `ah` dispatch-always-bad, `push/pop` order + `SPSAVE` byte, replace-tail `RCX` overwrite, test `AL`-before-save.
-
-See `docs/13-phase8-process.md` for the full report.
-
-## Phase 9 Status — System Call Interface (INT 21h IDT gate) Complete
-
-- **Scope** DOS 1.25 `INT 21h DISPATCH` + `SETVECT` → flat 64-bit Option B: 256-entry IDT (`0xEE` DPL3 for `0x21`, `0x8E` for exceptions, error-aware stubs), `int21_entry` (`SPSAVE` + `IOSTACK/DSKSTACK` + `DISPATCH64[AH]` + `CF` to `IRETQ`), PIC masked (`0x21/0xA1=0xFF`, polling drivers), `AH=01/02/09/0A/0D/0E/19/25/35/3F/40/4C` (+`06/07/08/0B/0C`) via native VGA/KBD.
-- **Kernel modules** `idt64.asm` 7 exports (`init/load/set/get`, `int21_entry`, `default[_err]`, `test_vectors`, `table/ptr`); `syscall64.asm` `DISPATCH64[35/3F/40]`, `R10/R11` temps + `mov r11,ss` (preserve `RAX/RBX/R8`), `NUMDRV=2`, `conin/rawio/rawinp/in/bufin/constat/flushkb/dskreset/seldsk/getdrv/setvect/getvect/read/write`; `main` 42 tests (`[35]` IDT+`int`, `[36]` console, `[37]` bufin, `[38]` drive, `[39]` vectors, `[40]` read, `[41]` write, `[42]` round-trip).
-- **Build** 13 `elf64` objects (+`idt64.o`), kernel `36364B` (71 sectors, ≤128). `make` → `build/kernel.bin` (36K) + `dos64.img` (10M).
-- **Test** Both emulators show **`[1]...PASS` through `[42]...PASS / Summary: 42 passed, 0 failed`** plus all seven `ALL TESTS PASS` banners (serial.log + VGA). No `#UD/#GP/#PF/check_cs`.
-- **Bugs fixed** 5 defects: `RAX/RBX/R8` clobber in dispatch/int (used `R10/R11` + `mov r11,ss`), `conout AL` stale (`mov al,dl`), timer `IRQ0→INT8` stack corruption (PIC mask, was layout-dependent `check_cs(0x0246)`), `FLUSHKB` flush-before-redispatch test expectation, test `AL`-before-`cmp` marker clobber.
-
-See `docs/14-phase9-syscall.md` for the full report.
-
-## Phase 10 Status — Command Interpreter (COMMAND64) Complete
-
-- **Scope** DOS 1.25 `COMMAND.ASM` resident/transient + `COMTAB`/`SWITCH`/`DELIM`/`SCANOFF` + `CATALOG/ERASE/RENAME/TYPEFIL/COPY/PAUSE/DATE/TIME/EXELOAD` + batch `%1..%9` → flat 64-bit `COMMAND64`: `SCANOFF/DELIM/SWITCH` parser (drive `X:` strip, upper, `/W/P/V/A/B`), `COMTAB64` lookup (DIR/REN/RENAME/ERASE/DEL/TYPE/REM/COPY/PAUSE/DATE/TIME/CLS/VER/PROMPT/PATH/ECHO), builtins (DIR normal+`/W` via `fs_dir_get_size64`, TYPE `^Z`, COPY ascii/binary, DEL `0xE5`, REN dup-check, CLS via VGA, VER, PROMPT/PATH via ENV, DATE leap+`MM-DD-YY`/`MM/DD/YYYY`, TIME `HH:MM[:SS]`, PAUSE/REM/ECHO no-op), external EXEC via `proc_spawn64`, batch open/next/expand (`%N` shifted, `%%` escape, CRLF).
-- **Kernel modules** `cmd64.asm` 47 exports (`init/strlen/toupper/delim/skip/switches/parse/lookup/dispatch`, `cls/ver/prompt/path/rem/pause/echo`, `date/time get/set/parse`, `dir/type/copy/del/ren`, `exec/batch open/next/close/expand` + 8 `test_*`); `main` 50 tests (`[43]` parser, `[44]` DIR/TYPE, `[45]` COPY/DEL/REN, `[46]` shellcfg, `[47]` datetime, `[48]` exec, `[49]` batch, `[50]` dispatch/stress).
-- **Build** 14 `elf64` objects (+`cmd64.o`), kernel `45932B` (89 sectors, ≤128). `make` → `build/kernel.bin` (46K) + `dos64.img` (10M).
-- **Test** Both emulators show **`[1]...PASS` through `[50]...PASS / Summary: 50 passed, 0 failed`** plus all eight `ALL TESTS PASS` banners (serial.log + VGA). No `#UD/#GP/#PF/check_cs`.
-- **Bugs fixed** 7 defects: `rep movsb` RSI/RDI swap in dir/fileops tests (corrupted `t44_name*`), `BL/RBX` + `CL/RCX` clobbers in type/copy (`R8/R9` temps), `ECX` loop-index clobber in DIR wide (`R9` index + `cmd_dir_flags` mem), `u32` value/out mixup (`ESI` value), `AL` clobber in batch param offset (`R11B` save), `AH+REX` illegal with `R12` in date-get (`DL` temps + legacy `RBX` out), `AL/month` + `AX/year` overlap in days-in-month (`RDI=year/RSI=month` ABI) + early-`ret` stack leak in date-set (validate before push), batch `%N` off-by-one (`%1`→slot0, `-1` empty) + `len 64` padding NULs (`strlen` exact), ATA scratch `LBA100` overlap once kernel grew past 84 sectors (moved to `LBA200`; stale-image corruption of `dummy_dpb`/`t47`/`t49` caused Bochs `[4]/[47]/[49]/[50]` FAIL until `make clean`).
-
-See `docs/15-phase10-command.md` for the full report.
-
-## Phase 11 Status — Interrupt Descriptor Table (IVT replacement) Complete
-
-- **Scope** DOS 1.25 IVT `0000:0000` + `SETVECT/DISPATCH` + `INT 08h/09h/0Eh` → flat 64-bit IDT: 32 per-vector exc stubs 0-31 with diagnostics (`vector/error/RIP`, `fault_count`, `exc_counts[32]`), PIC remap master `0x20`/slave `0x28` (fixes `INT8/#DF` overlap), IRQ0 timer `@0x20` (`tick++`+EOI), IRQ14 disk `@0x2E` (count+EOI slave+master), DOS `0x21` DPL3 kept, IRQ1 kbd handler masked (master+1=`0x21` collision; polling kept, tested via spare `0x2F`).
-- **Kernel modules** `idt64.asm` 24 exports (`pic_remap/get_mask/set_mask/mask/unmask`, `irq0/irq1/irq14`, `exc_common`, `tick/irq14/fault/last_vector/last_error/last_rip/exc_count/reset` + 7 Phase 9 kept); `main` 58 tests (`[51]` SIDT/structure/IMR, `[52]` `int 0/3/4` diag, `[53]` remap/mask, `[54]` timer, `[55]` kbd via `0x2F`, `[56]` disk, `[57]` `25/35` on IRQ + DOS, `[58]` stress).
-- **Build** same 14 `elf64` objects, kernel `50124B` (97 sectors, ≤128). `make` → `build/kernel.bin` (50K) + `dos64.img` (10M).
-- **Test** Both emulators show **`[1]...PASS` through `[58]...PASS / Summary: 58 passed, 0 failed`** plus all nine `ALL TESTS PASS` banners (serial.log + VGA). No `#UD/#GP/#PF/#DF/check_cs` (Bochs only SND panic, as before).
-- **Bugs fixed** 3 defects: BSS `align 8`→`alignb 8` warnings, SIDT base read after `call` (RSP shift; copy before calls), dead double-read in `pic_get_mask64` (`push rcx` + single read).
-
-See `docs/16-phase11-idt.md` for the full report.
-
-## Phase 12 Status — Stack and Calling Conventions (System V ABI) Complete
-
-- **Scope** DOS 1.25 16-bit `SS:SP` + near/far `CALL` + `PUSH segment` + `LES/LDS` far loads → flat 64-bit `RSP` System V ABI: `RSP%16==0` before `CALL` (8 inside), `RDI,RSI,RDX,RCX,R8,R9` first 6 args + stack for 7th+ (16B-aligned), `RAX` return, `RBX/RBP/R12-R15` callee-saved, `DF=0`, near `CALL/RET` only, 64-bit `PUSH/POP` only.
-- **Kernel modules** `stack64.asm` 23 exports (15 helpers: `init/get_rsp/align_offset/caller_aligned`, `abi_sum6/sum8/callee_demo/caller_clobber`, `recurse/canary_init/check`, `irq_align/push_balance/df_check/near_call` + `stack_dbg_char` + 8 `stack_test_*`); `include/stack.inc` (`STACK_TOP64 0x90000`, `ALIGN_RSP16`, `ABI_PUSH/POP_CALLEE` with `R10` dummy so `RAX` stays free); `syscall64.asm` BSS `alignb 16` before `IOSTACK/DSKSTACK` so both tops are 16-aligned; `main` 66 tests (`[59]` align, `[60]` callee, `[61]` args, `[62]` depth, `[63]` IRQ, `[64]` push, `[65]` canary, `[66]` stress).
-- **Build** 15 `elf64` objects (+`stack64.o`), kernel `53244B` (103 sectors, ≤128). `make` → `build/kernel.bin` (53K) + `dos64.img` (10M).
-- **Test** Both emulators show **`[1]...PASS` through `[66]...PASS / Summary: 66 passed, 0 failed`** plus all ten `ALL TESTS PASS` banners (serial.log + VGA). No `#UD/#GP/#PF/#DF/check_cs` (Bochs only SND panic, as before).
-- **Bugs fixed** 2 defects: `IOSTACK_TOP`/`DSKSTACK_TOP %16==8` (24B `SPSAVE/SSSAVE/CONTSTK` before 4K stacks; added `alignb 16` pad → tops aligned, `[59]` PASS); `[63]` strict `0x20==0x8E` fails after Phase11 `[57]` restores `0x20` via `SETVECT` (always `USER 0xEE` gate, still functional) → accept `0x8E/0xEE` for IRQ vectors, exact `0xEE` kept for DOS `0x21`.
-
-See `docs/17-phase12-stack.md` for the full report.
-
+Derived from Microsoft MS-DOS v1.25 (Tim Paterson 86-DOS), MIT licensed —
+see `LICENSE`. The 16-bit sources (`MSDOS.ASM`, `IO.ASM`, `COMMAND.ASM`)
+are kept as reference; the running system is the 64-bit rewrite under
+`src/` described above.
