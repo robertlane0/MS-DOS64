@@ -11,7 +11,7 @@ org 0x7E00
     ; To avoid duplication, we rely on the jmpover: GDT sits between jump and entry, not executed.
 
 KERNEL_LBA       equ 16
-KERNEL_SECTORS   equ 128        ; 64 KiB — Phase9 IDT+syscall+tests exceed 32K (was 64)
+KERNEL_SECTORS   equ 176        ; 88 KiB — shell+tests headroom (was 160)
 KERNEL_STAGING_SEG  equ 0x8000
 KERNEL_STAGING_OFF  equ 0x0000  ; linear 0x80000 - staging buffer in low memory
 KERNEL_DEST_LINEAR  equ 0x100000
@@ -148,12 +148,44 @@ load_kernel:
     test cl, 1
     jz .try_chs
 
-    ; LBA path — use DAP
+    ; LBA path — chunked DAP reads (<=64 sectors each: some BIOSes cap
+    ; a single packet at 127 sectors / dislike 64K-boundary spans).
+    ; Staging is linear 0x80000+: chunk i uses seg = 0x8000 + i*2048/16.
+    mov ebx, KERNEL_SECTORS      ; remaining
+    xor ebp, ebp                 ; done
+.lba_chunk:
+    test ebx, ebx
+    jz .ok
+    mov eax, ebx
+    cmp eax, 64
+    jbe .have_chunk_n
+    mov eax, 64
+.have_chunk_n:
+    mov [dap_count], ax
+    mov word [dap_off], 0
+    mov ecx, ebp
+    shl ecx, 5                   ; done*32 paragraphs (512B = 32 paras)
+    add cx, KERNEL_STAGING_SEG
+    mov [dap_seg], cx
+    mov ecx, ebp
+    add ecx, KERNEL_LBA
+    mov [dap_lba_lo], ecx
+    mov dword [dap_lba_hi], 0
+    push eax                     ; chunk count (BIOS clobbers AX)
+    push ebx
+    push ebp
     mov si, dap_kernel
     mov ah, 0x42
     mov dl, [boot_drive2]
     int 0x13
-    jnc .ok
+    pop ebp
+    pop ebx
+    pop ecx
+    jc .lba_fail_chunk
+    add ebp, ecx
+    sub ebx, ecx
+    jmp .lba_chunk
+.lba_fail_chunk:
     ; fall through to CHS on error
     mov si, msg_lba_fail
     call print16
@@ -206,6 +238,11 @@ load_kernel_chs:
     pop ebx
     pop cx
     add di, 512
+    jnc .chs_nowrap
+    mov ax, es                   ; 64K wrap: advance segment by 0x1000
+    add ax, 0x1000
+    mov es, ax
+.chs_nowrap:
     inc ebx
     loop .chs_loop
 
@@ -227,10 +264,16 @@ boot_drive2: db 0
 dap_kernel:
     db 0x10
     db 0
-    dw KERNEL_SECTORS
+dap_count:
+    dw 0                         ; (filled per chunk; <=64)
+dap_off:
     dw KERNEL_STAGING_OFF
+dap_seg:
     dw KERNEL_STAGING_SEG
-    dq KERNEL_LBA
+dap_lba_lo:
+    dd KERNEL_LBA
+dap_lba_hi:
+    dd 0
 
 msg_stage2:        db 13,10,"Stage2 @0x7E00 entered (real)",13,10,0
 msg_a20_ok2:       db "A20 stage2 OK",13,10,0

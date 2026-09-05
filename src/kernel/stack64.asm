@@ -59,6 +59,7 @@ extern idt_reset_stats64
 extern mem_validate64
 extern int21_entry
 extern irq0_timer_handler
+extern irq1_kbd_handler
 extern irq14_disk_handler
 
 section .bss
@@ -604,33 +605,40 @@ stack_test_irq:
     mov rbx, rax
     cmp byte [rbx+0*16+4], 0
     jne .fail63
-    cmp byte [rbx+0x20*16+4], 0
+    cmp byte [rbx+0x28*16+4], 0
+    jne .fail63
+    cmp byte [rbx+0x29*16+4], 0
     jne .fail63
     cmp byte [rbx+0x21*16+4], 0
     jne .fail63
-    cmp byte [rbx+0x2E*16+4], 0
+    cmp byte [rbx+0x36*16+4], 0
     jne .fail63
-    ; gate types: DOS 0x21 must stay 0xEE (DPL3); IRQ 0x20/0x2E accept 0x8E
-    ; or 0xEE — Phase11 [57] restores 0x20 via SETVECT (USER gate), so a
+    ; gate types: DOS 0x21 must stay 0xEE (DPL3); IRQs accept 0x8E
+    ; or 0xEE — Phase11 [57] restores 0x28 via SETVECT (USER gate), so a
     ; strict 0x8E check would fail after [57] although the handler works.
     cmp byte [rbx+0x21*16+5], 0xEE
     jne .fail63
-    mov al, [rbx+0x20*16+5]
+    mov al, [rbx+0x28*16+5]
     cmp al, 0x8E
-    je .ok63_t20
+    je .ok63_t28
     cmp al, 0xEE
     jne .fail63
-.ok63_t20:
-    mov al, [rbx+0x2E*16+5]
+.ok63_t28:
+    mov al, [rbx+0x36*16+5]
     cmp al, 0x8E
-    je .ok63_t2e
+    je .ok63_t36
     cmp al, 0xEE
     jne .fail63
-.ok63_t2e:
+.ok63_t36:
     ; vectors still point at handlers (no stack switch corruption)
-    mov rdi, 0x20
+    mov rdi, 0x28
     call idt_get_vector64
     lea rcx, [rel irq0_timer_handler]
+    cmp rax, rcx
+    jne .fail63
+    mov rdi, 0x29
+    call idt_get_vector64
+    lea rcx, [rel irq1_kbd_handler]
     cmp rax, rcx
     jne .fail63
     mov rdi, 0x21
@@ -638,7 +646,7 @@ stack_test_irq:
     lea rcx, [rel int21_entry]
     cmp rax, rcx
     jne .fail63
-    mov rdi, 0x2E
+    mov rdi, 0x36
     call idt_get_vector64
     lea rcx, [rel irq14_disk_handler]
     cmp rax, rcx
@@ -646,7 +654,7 @@ stack_test_irq:
     ; timer IRQ preserves regs + RSP, tick 0->1, no fault
     mov rbx, rsp
     mov rcx, 0x1357
-    int 0x20
+    int 0x28
     cmp rcx, 0x1357
     jne .fail63
     cmp rbx, rsp
@@ -818,7 +826,7 @@ stack_test_stress:
     cmp rax, 528
     jne .fail66
     ; timer tick (IRQ stack path)
-    int 0x20
+    int 0x28
     call idt_get_tick64
     cmp rax, 1
     jne .fail66

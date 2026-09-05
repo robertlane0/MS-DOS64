@@ -48,23 +48,25 @@ $(BUILD)/kernel.elf: $(KERNEL_OBJS) linker.ld | $(BUILD)
 $(BUILD)/kernel.bin: $(BUILD)/kernel.elf | $(BUILD)
 	objcopy -O binary $< $@
 	@echo "Kernel binary: $$(stat -c %s $@) bytes ($$(expr $$(stat -c %s $@) / 512) sectors)"
-	@test $$(stat -c %s $@) -le $$(expr 128 \* 512) || (echo "Kernel too large for 128 sectors! Increase KERNEL_SECTORS"; exit 1)
+	@test $$(stat -c %s $@) -le $$(expr 176 \* 512) || (echo "Kernel too large for 176 sectors! Increase KERNEL_SECTORS"; exit 1)
 
 $(BUILD)/dos64.img: $(BUILD)/mbr.bin $(BUILD)/stage2.bin $(BUILD)/kernel.bin | $(BUILD)
 	dd if=/dev/zero of=$@ bs=1M count=10 status=none
 	dd if=$(BUILD)/mbr.bin of=$@ conv=notrunc status=none
 	dd if=$(BUILD)/stage2.bin of=$@ bs=512 seek=1 conv=notrunc status=none
 	dd if=$(BUILD)/kernel.bin of=$@ bs=512 seek=16 conv=notrunc status=none
+	python3 tools/mkfat12.py $@
 	@echo "Created $@ ($$(stat -c %s $@) bytes)"
 
 run-bochs: $(BUILD)/dos64.img
+	rm -f $(BUILD)/dos64.img.lock bochs.log
 	bochs -f bochsrc.txt -q
 
 run-qemu: $(BUILD)/dos64.img
 	qemu-system-x86_64 -drive file=$(BUILD)/dos64.img,format=raw -serial stdio
 
 clean:
-	rm -rf $(BUILD)/*.bin $(BUILD)/*.o $(BUILD)/*.img $(BUILD)/*.elf $(BUILD)/*.map
+	rm -rf $(BUILD)/*.bin $(BUILD)/*.o $(BUILD)/*.img $(BUILD)/*.elf $(BUILD)/*.map $(BUILD)/*.lock
 	rm -rf $(BUILD)/src
 
 .PHONY: all clean run-bochs run-qemu

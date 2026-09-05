@@ -53,4 +53,10 @@ endstruc
 %define FS_SCRATCH_LBA2  501
 %define FS_FILE_LBA_BASE 510  ; file-data base when DPB firrec remapped for test [26]
 
+; --- Real on-image FAT12 volume (tools/mkfat12.py, 1.44M geometry) ---
+; LBA 512..3391: boot+BPB, 2x9 FAT, 14-sec root, data clusters 2..2848.
+; Clear of kernel (16..~119), ATA scratch (200), FS scratch (500..511).
+%define FS_VOL_LBA       512
+%define FS_VOL_TOTSEC    2880
+
 %endif

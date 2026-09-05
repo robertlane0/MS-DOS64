@@ -243,3 +243,5 @@ Identity map 0–8 MiB (PML4→PDPT→PD 2 MiB pages) covers all.
 Next: Phase 3 register conversion, Phase 5 native drivers, Phase 7 FAT12, etc.
 
 *All claims verified via `make`, `hexdump -C`, `BXSHARE=... bochs -f bochsrc.txt -q`, `qemu-system-x86_64 -serial stdio`.*
+
+**Update (closure):** see `docs/19-closure-g1-g6.md` for what changed after this report.

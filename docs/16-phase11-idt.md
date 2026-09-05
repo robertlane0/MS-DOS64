@@ -164,3 +164,5 @@ after `[53]` for determinism.
 
 **Next:** Phase 12 stack/ABI hardening (`RSP` 16 B, System V `RDI/RSI/RDX/RCX/R8/R9`,
 callee-saved `RBX/RBP/R12–R15`, `IST` stacks, `SYSCALL` extension) on top of the full IDT.
+
+**Update (closure):** see `docs/19-closure-g1-g6.md` for what changed after this report.

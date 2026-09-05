@@ -1,6 +1,6 @@
 # MS-DOS64 — 64-bit BIOS Bootable DOS (from MS-DOS 1.25)
 
-> Phase 1 (Architecture Analysis) **complete**. Phase 2 (Boot & Long Mode) **complete** — boots via BIOS MBR → 64-bit on Bochs & QEMU. **Phase 3 (Register & Instruction Conversion) complete** — 7/7 PASS. **Phase 4 (Addressing Mode Transformation) complete** — 12/12 PASS. **Phase 5 (BIOS Interrupt Replacement, Option C) complete** — 16/16 PASS (native VGA/ATA/KBD) on both emulators. **Phase 6 (Memory Management Overhaul) complete** — 21/21 PASS (MCB64 coalesce/resize/validate/protection, AH=48h/49h/4Ah) on both emulators. **Phase 7 (File System Adaptation) complete** — 27/27 PASS (FAT12 on LBA: BPB→DPB, chain, dir, FCB64) on both emulators. **Phase 8 (Process Management) complete** — 34/34 PASS (PSP64/env/loader/spawn/exit, AH=4Bh/4Ch, INT20h) on both emulators. **Phase 9 (System Call Interface) complete** — 42/42 PASS (INT 21h IDT gate DPL3 + AH=01/02/09/0A/0D/0E/19/25/35/3F/40/4C) on both emulators. **Phase 10 (Command Interpreter) complete** — 50/50 PASS (COMMAND64 parser/builtins/exec/batch: DIR/COPY/DEL/REN/TYPE/CLS/DATE/TIME/VER/PROMPT/PATH/PAUSE/REM) on both emulators. **Phase 11 (Interrupt Descriptor Table) complete** — 58/58 PASS (full IDT 0-31 diagnostics, PIC 0x20/0x28 remap, IRQ0/14, DOS 0x21 kept) on both emulators. **Phase 12 (Stack and Calling Conventions) complete** — 66/66 PASS (RSP 16B, System V RDI/RSI/RDX/RCX/R8/R9, callee-saved, canary, IST reserve) on both emulators.
+> Phase 1 (Architecture Analysis) **complete**. Phase 2 (Boot & Long Mode) **complete** — boots via BIOS MBR → 64-bit on Bochs & QEMU (chunked LBA loads, CHS fallback with 64K-safe ES advance). **Phase 3 (Register & Instruction Conversion) complete** — 7/7 PASS. **Phase 4 (Addressing Mode Transformation) complete** — 12/12 PASS. **Phase 5 (BIOS Interrupt Replacement, Option C) complete** — 16/16 PASS (native VGA/ATA/KBD polling) on both emulators. **Phase 6 (Memory Management Overhaul) complete** — 21/21 PASS (MCB64 coalesce/resize/validate/protection, AH=48h/49h/4Ah) on both emulators. **Phase 7 (File System Adaptation) complete** — 27/27 PASS synthetic + a **real FAT12 volume** (mkfat12 @ LBA 512, mount + on-disk read, test 67). **Phase 8 (Process Management) complete** — 34/34 PASS (PSP64/env/loader/spawn/exit, AH=4Bh/4Ch, INT20h) on both emulators. **Phase 9 (System Call Interface) complete** — full INT 21h surface: consoles, drives, vectors, handle R/W, **plus** AUX/COM/LIST, RTC date/time, VERIFY, disk pointers and the **whole FCB file cluster** (tests 68–71); only DOS-reserved slots stay stubbed (as DOS itself does). **Phase 10 (Command Interpreter) complete** — 50/50 PASS (COMMAND64 parser/builtins/exec/batch) **plus an interactive shell** (prompt loop, volume DIR/TYPE/COPY/DEL/REN, *.COM EXEC, HELP/EXIT, test 72). **Phase 11 (Interrupt Descriptor Table) complete** — 58/58 PASS (full IDT 0-31 diagnostics, PIC **0x28/0x30** remap, IRQ0/IRQ1(installed)/IRQ14, DOS 0x21 kept) on both emulators. **Phase 12 (Stack and Calling Conventions) complete** — 66/66 PASS (RSP 16B, System V RDI/RSI/RDX/RCX/R8/R9, callee-saved, canary, IST reserve) on both emulators. **Total: 72/72 PASS**, then the shell. See `docs/18-truth-gap-analysis.md` (audit) + `docs/19-closure-g1-g6.md` (fixes, honest limitations).
 
 Original source: Microsoft MS-DOS v1.25 (MIT), Tim Paterson 86-DOS. This repo converts the 16-bit real-mode SCP dialect to a flat 64-bit long-mode OS that boots via legacy BIOS MBR on Bochs x86-64.
 
@@ -21,36 +21,43 @@ All tables include `file:line` refs and were generated from live `grep -n` over 
 ### Build & Run (Phase 12 — Stack and Calling Conventions)
 
 ```bash
-make            # builds 512B MBR + stage2 (1K) + kernel (53K, 15 objs) + dos64.img (10M)
+make            # builds 512B MBR + stage2 + kernel (65K, 16 objs) + dos64.img (10M, FAT12 @ LBA 512)
 make run-bochs  # Bochs 3.0 ryzen, 256MiB, serial.log + VGA at 0xB8000
-make run-qemu   # qemu-system-x86_64 -serial stdio alternative (also 64-bit)
+make run-qemu   # qemu-system-x86_64 -serial stdio alternative (also drives the shell)
 make clean
 ```
 
-**Verify boot (Phase 12):**
+**Verify boot:**
 
 ```bash
+# QEMU (primary) — 72 tests, then the shell (Ctrl-C / timeout to exit)
+timeout 25 qemu-system-x86_64 -drive file=build/dos64.img,format=raw -serial stdio -display none
+# Expected serial tail:
+#  [66]...PASS / [67] Real FAT12 volume mount + file read... PASS
+#  [68] RTC date/time get/set (INT21 2A-2D)... PASS / [69] AUX/LIST + ... PASS
+#  [70] FCB open/rndread/search/makefcb... PASS / [71] FCB create/write/read/rename/delete... PASS
+#  [72] Shell line dispatch (DIR/TYPE/EXEC)... PASS
+#  Summary: 72 passed, 0 failed / Phase12 stack/ABI (16B+SysV+canary): ALL TESTS PASS
+#  MS-DOS64 shell (COMMAND64). Type HELP for commands.
+
+# Drive the shell over serial stdin:
+printf '\rDIR\rTYPE HELLO.TXT\rHELP\rEXIT\r' | timeout 25 qemu-system-x86_64 -drive file=build/dos64.img,format=raw -serial stdio -display none
+# Expected: A> DIR -> 4 files (HELLO.TXT 151, README.TXT 1000, TEST.COM 1, DATA.BIN 512),
+#  TYPE prints the file, HELP lists builtins, bad names error, EXIT leaves the loop.
+
 # Bochs (target) — remove stale lock first
-rm -f bochs.log serial.log build/dos64.img.lock && make && BXSHARE=/nix/store/.../share/bochs timeout 25 bochs -f bochsrc.txt -q; cat serial.log
-# Expected serial.log:
+rm -f bochs.log serial.log build/dos64.img.lock && make && timeout 25 bochs -f bochsrc.txt -q; cat serial.log
+# (Same 72-test suite; serial.log is the COM1 capture.)
+```
+
+**Verify boot (full early bring-up, retained):**
+
+```bash
+# Expected serial.log head (before the test list):
 # MS-DOS64 MBR boot / A20 enabled / Loading stage2 via LBA... / Stage2 @0x7E00 ... / Kernel loaded
 # Hello from 64-bit DOS64 kernel: Phase2 long mode OK!
-# Phase3: Register & Instruction Conversion Test Suite / Phase4: Addressing ... / Phase5: BIOS Interrupt Replacement — Native Drivers (Option C)
-# Phase6: Memory Management Overhaul — MCB64, para/page, coalesce, protection
-# Phase7: File System Adaptation — FAT12 on LBA, DPB/DIR/FCB64
-# Phase8: Process Management — PSP64, ENV, Loader, EXEC/EXIT
-# Phase9: System Call Interface — INT 21h IDT gate + AH handlers
-# Phase10: Command Interpreter — COMMAND64 parser/builtins/exec/batch
-# Phase11: Interrupt Descriptor Table — full IDT, PIC remap, IRQ handlers
-# Phase12: Stack & Calling Conventions — System V ABI, 16B, callee-saved
-#  [1]...PASS ... [42]...PASS / [43]...PASS ... [50]...PASS / [51]...PASS ... [58]...PASS / [59]...PASS ... [66]...PASS / Summary: 66 passed, 0 failed / Phase12 stack/ABI (16B+SysV+canary): ALL TESTS PASS
+# Phase3 ... Phase12 suite banners, then [1]...PASS through [72]...PASS
 # Note: [30]/[32]/[33] emit single-letter progress markers (A–N/a–h/p–$) before PASS (fail-point isolation).
-
-# QEMU alternative (also shows Phase12 suite)
-timeout 12 qemu-system-x86_64 -drive file=build/dos64.img,format=raw -serial stdio -display none
-
-# Quick QEMU verify:
-# Phase12: Stack & Calling Conventions ... / [1]...PASS ... [66]...PASS / Summary: 66 passed, 0 failed
 ```
 
 ### Project Layout
@@ -61,13 +68,14 @@ MSDOS.ASM          kernel (4030 lines, DOSGROUP)
 IO.ASM             IO.SYS + BIOS jump table (1933)
 COMMAND.ASM        resident/transient shell (2165)
 STDDOS.ASM         build wrapper (23)
-src/boot/          mbr.asm (512B MBR, A20, INT13 LBA/CHS) + stage2.asm (real→protected→long, 128 sectors) + gdt.asm
-src/kernel/        main.asm (Phase12 harness, 66 tests, _start @0x100000) + stack64.asm (stack/ABI: 16B, SysV RDI..R9, callee-saved, canary, IST1/2 reserve, 23 exports) + cmd64.asm (COMMAND64: parser/COMTAB64/builtins/exec/batch, 47 exports) + fat64.asm (UNPACK/PACK) + fs64.asm (FAT12 on LBA: BPB/chain/dir/FCB64, 19 exports) + mem64.asm (MCB64: coalesce/resize/validate/protect, 24 exports) + proc64.asm (PSP64/env/loader/spawn/exit, 21 exports) + syscall64.asm (SAVREGS/DISPATCH64 77 entries, AH=01/02/09/0A/0D/0E/19/25/35/3F/40/48h/49h/4Ah/4Bh/4Ch, I/O+DSK 4K stacks 16-aligned) + idt64.asm (full IDT 0-31 diagnostics, PIC 0x20/0x28 remap, IRQ0 @0x20/IRQ14 @0x2E, DOS 0x21 DPL3, 24 exports)
+src/boot/          mbr.asm (512B MBR, A20, INT13 LBA/CHS) + stage2.asm (real→protected→long, chunked LBA loads, 64K-safe CHS, 176 kernel sectors) + gdt.asm
+src/kernel/        main.asm (harness, 72 tests, _start @0x100000) + shell64.asm (REPL: prompt/line-input/volume builtins/*.COM EXEC, HELP/EXIT) + stack64.asm (stack/ABI: 16B, SysV RDI..R9, callee-saved, canary, IST1/2 reserve) + cmd64.asm (COMMAND64: parser/COMTAB64/builtins/exec/batch) + fat64.asm (UNPACK/PACK, dir-read path) + fs64.asm (FAT12: BPB/chain/dir/FCB64 + volume mount/read/flush/alloc + record-I/O core) + mem64.asm (MCB64: coalesce/resize/validate/protect) + proc64.asm (PSP64/env/loader/spawn/exit) + syscall64.asm (SAVREGS/DISPATCH64 77 entries: consoles, drives, vectors, handles, AUX/COM, RTC date/time, full FCB cluster, I/O+DSK 4K stacks 16-aligned) + idt64.asm (full IDT 0-31 diagnostics, PIC 0x28/0x30 remap, IRQ0 @0x28/IRQ1 @0x29 installed/IRQ14 @0x36, DOS 0x21 DPL3)
 src/drivers/       vga.asm (0xB8000 text, cursor, scroll) + ata.asm (0x1F0 PIO LBA28, CHS→LBA, scratch LBA200/500+) + kbd.asm (0x60/0x64 PS/2, queue, tables) — native Option C
 src/lib/           string64.asm (REP/LOOP/XLAT) + bcd64.asm (AAM/AAD→DIV, CBW etc.) + addr64.asm (seg:off→linear, RIP-rel, far→near)
-include/           fcb.inc/dpb.inc/psp.inc/mcb.inc/regs.inc/fs.inc/stack.inc (64-bit strucs, STKPTRS64, DIRENT, BPB, STACK_TOP/ABI macros)
-docs/              00-phase1-summary + 01..06 analysis + 07-phase2-boot + 08-phase3-register-conversion + 09-phase4-addressing + 10-phase5-bios-drivers + 11-phase6-memory + 12-phase7-filesystem + 13-phase8-process + 14-phase9-syscall + 15-phase10-command + 16-phase11-idt + 17-phase12-stack (Phase 12 report)
-bochsrc.txt        Bochs 3.0 ryzen, 256MiB, ata0 10MiB flat, VBE, serial.log
+tools/             mkfat12.py (stamps the 1.44M FAT12 volume @ LBA 512 during make)
+include/           fcb.inc/dpb.inc/psp.inc/mcb.inc/regs.inc/fs.inc/stack.inc (64-bit strucs, STKPTRS64, DIRENT, BPB, STACK_TOP/ABI macros, FS_VOL_LBA)
+docs/              00-phase1-summary + 01..06 analysis + 07-phase2-boot + 08-phase3-register-conversion + 09-phase4-addressing + 10-phase5-bios-drivers + 11-phase6-memory + 12-phase7-filesystem + 13-phase8-process + 14-phase9-syscall + 15-phase10-command + 16-phase11-idt + 17-phase12-stack + 18-truth-gap-analysis (audit) + 19-closure-g1-g6 (fixes + limits)
+bochsrc.txt        Bochs 3.0 ryzen, 256MiB, ata0 10MiB flat CHS 20/16/63, VBE, serial.log
 linker.ld          flat link at 0x100000 (*.text.start first)
 build/             mbr.bin, stage2.bin (≈1K), kernel.bin (53K, 103 sec), kernel.elf (165K), dos64.img (10M)
 ```

@@ -8,12 +8,12 @@
 ;           error-aware default stubs, int21_entry Option B, PIC masked.
 ; 64-bit (Phase 11): per-vector exception stubs 0-31 with diagnostics
 ;           (vector+error+RIP recorded, per-vector counts), PIC remapped
-;           master 0x20 / slave 0x28 (standard, fixes INT8/#DF overlap),
-;           IRQ0 timer @0x20 (tick+EOI), IRQ14 disk @0x2E (count+EOI slave+master),
-;           IRQ1 kbd handler provided (reads 0x60->queue+EOI) but NOT installed
-;           at 0x21 to preserve DOS compat (master+1 == 0x21 collision; IRQ1 stays
-;           masked, polling driver Phase5 suffices; handler tested via spare vector).
-;           All IRQs masked after remap for deterministic tests; unmask API provided.
+;           master 0x28 / slave 0x30 (above CPU 0-31 AND clear of DOS 0x21;
+;           the old 0x20/0x28 map put IRQ1 on 0x21), IRQ0 timer @0x28
+;           (tick+EOI), IRQ1 kbd @0x29 INSTALLED (0x60->queue+EOI),
+;           IRQ14 disk @0x36 (count+EOI slave+master).
+;           All IRQs masked after remap for deterministic tests; unmask
+;           API provided, and the shell unmasks IRQ0/IRQ1 on entry.
 ;
 ; IDT entry (16B, AGENTS.md Phase11 IDT_ENTRY):
 ;   +0 offset_low (RIP 0-15), +2 selector 0x08, +4 IST 0, +5 type_attr,
@@ -65,8 +65,9 @@ extern kbd_queue_push
 %define PIC_MASTER_DATA 0x21
 %define PIC_SLAVE_CMD 0xA0
 %define PIC_SLAVE_DATA 0xA1
-%define IRQ_TIMER_VEC 0x20
-%define IRQ_DISK_VEC 0x2E      ; slave 0x28 + IRQ14-8=6 -> 0x2E
+%define IRQ_TIMER_VEC 0x28      ; master 0x28 + IRQ0 (clears DOS 0x21)
+%define IRQ_KBD_VEC 0x29        ; master 0x28 + IRQ1 (installed, was masked)
+%define IRQ_DISK_VEC 0x36       ; slave 0x30 + IRQ14-8=6 -> 0x36
 %define DOS_VEC 0x21
 
 section .bss
@@ -142,10 +143,14 @@ pic_delay:
     ret
 
 ; ------------------------------------------------------------
-; pic_remap64 — remap 8259 PIC master 0x20 / slave 0x28 (standard).
+; pic_remap64 — remap 8259 PIC master 0x28 / slave 0x30.
+;   Master 0x28 + slave 0x30 keeps every hardware IRQ above the CPU
+;   0-31 exception range AND clears DOS INT 0x21 (the old 0x20/0x28 map
+;   put IRQ1 on 0x21, forcing the keyboard handler to stay uninstalled).
 ;   ICW1 0x11 -> 0x20/0xA0, ICW2 offsets, ICW3 cascade (master IRQ2,
 ;   slave id 2), ICW4 0x01 8086 mode. Ends masked (0xFF/0xFF) for
 ;   deterministic polling drivers (Phase5). Safe with IF=0/1 (no STI/CLI).
+;   The shell unmasks IRQ0/IRQ1 on entry (live tick + key IRQs).
 ;   Out: RAX 0
 ; ------------------------------------------------------------
 pic_remap64:
@@ -155,10 +160,10 @@ pic_remap64:
     call pic_delay
     out PIC_SLAVE_CMD, al
     call pic_delay
-    mov al, 0x20              ; master offset
+    mov al, 0x28              ; master offset (IRQ0 -> 0x28)
     out PIC_MASTER_DATA, al
     call pic_delay
-    mov al, 0x28              ; slave offset
+    mov al, 0x30              ; slave offset (IRQ8 -> 0x30, IRQ14 -> 0x36)
     out PIC_SLAVE_DATA, al
     call pic_delay
     mov al, 0x04              ; master: slave at IRQ2
@@ -460,7 +465,7 @@ exc_common:
     iretq
 
 ; ------------------------------------------------------------
-; irq0_timer_handler — IRQ0 @0x20. Tick++, EOI master, IRETQ.
+; irq0_timer_handler — IRQ0 @0x28. Tick++, EOI master, IRETQ.
 ;   Preserves all GPRs. Runs with IF=0 (interrupt gate).
 ; ------------------------------------------------------------
 irq0_timer_handler:
@@ -500,11 +505,11 @@ irq0_timer_handler:
     iretq
 
 ; ------------------------------------------------------------
-; irq1_kbd_handler — IRQ1 kbd (NOT installed at 0x21: collides
-;   with DOS INT 0x21 after master remap 0x20+1. IRQ1 stays masked;
-;   polling driver Phase5 used. Handler tested via spare vector.)
+; irq1_kbd_handler — IRQ1 keyboard @0x29 (INSTALLED: PIC master 0x28
+;   leaves 0x29 free, so DOS INT 0x21 and the keyboard IRQ coexist).
 ;   Checks OBF 0x64:0x01, reads 0x60, pushes queue (drop if full),
-;   EOI master, IRETQ. Preserves all GPRs.
+;   EOI master, IRETQ. Preserves all GPRs. Masked during tests
+;   (deterministic polling); the shell unmasks IRQ0/IRQ1 on entry.
 ; ------------------------------------------------------------
 irq1_kbd_handler:
     push r15
@@ -550,7 +555,7 @@ irq1_kbd_handler:
     iretq
 
 ; ------------------------------------------------------------
-; irq14_disk_handler — IRQ14 @0x2E (slave 0x28+6). Count++,
+; irq14_disk_handler — IRQ14 @0x36 (slave 0x30+6). Count++,
 ;   EOI slave+master (cascade via IRQ2), IRETQ. Preserves all.
 ; ------------------------------------------------------------
 irq14_disk_handler:
@@ -592,8 +597,8 @@ irq14_disk_handler:
 
 ; ------------------------------------------------------------
 ; idt_init64 — fill IDT: 0-31 per-vector exc stubs (error-aware),
-;   0x20 timer IRQ, 0x21 DOS DPL3, 0x2E disk IRQ, rest default.
-;   Builds IDTR. Does NOT LIDT/remap (call idt_load64).
+;   0x28 timer IRQ, 0x29 keyboard IRQ, 0x21 DOS DPL3, 0x36 disk IRQ,
+;   rest default. Builds IDTR. Does NOT LIDT/remap (call idt_load64).
 ;   Out: RAX 0
 ; ------------------------------------------------------------
 idt_init64:
@@ -614,6 +619,8 @@ idt_init64:
     cmp ecx, 32
     jb .skip_fill              ; 0-31 set explicitly below
     cmp ecx, IRQ_TIMER_VEC
+    je .skip_fill
+    cmp ecx, IRQ_KBD_VEC
     je .skip_fill
     cmp ecx, IRQ_DISK_VEC
     je .skip_fill
@@ -758,9 +765,14 @@ idt_init64:
     lea rsi, [rel exc_stub_31]
     mov rdx, IDT_TYPE_KERNEL
     call idt_set_entry_raw
-    ; IRQ0 timer @0x20
+    ; IRQ0 timer @0x28
     mov rdi, IRQ_TIMER_VEC
     lea rsi, [rel irq0_timer_handler]
+    mov rdx, IDT_TYPE_KERNEL
+    call idt_set_entry_raw
+    ; IRQ1 keyboard @0x29 (installed: no DOS collision at 0x28/0x30 map)
+    mov rdi, IRQ_KBD_VEC
+    lea rsi, [rel irq1_kbd_handler]
     mov rdx, IDT_TYPE_KERNEL
     call idt_set_entry_raw
     ; DOS INT 0x21 USER gate (DPL3, DOS-compatible)
@@ -768,7 +780,7 @@ idt_init64:
     lea rsi, [rel int21_entry]
     mov rdx, IDT_TYPE_USER
     call idt_set_entry_raw
-    ; IRQ14 disk @0x2E
+    ; IRQ14 disk @0x36
     mov rdi, IRQ_DISK_VEC
     lea rsi, [rel irq14_disk_handler]
     mov rdx, IDT_TYPE_KERNEL

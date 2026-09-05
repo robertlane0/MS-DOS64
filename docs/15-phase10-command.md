@@ -149,3 +149,5 @@ Heap discipline: Phase 10 tests free what they alloc (`exec` terminates + reaps;
 - [x] Boot + 50 PASS on Bochs & QEMU, no faults
 
 **Next:** Phase 11 interrupt descriptor table completion (PIC remap `0x20+`, IRQ handlers, `INT 27h` TSR) and Phase 12 stack/ABI hardening on top of the COMMAND64 shell.
+
+**Update (closure):** see `docs/19-closure-g1-g6.md` for what changed after this report.

@@ -37,6 +37,26 @@ global fs_dir_read64
 global fs_dir_write64
 global fs_fcb_open64
 global fs_file_read_cluster64
+global fs_mount_volume64
+global fs_vol_read_file64
+global fs_vol_flush_fat64
+global fs_vol_flush_root64
+global fs_alloc_cluster64
+global fs_vol_dpb
+global fs_vol_fat
+global fs_vol_root
+global fs_vol_boot
+global fs_vol_mounted
+global fs_file_write_cluster64
+global fs_vol_find_free64
+global fs_vol_free_chain64
+global fs_fcb_close64
+global fs_fcb_delete64
+global fs_fcb_create64
+global fs_fcb_rename64
+global fs_fcb_search64
+global fs_make_fcb64
+global fs_fcb_io64
 global fs_test_bpb
 global fs_test_chain
 global fs_test_dir
@@ -1454,6 +1474,1336 @@ fs_test_fcb:
     ret
 
 ; ============================================================
+; Mounted real volume (G2) — tools/mkfat12.py stamps a 1.44M FAT12
+; at LBA FS_VOL_LBA; the kernel mounts it into fs_vol_dpb/fat/root.
+; All pointers flat; FAT+root are write-through cached in RAM.
+; ============================================================
+
+; ------------------------------------------------------------
+; fs_mount_volume64 — mount the on-image FAT12 volume
+;   Out: RAX 0 ok (mounted), 1 fail (ATA/BPB error). Idempotent.
+; ------------------------------------------------------------
+fs_mount_volume64:
+    push rbx
+    push rcx
+    push rdx
+    push rsi
+    push rdi
+    push rbp
+    push r8
+    push r9
+    cmp byte [rel fs_vol_mounted], 0
+    jne .already_ok
+    call ata_init
+    test rax, rax
+    jnz .fail
+    lea rdi, [rel fs_vol_boot]
+    mov rsi, FS_VOL_LBA
+    mov rdx, 1
+    call ata_read_lba28
+    test rax, rax
+    jnz .fail
+    cmp word [rel fs_vol_boot + 510], 0xAA55
+    jne .fail
+    lea rsi, [rel fs_vol_boot]
+    lea rbp, [rel fs_vol_dpb]
+    call fs_bpb_parse64
+    test rax, rax
+    jnz .fail
+    ; Absolutize volume-relative LBAs.
+    add dword [rbp + DPB64.firfat], FS_VOL_LBA
+    add dword [rbp + DPB64.firdir], FS_VOL_LBA
+    add dword [rbp + DPB64.firrec], FS_VOL_LBA
+    ; Cache dir sector count: (maxent*32 + secsiz-1) / secsiz.
+    mov eax, [rbp + DPB64.maxent]
+    shl eax, 5
+    mov ecx, [rbp + DPB64.secsiz]
+    dec ecx
+    add eax, ecx
+    inc ecx
+    xor edx, edx
+    div ecx
+    mov [rel fs_vol_dirsec], rax
+    ; Load first FAT copy into RAM.
+    lea rdi, [rel fs_vol_fat]
+    mov eax, [rbp + DPB64.firfat]
+    mov rsi, rax
+    mov edx, [rbp + DPB64.fatsiz]
+    call ata_read_lba28
+    test rax, rax
+    jnz .fail
+    lea rax, [rel fs_vol_fat]
+    mov [rbp + DPB64.fat], rax
+    ; Load root directory into RAM.
+    lea rdi, [rel fs_vol_root]
+    mov eax, [rbp + DPB64.firdir]
+    mov rsi, rax
+    mov rdx, [rel fs_vol_dirsec]
+    call ata_read_lba28
+    test rax, rax
+    jnz .fail
+    mov byte [rel fs_vol_mounted], 1
+.already_ok:
+    xor eax, eax
+    jmp .done
+.fail:
+    mov rax, 1
+.done:
+    pop r9
+    pop r8
+    pop rbp
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rcx
+    pop rbx
+    ret
+
+; ------------------------------------------------------------
+; fs_vol_flush_fat64 — write RAM FAT back to both on-disk copies
+;   Out: RAX 0 ok, 1 fail (or not mounted).
+; ------------------------------------------------------------
+fs_vol_flush_fat64:
+    push rbx
+    push rcx
+    push rdx
+    push rsi
+    push rdi
+    push rbp
+    cmp byte [rel fs_vol_mounted], 0
+    je .fail_novol
+    lea rbp, [rel fs_vol_dpb]
+    lea rdi, [rel fs_vol_fat]
+    mov eax, [rbp + DPB64.firfat]
+    mov rsi, rax
+    mov edx, [rbp + DPB64.fatsiz]
+    call ata_write_lba28
+    test rax, rax
+    jnz .fail_io
+    lea rdi, [rel fs_vol_fat]
+    mov eax, [rbp + DPB64.firfat]
+    add eax, [rbp + DPB64.fatsiz]
+    mov rsi, rax
+    mov edx, [rbp + DPB64.fatsiz]
+    call ata_write_lba28
+    test rax, rax
+    jnz .fail_io
+    xor eax, eax
+    jmp .done
+.fail_novol:
+.fail_io:
+    mov rax, 1
+.done:
+    pop rbp
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rcx
+    pop rbx
+    ret
+
+; ------------------------------------------------------------
+; fs_vol_flush_root64 — write RAM root dir back to disk
+;   Out: RAX 0 ok, 1 fail (or not mounted).
+; ------------------------------------------------------------
+fs_vol_flush_root64:
+    push rbx
+    push rcx
+    push rdx
+    push rsi
+    push rdi
+    push rbp
+    cmp byte [rel fs_vol_mounted], 0
+    je .fail_novol2
+    lea rbp, [rel fs_vol_dpb]
+    lea rdi, [rel fs_vol_root]
+    mov eax, [rbp + DPB64.firdir]
+    mov rsi, rax
+    mov rdx, [rel fs_vol_dirsec]
+    call ata_write_lba28
+    test rax, rax
+    jnz .fail_io2
+    xor eax, eax
+    jmp .done2
+.fail_novol2:
+.fail_io2:
+    mov rax, 1
+.done2:
+    pop rbp
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rcx
+    pop rbx
+    ret
+
+; ------------------------------------------------------------
+; fs_alloc_cluster64 — allocate one free cluster (marks EOF)
+;   Out: RAX = cluster (0 = none/bad), CF 0/1. Flushes FAT on success.
+; ------------------------------------------------------------
+fs_alloc_cluster64:
+    push rbx
+    push rcx
+    push rdx
+    push rsi
+    push rdi
+    push rbp
+    push r8
+    cmp byte [rel fs_vol_mounted], 0
+    je .none_ac
+    lea rbp, [rel fs_vol_dpb]
+    lea rsi, [rel fs_vol_fat]
+    mov ecx, [rbp + DPB64.maxclus]
+    mov ebx, 2
+.scan_ac:
+    cmp ebx, ecx
+    ja .none_ac
+    mov r8, rsi
+    push rbx
+    push rcx
+    call fs_get_cluster64
+    mov r8d, edi
+    pop rcx
+    pop rbx
+    test rax, rax
+    jnz .next_ac
+    test r8d, r8d
+    jnz .next_ac
+    mov rdx, 0xFFF
+    call fs_set_cluster64
+    test rax, rax
+    jnz .none_ac
+    call fs_vol_flush_fat64
+    mov rax, rbx
+    clc
+    jmp .done_ac
+.next_ac:
+    inc ebx
+    jmp .scan_ac
+.none_ac:
+    xor eax, eax
+    stc
+.done_ac:
+    pop r8
+    pop rbp
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rcx
+    pop rbx
+    ret
+
+; ------------------------------------------------------------
+; fs_vol_read_file64 — read a root-dir file from the mounted volume
+;   In: RDI = 11-byte name, RSI = dest buffer, RDX = buffer size
+;   Out: RAX = bytes read (min(size, bufsize)), CF 0 ok; CF 1 not found/fail.
+; ------------------------------------------------------------
+fs_vol_read_file64:
+    push rbx
+    push rcx
+    push rdx
+    push rsi
+    push rdi
+    push rbp
+    push r8
+    push r9
+    push r10
+    push r11
+    push r12
+    cmp byte [rel fs_vol_mounted], 0
+    je .fail_rf
+    test rsi, rsi
+    jz .fail_rf
+    mov r12, rsi          ; dest
+    mov r11, rdx          ; bufsize
+    lea rbp, [rel fs_vol_dpb]
+    lea rsi, [rel fs_vol_root]
+    ; RDI already = name
+    call fs_dir_find64
+    jc .fail_rf
+    mov r8, rbx           ; entry
+    mov rbx, r8
+    call fs_dir_get_size64
+    mov r9, rax           ; file size
+    mov rbx, r8
+    call fs_dir_get_firstclus64
+    mov r10, rax          ; cluster
+    ; total = min(file size R9, bufsize R11) -> R9.
+    ; (R9 survives fs_file_read_cluster64/fs_get_cluster64; RCX does not.)
+    cmp r9, r11
+    jbe .have_total
+    mov r9, r11
+.have_total:
+    test r9, r9
+    jz .ok_empty
+    test r10, r10
+    jz .fail_rf           ; non-empty file must have a cluster
+    xor r11, r11          ; copied
+.copy_loop:
+    cmp r11, r9
+    jae .ok_done
+    ; read cluster r10 -> iobuf (spc==1, one sector)
+    lea rdi, [rel fs_vol_iobuf]
+    mov rbx, r10
+    call fs_file_read_cluster64
+    test rax, rax
+    jnz .fail_rf
+    ; chunk = min(512, remaining)
+    mov rax, r9
+    sub rax, r11
+    cmp rax, 512
+    jbe .have_chunk
+    mov rax, 512
+.have_chunk:
+    lea rsi, [rel fs_vol_iobuf]
+    mov rdi, r12
+    add rdi, r11
+    mov rdx, rax
+    push r9
+    mov rcx, rax
+    cld
+    rep movsb
+    pop r9
+    add r11, rdx
+    cmp r11, r9
+    jae .ok_done
+    ; next cluster
+    lea rsi, [rel fs_vol_fat]
+    mov rbx, r10
+    call fs_get_cluster64
+    test rax, rax
+    jnz .fail_rf
+    call fs_is_eof64      ; RDI = next value
+    cmp rax, 1
+    je .fail_rf           ; chain ended before size satisfied
+    mov r10, rdi
+    jmp .copy_loop
+.ok_done:
+    mov rax, r11
+    clc
+    jmp .done_rf
+.ok_empty:
+    xor eax, eax
+    clc
+    jmp .done_rf
+.fail_rf:
+    xor eax, eax
+    stc
+.done_rf:
+    ; Pops restore regs but touch neither RAX nor RFLAGS, so the
+    ; return value (RAX) and status (CF) survive directly.
+    pop r12
+    pop r11
+    pop r10
+    pop r9
+    pop r8
+    pop rbp
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rcx
+    pop rbx
+    ret
+
+; ============================================================
+; FCB file-operation core (G1) — INT 21h FCB handlers' backend.
+; All ops target the mounted volume (vol_dpb/fat/root), write-through.
+; Position model: absolute record number (recsiz units). Sequential
+;   position P = extent*128 + nr (exact when recsiz=128; the handlers
+;   keep extent/nr mirrored from P — see syscall64 file handlers).
+; ============================================================
+
+; ------------------------------------------------------------
+; fs_file_write_cluster64 — write one data cluster's sectors via ATA
+;   In: RBP = DPB, RBX = cluster, RSI = src buffer (>= spc*secsiz)
+;   Out: RAX 0 ok CF=0; 1/CF=1 fail. (Write twin of fs_file_read_cluster64.)
+; ------------------------------------------------------------
+fs_file_write_cluster64:
+    push rbx
+    push rbp
+    push r12
+    mov r12, rsi                      ; save src
+    call fs_cluster_to_lba64          ; RBX,RBP -> RAX=LBA (CF on bad)
+    jc .fail_wc
+    mov rsi, rax                      ; LBA
+    movzx ecx, byte [rbp + DPB64.clusmsk]
+    inc ecx
+    mov edx, ecx
+    mov rdi, r12
+    call ata_write_lba28
+    pop r12
+    pop rbp
+    pop rbx
+    ret
+.fail_wc:
+    mov rax, 1
+    pop r12
+    pop rbp
+    pop rbx
+    ret
+
+; ------------------------------------------------------------
+; fs_vol_find_free64 — find a free root-dir slot (0xE5 or 0x00 end)
+;   Out: CF=0 RBX=entry ptr; CF=1 full/not-mounted (RBX=0).
+; ------------------------------------------------------------
+fs_vol_find_free64:
+    push rax
+    push rcx
+    push rdx
+    push r11
+    cmp byte [rel fs_vol_mounted], 0
+    je .full_ff
+    lea r11, [rel fs_vol_root]
+    lea rbp, [rel fs_vol_dpb]
+    mov ecx, [rbp + DPB64.maxent]
+    xor eax, eax
+.scan_ff:
+    cmp eax, ecx
+    jae .full_ff
+    mov rbx, rax
+    shl rbx, 5
+    add rbx, r11
+    mov dl, [rbx]
+    test dl, dl
+    jz .have_ff
+    cmp dl, 0xE5
+    je .have_ff
+    inc eax
+    jmp .scan_ff
+.have_ff:
+    clc
+    jmp .done_ff
+.full_ff:
+    xor ebx, ebx
+    stc
+.done_ff:
+    pop r11
+    pop rdx
+    pop rcx
+    pop rax
+    ret
+
+; ------------------------------------------------------------
+; fs_vol_free_chain64 — release a cluster chain (FAT entries -> 0)
+;   In: RDI = first cluster (0/1 = nothing to do).
+;   Out: RAX 0 ok (flushes FAT unless empty), CF 0.
+; ------------------------------------------------------------
+fs_vol_free_chain64:
+    push rbx
+    push rcx
+    push rdx
+    push rsi
+    push rdi
+    push rbp
+    push r8
+    cmp byte [rel fs_vol_mounted], 0
+    je .done_fc
+    cmp rdi, 2
+    jb .done_fc
+    lea rbp, [rel fs_vol_dpb]
+    lea rsi, [rel fs_vol_fat]
+    mov rbx, rdi
+.next_fc:
+    cmp rbx, 2
+    jb .flush_fc
+    mov ecx, [rbp + DPB64.maxclus]
+    cmp rbx, rcx
+    ja .flush_fc
+    call fs_get_cluster64            ; RSI,RBX,RBP -> RDI=next
+    mov r8, rdi                      ; next (R8 survives set below)
+    mov rdx, 0
+    call fs_set_cluster64            ; clear current (RBX restored by callee)
+    mov rdi, r8
+    cmp rdi, 0xFF8
+    jae .flush_fc
+    cmp rdi, 2
+    jb .flush_fc
+    mov rbx, rdi
+    jmp .next_fc
+.flush_fc:
+    call fs_vol_flush_fat64
+.done_fc:
+    xor eax, eax
+    clc
+    pop r8
+    pop rbp
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rcx
+    pop rbx
+    ret
+
+; ------------------------------------------------------------
+; fs_fcb_close64 — sync FCB firclus/size + caller time/date to dir
+;   In: RDI = FCB64 ptr, RSI = time word, RDX = date word.
+;   Out: RAX 0 ok CF=0; 1/CF=1 not found (or not mounted).
+;   Stack map at the time/date reload (7 pushes: rbx,rcx,rdx,rsi,rdi,
+;   rbp,r8): orig RSI (time) at [rsp+24], orig RDX (date) at [rsp+32].
+; ------------------------------------------------------------
+fs_fcb_close64:
+    push rbx
+    push rcx
+    push rdx
+    push rsi
+    push rdi
+    push rbp
+    push r8
+    cmp byte [rel fs_vol_mounted], 0
+    je .fail_cl
+    test rdi, rdi
+    jz .fail_cl
+    mov r8, rdi
+    lea rbp, [rel fs_vol_dpb]
+    lea rsi, [rel fs_vol_root]
+    lea rdi, [r8 + FCB64.name]
+    call fs_dir_find64
+    jc .fail_cl
+    mov eax, [r8 + FCB64.firclus]
+    mov [rbx + DIRENT.firstclus], ax
+    mov rax, [r8 + FCB64.filsiz]
+    mov [rbx + DIRENT.size], eax
+    mov rax, [rsp + 24]              ; orig RSI = time
+    mov [rbx + DIRENT.time], ax
+    mov rax, [rsp + 32]              ; orig RDX = date
+    mov [rbx + DIRENT.date], ax
+    call fs_vol_flush_root64
+    test rax, rax
+    jnz .fail_cl
+    xor eax, eax
+    jmp .done_cl
+.fail_cl:
+    mov rax, 1
+    stc
+    jmp .done_cl2
+.done_cl:
+    clc
+.done_cl2:
+    pop r8
+    pop rbp
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rcx
+    pop rbx
+    ret
+
+; ------------------------------------------------------------
+; fs_fcb_delete64 — delete a root-dir file (free chain, mark 0xE5)
+;   In: RDI = FCB64 ptr (name/ext). Out: RAX 0 ok CF=0; 1/CF=1 not found.
+; ------------------------------------------------------------
+fs_fcb_delete64:
+    push rbx
+    push rcx
+    push rdx
+    push rsi
+    push rdi
+    push rbp
+    push r8
+    cmp byte [rel fs_vol_mounted], 0
+    je .fail_dl
+    test rdi, rdi
+    jz .fail_dl
+    mov r8, rdi
+    lea rbp, [rel fs_vol_dpb]
+    lea rsi, [rel fs_vol_root]
+    lea rdi, [r8 + FCB64.name]
+    call fs_dir_find64
+    jc .fail_dl
+    movzx ecx, word [rbx + DIRENT.firstclus]
+    mov byte [rbx], 0xE5
+    mov rdi, rcx
+    call fs_vol_free_chain64       ; frees + flushes FAT (ok if 0)
+    call fs_vol_flush_root64
+    test rax, rax
+    jnz .fail_dl
+    xor eax, eax
+    jmp .done_dl
+.fail_dl:
+    mov rax, 1
+    stc
+    jmp .done_dl2
+.done_dl:
+    clc
+.done_dl2:
+    pop r8
+    pop rbp
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rcx
+    pop rbx
+    ret
+
+; ------------------------------------------------------------
+; fs_fcb_create64 — create (or truncate) a root-dir file
+;   In: RDI = FCB64 ptr (drive/name/ext; recsiz defaulted to 128).
+;   Out: RAX 0 ok CF=0 (RBX=dir entry, FCB firclus/filsiz/lstclus set);
+;        1/CF=1 dir full (or not mounted).
+; ------------------------------------------------------------
+fs_fcb_create64:
+    push rcx
+    push rdx
+    push rsi
+    push rdi
+    push rbp
+    push r8
+    push r9
+    cmp byte [rel fs_vol_mounted], 0
+    je .fail_cr
+    test rdi, rdi
+    jz .fail_cr
+    mov r8, rdi
+    lea rbp, [rel fs_vol_dpb]
+    lea rsi, [rel fs_vol_root]
+    lea rdi, [r8 + FCB64.name]
+    call fs_dir_find64
+    jc .notfound_cr
+    ; Exists: truncate (free chain, zero size/cluster), keep name/attr/dates.
+    movzx ecx, word [rbx + DIRENT.firstclus]
+    mov r9, rbx
+    mov rdi, rcx
+    call fs_vol_free_chain64
+    mov dword [r9 + DIRENT.firstclus], 0
+    mov dword [r9 + DIRENT.size], 0
+    mov rbx, r9
+    jmp .fill_fcb_cr
+.notfound_cr:
+    call fs_vol_find_free64
+    jc .fail_cr
+    ; Zero the 32B entry, install name/attr.
+    mov rcx, 32
+    xor eax, eax
+.clear_cr:
+    mov [rbx], al
+    inc rbx
+    dec rcx
+    jnz .clear_cr
+    sub rbx, 32
+    mov rsi, r8
+    add rsi, FCB64.name
+    mov rdi, rbx
+    mov rcx, 11
+    cld
+    rep movsb
+    mov byte [rbx + DIRENT.attr], 0x20
+.fill_fcb_cr:
+    mov dword [r8 + FCB64.firclus], 0
+    mov dword [r8 + FCB64.lstclus], 0
+    mov dword [r8 + FCB64.cluspos], 0
+    mov qword [r8 + FCB64.filsiz], 0
+    mov eax, [r8 + FCB64.recsiz]
+    test eax, eax
+    jnz .have_rs_cr
+    mov dword [r8 + FCB64.recsiz], 128
+.have_rs_cr:
+    call fs_vol_flush_root64
+    test rax, rax
+    jnz .fail_cr
+    xor eax, eax
+    jmp .done_cr
+.fail_cr:
+    xor ebx, ebx
+    mov rax, 1
+    stc
+    jmp .done_cr2
+.done_cr:
+    clc
+.done_cr2:
+    pop r9
+    pop r8
+    pop rbp
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rcx
+    ret
+
+; ------------------------------------------------------------
+; fs_fcb_rename64 — rename a root-dir file (dup-checked)
+;   In: RDI = FCB64 ptr (old name at +1, new 11-byte name at +16).
+;   Out: RAX 0 ok CF=0; 1/CF=1 not found or duplicate.
+; ------------------------------------------------------------
+fs_fcb_rename64:
+    push rbx
+    push rcx
+    push rdx
+    push rsi
+    push rdi
+    push rbp
+    push r8
+    push r9
+    cmp byte [rel fs_vol_mounted], 0
+    je .fail_rn
+    test rdi, rdi
+    jz .fail_rn
+    mov r8, rdi
+    lea rbp, [rel fs_vol_dpb]
+    ; Duplicate check on the new name first.
+    lea rsi, [rel fs_vol_root]
+    lea rdi, [r8 + 16]
+    call fs_dir_find64
+    jnc .fail_rn
+    ; Find the old name.
+    lea rsi, [rel fs_vol_root]
+    lea rdi, [r8 + FCB64.name]
+    call fs_dir_find64
+    jc .fail_rn
+    mov r9, rbx
+    lea rsi, [r8 + 16]
+    mov rdi, r9
+    mov rcx, 11
+    cld
+    rep movsb
+    call fs_vol_flush_root64
+    test rax, rax
+    jnz .fail_rn
+    xor eax, eax
+    jmp .done_rn
+.fail_rn:
+    mov rax, 1
+    stc
+    jmp .done_rn2
+.done_rn:
+    clc
+.done_rn2:
+    pop r9
+    pop r8
+    pop rbp
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rcx
+    pop rbx
+    ret
+
+; ------------------------------------------------------------
+; fs_fcb_search64 — find the Nth (0-based slot scan) wildcard match
+;   In: RDI = 11-byte pattern ('?' wild), RSI = start slot.
+;   Out: CF=0 RBX=entry RAX=next slot; CF=1 none (RBX=0).
+;   Skips 0xE5, stops at 0x00 end (DOS FINDNAME/CONTSRCH shape).
+; ------------------------------------------------------------
+fs_fcb_search64:
+    push rcx
+    push rdx
+    push rsi
+    push rdi
+    push r8
+    push r9
+    push r10
+    push r11
+    cmp byte [rel fs_vol_mounted], 0
+    je .none_sr
+    test rdi, rdi
+    jz .none_sr
+    lea rbp, [rel fs_vol_dpb]
+    mov r10d, [rbp + DPB64.maxent]
+    lea r11, [rel fs_vol_root]
+    mov rcx, rsi                  ; slot
+.loop_sr:
+    cmp rcx, r10
+    jae .none_sr
+    mov rax, rcx
+    shl rax, 5
+    lea r9, [r11 + rax]
+    mov al, [r9]
+    test al, al
+    jz .none_sr
+    cmp al, 0xE5
+    je .next_sr
+    xor r8d, r8d
+.cmp_sr:
+    cmp r8d, 11
+    jae .found_sr
+    mov dl, [rdi + r8]
+    cmp dl, '?'
+    je .cmp_next_sr
+    cmp dl, [r9 + r8]
+    jne .next_sr
+.cmp_next_sr:
+    inc r8d
+    jmp .cmp_sr
+.next_sr:
+    inc rcx
+    jmp .loop_sr
+.found_sr:
+    mov rbx, r9
+    mov rax, rcx
+    inc rax                       ; next slot for SRCHNXT
+    jmp .done_sr
+.none_sr:
+    xor ebx, ebx
+    xor eax, eax
+    stc
+    jmp .done_sr2
+.done_sr:
+    clc
+.done_sr2:
+    pop r11
+    pop r10
+    pop r9
+    pop r8
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rcx
+    ret
+
+; ------------------------------------------------------------
+; fs_make_fcb64 — parse a path string into an FCB (INT 21h AH=29h)
+;   In: RDI = FCB64 dst (80B), RSI = src ASCIIZ, AL = mode bit0:
+;         1 = skip leading separators first (DOS PARSEFCB flag).
+;   Out: AL = 0 ok, 1 wildcards present, 0xFF bad drive; RSI = end ptr
+;        (first unconsumed char), CF 0/1.
+;   Drive: 0 = none/default, else letter-'A'+1. Name/ext upper-cased,
+;   blank-padded; '*' -> '?' + '?' fill; '?' kept (wild).
+; ------------------------------------------------------------
+fs_make_fcb64:
+    push rbx
+    push rcx
+    push rdx
+    push rdi
+    push r8
+    push r9
+    push r10
+    test rdi, rdi
+    jz .bad_mf
+    test rsi, rsi
+    jz .bad_mf
+    mov r8, rdi                   ; FCB
+    mov r9, rsi                   ; src cursor
+    mov r10b, al                  ; mode
+    ; Zero the FCB name area (drive..rr = 80B).
+    mov rcx, 80
+    xor eax, eax
+.zero_mf:
+    mov [r8], al
+    inc r8
+    dec rcx
+    jnz .zero_mf
+    mov r8, rdi                   ; restore FCB base
+    xor ecx, ecx                  ; ECX = wild flag
+    test r10b, 1
+    jz .noskip_mf
+.skip_mf:
+    mov al, [r9]
+    call .is_sep_mf
+    jnc .noskip_mf
+    inc r9
+    jmp .skip_mf
+.noskip_mf:
+    ; Drive: X: ?
+    mov al, [r9]
+    mov bl, [r9+1]
+    cmp bl, ':'
+    jne .nodrive_mf
+    call .is_alpha_mf             ; AL = letter?
+    jc .bad_mf
+    call .to_upper_mf
+    sub al, 'A'-1                 ; 1-based
+    mov [r8 + FCB64.drive], al
+    add r9, 2
+    jmp .name_mf
+.nodrive_mf:
+    mov byte [r8 + FCB64.drive], 0
+.name_mf:
+    ; Blank-pad name+ext first.
+    mov dword [r8 + FCB64.name+0], '    '
+    mov dword [r8 + FCB64.name+4], '    '
+    mov byte [r8 + FCB64.ext+0], ' '
+    mov byte [r8 + FCB64.ext+1], ' '
+    mov byte [r8 + FCB64.ext+2], ' '
+    xor ebx, ebx                  ; name index 0..7
+.nameloop_mf:
+    cmp ebx, 8
+    jae .namefull_mf
+    mov al, [r9]
+    test al, al
+    jz .done_mf
+    cmp al, '.'
+    je .ext_mf
+    cmp al, '*'
+    je .star_name_mf
+    push rax
+    call .is_term_mf
+    pop rax
+    jc .done_mf
+    cmp al, 'a'
+    jb .store_nm
+    cmp al, 'z'
+    ja .store_nm
+    sub al, 32
+.store_nm:
+    mov [r8 + FCB64.name + rbx], al
+    cmp al, '?'
+    jne .next_nm
+    or ecx, 1
+.next_nm:
+    inc rbx
+    inc r9
+    jmp .nameloop_mf
+.namefull_mf:
+    ; Name full: skip until '.' or terminator ('*' inside still wild).
+.fullskip_mf:
+    mov al, [r9]
+    test al, al
+    jz .done_mf
+    cmp al, '.'
+    je .ext_mf
+    cmp al, '*'
+    jne .fullchk_mf
+    or ecx, 1
+    inc r9
+    jmp .fullskip_mf
+.fullchk_mf:
+    push rax
+    call .is_term_mf
+    pop rax
+    jc .done_mf
+    inc r9
+    jmp .fullskip_mf
+.star_name_mf:
+    or ecx, 1
+    mov al, '?'
+.fillq_nm:
+    cmp ebx, 8
+    jae .skip_to_dot_mf
+    mov [r8 + FCB64.name + rbx], al
+    inc rbx
+    jmp .fillq_nm
+.skip_to_dot_mf:
+    inc r9                        ; consume '*'
+.skip_more_nm:                    ; '*' eats the rest of the name field
+    mov al, [r9]
+    test al, al
+    jz .ext_mf
+    cmp al, '.'
+    je .ext_mf
+    push rax
+    call .is_term_mf
+    pop rax
+    jc .ext_mf
+    inc r9
+    jmp .skip_more_nm
+.ext_mf:
+    mov al, [r9]
+    cmp al, '.'
+    jne .done_mf
+    inc r9
+    xor ebx, ebx                  ; ext index 0..2
+.extloop_mf:
+    cmp ebx, 3
+    jae .extfull_mf
+    mov al, [r9]
+    test al, al
+    jz .done_mf
+    cmp al, '*'
+    je .star_ext_mf
+    push rax
+    call .is_term_mf
+    pop rax
+    jc .done_mf
+    cmp al, 'a'
+    jb .store_ex
+    cmp al, 'z'
+    ja .store_ex
+    sub al, 32
+.store_ex:
+    mov [r8 + FCB64.ext + rbx], al
+    cmp al, '?'
+    jne .next_ex
+    or ecx, 1
+.next_ex:
+    inc rbx
+    inc r9
+    jmp .extloop_mf
+.extfull_mf:
+    mov al, [r9]
+    test al, al
+    jz .done_mf
+    cmp al, '*'
+    jne .extchk_mf
+    or ecx, 1
+    inc r9
+    jmp .extfull_mf
+.extchk_mf:
+    push rax
+    call .is_term_mf
+    pop rax
+    jc .done_mf
+    inc r9
+    jmp .extfull_mf
+.star_ext_mf:
+    or ecx, 1
+    mov al, '?'
+.fillq_ex:
+    cmp ebx, 3
+    jae .extconsume_mf
+    mov [r8 + FCB64.ext + rbx], al
+    inc rbx
+    jmp .fillq_ex
+.extconsume_mf:
+    inc r9                        ; consume '*'
+.skip_more_ex:                    ; '*' eats the rest of the ext field
+    mov al, [r9]
+    test al, al
+    jz .done_mf
+    push rax
+    call .is_term_mf
+    pop rax
+    jc .done_mf
+    inc r9
+    jmp .skip_more_ex
+.done_mf:
+    mov rsi, r9
+    mov eax, ecx
+    and al, 1
+    clc
+    jmp .exit_mf
+.bad_mf:
+    xor esi, esi
+    mov al, 0xFF
+    stc
+.exit_mf:
+    pop r10
+    pop r9
+    pop r8
+    pop rdi
+    pop rdx
+    pop rcx
+    pop rbx
+    ret
+; Local char-class helpers (near, use AL/flags only; preserve nothing else).
+.is_sep_mf:                       ; CF=1 if AL in " ,;=\t"
+    cmp al, ' '
+    je .yes_sep
+    cmp al, ','
+    je .yes_sep
+    cmp al, ';'
+    je .yes_sep
+    cmp al, '='
+    je .yes_sep
+    cmp al, 9
+    je .yes_sep
+    clc
+    ret
+.yes_sep:
+    stc
+    ret
+.is_term_mf:                      ; CF=1 if AL terminates a filespec
+    test al, al
+    jz .yes_term
+    cmp al, 13
+    je .yes_term
+    cmp al, ' '
+    je .yes_term
+    cmp al, ','
+    je .yes_term
+    cmp al, ';'
+    je .yes_term
+    cmp al, '='
+    je .yes_term
+    cmp al, '+'
+    je .yes_term
+    cmp al, '/'
+    je .yes_term
+    cmp al, ':'
+    je .yes_term
+    cmp al, '"'
+    je .yes_term
+    cmp al, '['
+    je .yes_term
+    cmp al, ']'
+    je .yes_term
+    cmp al, '<'
+    je .yes_term
+    cmp al, '>'
+    je .yes_term
+    cmp al, '|'
+    je .yes_term
+    cmp al, 9
+    je .yes_term
+    clc
+    ret
+.yes_term:
+    stc
+    ret
+.is_alpha_mf:                     ; CF=0 if AL is A-Z/a-z
+    cmp al, 'A'
+    jb .try_low_mf
+    cmp al, 'Z'
+    jbe .ok_alpha_mf
+.try_low_mf:
+    cmp al, 'a'
+    jb .no_alpha_mf
+    cmp al, 'z'
+    ja .no_alpha_mf
+.ok_alpha_mf:
+    clc
+    ret
+.no_alpha_mf:
+    stc
+    ret
+.to_upper_mf:                     ; AL -> upper
+    cmp al, 'a'
+    jb .done_up_mf
+    cmp al, 'z'
+    ja .done_up_mf
+    sub al, 32
+.done_up_mf:
+    ret
+
+; ------------------------------------------------------------
+; fs_fcb_io64 — record read/write workhorse for FCB file handles
+;   In: RDI = FCB64 ptr, RSI = record number (recsiz units, u64),
+;       RDX = DMA buffer, ECX = record count, R8D = 0 read / 1 write.
+;   Out: RAX = records transferred; CF 0 ok (read short at EOF is ok),
+;        CF 1 hard fail (ATA/range). Write-through: dir+FAT flushed.
+;   Fixed allocation: R13=FCB R14D=recsiz R15=done R12=DMA R11=recno
+;   R10D=spc_bytes R9=orig filsiz (all survive callees);
+;   RAX/RCX/RDX/RSI/RDI/RBP/RBX reloaded per call (RBX is scratch:
+;   the record count lives in a stack local because per-call RBX reuse
+;   would otherwise destroy it across push/pop callees).
+;   Locals (56B): [rsp]=ci [rsp+8]=intra [rsp+16]=cluster [rsp+24]=fresh
+;   [rsp+32]=pos [rsp+40]=n [rsp+48]=count. Fresh clusters are zeroed.
+; ------------------------------------------------------------
+fs_fcb_io64:
+    push rbx
+    push rcx
+    push rdx
+    push rsi
+    push rdi
+    push rbp
+    push r8
+    push r9
+    push r10
+    push r11
+    push r12
+    push r13
+    push r14
+    push r15
+    sub rsp, 56
+    test ecx, ecx
+    jz .io_zero
+    test rdx, rdx
+    jz .io_hard0
+    test rdi, rdi
+    jz .io_hard0
+    cmp r8d, 1
+    ja .io_hard0
+    mov r13, rdi
+    mov r12, rdx
+    mov [rsp+48], rcx             ; count (RBX is per-call scratch)
+    mov r11, rsi
+    mov r15, 0
+    call fs_mount_volume64
+    test rax, rax
+    jnz .io_hard
+    mov r9, [r13 + FCB64.filsiz]  ; snapshot (dir sync compares live value)
+    mov r14d, [r13 + FCB64.recsiz]
+    test r14d, r14d
+    jnz .have_rs_io
+    mov r14d, 128
+    mov [r13 + FCB64.recsiz], r14d
+.have_rs_io:
+    lea rbp, [rel fs_vol_dpb]
+    movzx eax, byte [rbp + DPB64.clusmsk]
+    inc eax
+    imul eax, [rbp + DPB64.secsiz]
+    mov r10d, eax                 ; spc_bytes
+    test r10d, r10d
+    jz .io_hard
+.record_loop:
+    cmp r15, [rsp+48]
+    jae .io_ok
+    mov rax, r11
+    mul r14                       ; RDX:RAX = recno*recsiz
+    test rdx, rdx
+    jnz .io_hard                  ; absurd position
+    mov [rsp+32], rax             ; pos
+    test r8d, r8d
+    jnz .pos_ok
+    cmp rax, [r13 + FCB64.filsiz]
+    jae .io_ok                    ; read at/over EOF -> short, CF=0
+.pos_ok:
+    mov rax, [rsp+32]
+    xor edx, edx
+    div r10                       ; RAX=ci, RDX=intra
+    mov [rsp], rax
+    mov [rsp+8], rdx
+    mov qword [rsp+24], 0         ; fresh = 0
+    ; n = min(recsiz, spc - intra[, filsiz - pos for reads])
+    mov eax, r10d
+    sub eax, dword [rsp+8]
+    cmp eax, r14d
+    jbe .n1_io
+    mov eax, r14d
+.n1_io:
+    test r8d, r8d
+    jnz .n2_io
+    mov rcx, [r13 + FCB64.filsiz]
+    sub rcx, [rsp+32]
+    cmp rax, rcx
+    jbe .n2_io
+    mov rax, rcx
+.n2_io:
+    mov [rsp+40], rax             ; n
+    ; Walk to cluster ci, allocating on the write path.
+    mov eax, [r13 + FCB64.firclus]
+    mov [rsp+16], rax
+    cmp rax, 2
+    jae .walk_io
+    test r8d, r8d
+    jz .io_ok                     ; read, no head (pos<filsiz = corrupt) -> short
+    call fs_alloc_cluster64
+    test rax, rax
+    jz .io_hard
+    mov [r13 + FCB64.firclus], eax
+    mov [r13 + FCB64.lstclus], eax
+    mov [rsp+16], rax
+    mov qword [rsp+24], 1         ; fresh
+.walk_io:
+    xor ecx, ecx                  ; k = 0
+.walk_loop_io:
+    cmp rcx, [rsp]
+    jae .have_c_io
+    lea rbp, [rel fs_vol_dpb]
+    lea rsi, [rel fs_vol_fat]
+    mov rbx, [rsp+16]             ; c (RBX is scratch; count is local)
+    call fs_get_cluster64         ; -> RDI=next
+    test rax, rax
+    jnz .walk_bad_io
+    cmp rdi, 2
+    jb .walk_bad_io
+    mov eax, [rbp + DPB64.maxclus]
+    cmp rdi, rax
+    ja .walk_bad_io
+    mov [rsp+16], rdi             ; c = next
+    inc rcx
+    jmp .walk_loop_io
+.walk_bad_io:
+    test r8d, r8d
+    jz .io_ok                     ; read: chain ends -> short
+    call fs_alloc_cluster64
+    test rax, rax
+    jz .io_hard
+    mov rdi, rax                  ; new
+    lea rbp, [rel fs_vol_dpb]
+    lea rsi, [rel fs_vol_fat]
+    mov rbx, [rsp+16]             ; link after current c
+    mov rdx, rdi
+    call fs_set_cluster64
+    test rax, rax
+    jnz .io_hard
+    mov [rsp+16], rdi             ; c = new
+    mov qword [rsp+24], 1         ; fresh
+    inc rcx
+    jmp .walk_loop_io
+.have_c_io:
+    lea rbp, [rel fs_vol_dpb]
+    lea rdi, [rel fs_vol_iobuf]
+    mov rbx, [rsp+16]
+    call fs_file_read_cluster64
+    test rax, rax
+    jnz .io_hard
+    test r8d, r8d
+    jnz .do_write_io
+    ; read: iobuf+intra -> DMA + done*recsiz
+    lea rsi, [rel fs_vol_iobuf]
+    add rsi, [rsp+8]
+    mov rdi, r12
+    mov rax, r15
+    imul rax, r14
+    add rdi, rax
+    mov ecx, [rsp+40]
+    cld
+    rep movsb
+    jmp .rec_done_io
+.do_write_io:
+    cmp qword [rsp+24], 0
+    je .have_buf_io
+    lea rdi, [rel fs_vol_iobuf]   ; fresh cluster: zero so holes read 0
+    xor eax, eax
+    mov ecx, r10d                 ; spc_bytes (iobuf sized 32K max)
+    cld
+    rep stosb
+.have_buf_io:
+    mov rsi, r12                  ; DMA + done*recsiz -> iobuf+intra
+    mov rax, r15
+    imul rax, r14
+    add rsi, rax
+    lea rdi, [rel fs_vol_iobuf]
+    add rdi, [rsp+8]
+    mov ecx, [rsp+40]
+    cld
+    rep movsb
+    lea rbp, [rel fs_vol_dpb]
+    mov rbx, [rsp+16]
+    lea rsi, [rel fs_vol_iobuf]
+    call fs_file_write_cluster64
+    test rax, rax
+    jnz .io_hard
+    mov ebx, [rsp+16]
+    mov [r13 + FCB64.lstclus], ebx
+    mov rax, [rsp+32]
+    add rax, [rsp+40]
+    cmp rax, [r13 + FCB64.filsiz]
+    jbe .rec_done_io
+    mov [r13 + FCB64.filsiz], rax
+.rec_done_io:
+    inc r15
+    inc r11
+    jmp .record_loop
+.io_zero:
+    xor r15d, r15d
+.io_ok:
+    cmp r15, 0
+    je .io_ret_ok
+    test r8d, r8d
+    jz .io_ret_ok
+    lea rbp, [rel fs_vol_dpb]
+    lea rsi, [rel fs_vol_root]
+    lea rdi, [r13 + FCB64.name]
+    call fs_dir_find64
+    jc .io_hard
+    mov eax, [r13 + FCB64.firclus]
+    mov [rbx + DIRENT.firstclus], ax
+    mov rax, [r13 + FCB64.filsiz]
+    mov [rbx + DIRENT.size], eax
+    call fs_vol_flush_root64
+    test rax, rax
+    jnz .io_hard
+    call fs_vol_flush_fat64
+    test rax, rax
+    jnz .io_hard
+.io_ret_ok:
+    mov rax, r15
+    clc
+    jmp .io_epi
+.io_hard0:
+    xor r15d, r15d
+.io_hard:
+    mov rax, r15
+    stc
+.io_epi:
+    add rsp, 56
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop r11
+    pop r10
+    pop r9
+    pop r8
+    pop rbp
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rcx
+    pop rbx
+    ret
+
+; ============================================================
 ; Static data: 1.44M BPB boot template + names + DPBs + buffers
 ; 1.44M geometry: 512B, 1 sec/clus, 1 rsvd, 2 FAT, 224 root,
 ; 2880 tot, F0 media, 9 FATsec, 18 SPT, 2 heads (IBM standard).
@@ -1518,5 +2868,14 @@ fs_scratch_buf: resb 1024
 fs_file_buf:    resb 1024
 fs_fcb_test:    resb 128
 fs_fcb_test2:   resb 128
+; --- Mounted real volume (LBA FS_VOL_LBA, tools/mkfat12.py) ---
+fs_vol_boot:    resb 512
+fs_vol_dpb:     resb 64
+fs_vol_fat:     resb 4608      ; 9 sectors, first FAT copy in RAM
+fs_vol_root:    resb 7168      ; 14 sectors, 224-entry root dir in RAM
+fs_vol_iobuf:   resb 32768     ; cluster staging (spc up to 64)
+fs_vol_mounted: resb 1
+alignb 8
+fs_vol_dirsec:  resq 1         ; cached root size in sectors
 
 

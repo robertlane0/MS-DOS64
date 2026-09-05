@@ -166,6 +166,41 @@ extern fs_test_dir
 extern fs_test_lba_io
 extern fs_test_file_read
 extern fs_test_fcb
+extern fs_mount_volume64
+extern fs_vol_read_file64
+extern handler_getdate
+extern handler_setdate
+extern handler_gettime
+extern handler_settime
+extern handler_reader
+extern handler_punch
+extern handler_list
+extern handler_verify
+extern handler_newbase
+extern handler_getfatpt
+extern handler_getfatptdl
+extern handler_getrdonly
+extern handler_setattrib
+extern handler_getdskpt
+extern handler_open
+extern handler_close
+extern handler_srchfrst
+extern handler_srchnxt
+extern handler_delete
+extern handler_seqrd
+extern handler_seqwrt
+extern handler_create
+extern handler_rename
+extern handler_rndrd
+extern handler_rndwrt
+extern handler_filesize
+extern handler_setrndrec
+extern handler_blkrd
+extern handler_blkwrt
+extern handler_makefcb
+extern handler_setdma
+extern shell_repl64
+extern sh_exec_line
 
 ; Phase 8 process management (PSP64/env/loader)
 extern proc_init64
@@ -1390,6 +1425,108 @@ _start:
     call vga_print
     call serial_print64
 
+    ; ---- Test 67: Real FAT12 volume mount + on-disk file read (G2) ----
+    mov rsi, msg_test67
+    call vga_print
+    call serial_print64
+    call test_vol_mount
+    test rax, rax
+    jz .t67_pass
+    inc r13
+    mov rsi, msg_fail
+    jmp .t67_done
+.t67_pass:
+    inc r12
+    mov rsi, msg_pass
+.t67_done:
+    call vga_print
+    call serial_print64
+
+    ; ---- Test 68: RTC date/time get/set via INT21 2A-2D (G1) ----
+    mov rsi, msg_test68
+    call vga_print
+    call serial_print64
+    call test_rtc_datetime
+    test rax, rax
+    jz .t68_pass
+    inc r13
+    mov rsi, msg_fail
+    jmp .t68_done
+.t68_pass:
+    inc r12
+    mov rsi, msg_pass
+.t68_done:
+    call vga_print
+    call serial_print64
+
+    ; ---- Test 69: AUX/COM/LIST + VERIFY/NEWBASE/disk ptrs (G1) ----
+    mov rsi, msg_test69
+    call vga_print
+    call serial_print64
+    call test_aux_misc
+    test rax, rax
+    jz .t69_pass
+    inc r13
+    mov rsi, msg_fail
+    jmp .t69_done
+.t69_pass:
+    inc r12
+    mov rsi, msg_pass
+.t69_done:
+    call vga_print
+    call serial_print64
+
+    ; ---- Test 70: FCB open/rndread/search/makefcb (G1, read-only) ----
+    mov rsi, msg_test70
+    call vga_print
+    call serial_print64
+    call test_fcb_file
+    test rax, rax
+    jz .t70_pass
+    inc r13
+    mov rsi, msg_fail
+    jmp .t70_done
+.t70_pass:
+    inc r12
+    mov rsi, msg_pass
+.t70_done:
+    call vga_print
+    call serial_print64
+
+    ; ---- Test 71: FCB create/write/read/rename/delete round-trip ----
+    mov rsi, msg_test71
+    call vga_print
+    call serial_print64
+    call test_fcb_write
+    test rax, rax
+    jz .t71_pass
+    inc r13
+    mov rsi, msg_fail
+    jmp .t71_done
+.t71_pass:
+    inc r12
+    mov rsi, msg_pass
+.t71_done:
+    call vga_print
+    call serial_print64
+
+    ; ---- Test 72: Shell line dispatch (G3, non-interactive) ----
+    mov rsi, msg_test72
+    call vga_print
+    call serial_print64
+    call test_shell_exec
+    test rax, rax
+    jz .t72_pass
+    inc r13
+    mov rsi, msg_fail
+    jmp .t72_done
+.t72_pass:
+    inc r12
+    mov rsi, msg_pass
+.t72_done:
+    call vga_print
+    call serial_print64
+
     ; ---- Summary ----
     mov rsi, msg_summary
     call vga_print
@@ -1473,6 +1610,9 @@ _start:
     ; Also demonstrate handler_prtbuf (DOS 09h: print $-string)
     mov rdx, demo_dollar_str
     call handler_prtbuf
+
+    ; G3: enter the interactive COMMAND64 shell (returns only on EXIT).
+    call shell_repl64
 
 .hlt:
     cli
@@ -1689,6 +1829,8 @@ test_registers:
 section .bss
 test_buf_src: resb 128
 test_buf_dst: resb 128
+vol_read_buf: resb 1024
+aux_fcb: resb 80
 
 section .text
 test_string_ops:
@@ -2531,6 +2673,681 @@ test_stress:
     pop r8
     pop rsi
     pop rdi
+    pop rdx
+    pop rcx
+    pop rbx
+    ret
+
+; ------------------------------------------------------------
+; Test 67: Real FAT12 volume mount + on-disk file read (G2)
+;   Mounts LBA FS_VOL_LBA (tools/mkfat12.py), reads HELLO.TXT
+;   (1 cluster) and README.TXT (2 clusters, 1000B chain) via ATA,
+;   checks content prefix + size, verifies missing file fails.
+; ------------------------------------------------------------
+test_vol_mount:
+    push rbx
+    push rcx
+    push rdx
+    push rsi
+    push rdi
+    push r8
+    push r9
+    push r10
+    push r11
+    call fs_mount_volume64
+    test rax, rax
+    jnz .fail67
+    ; Idempotent second mount must also succeed.
+    call fs_mount_volume64
+    test rax, rax
+    jnz .fail67
+    ; HELLO.TXT: expect >32 bytes starting with "Hello".
+    lea rdi, [rel vol_name_hello]
+    lea rsi, [rel vol_read_buf]
+    mov rdx, 1024
+    call fs_vol_read_file64
+    jc .fail67
+    cmp rax, 32
+    jb .fail67
+    lea rsi, [rel vol_read_buf]
+    cmp dword [rsi], 'Hell'     ; "Hell" LE
+    jne .fail67
+    cmp byte [rsi+4], 'o'
+    jne .fail67
+    ; README.TXT: exactly 1000 bytes across a 2-cluster chain, "MS-D".
+    lea rdi, [rel vol_name_readme]
+    lea rsi, [rel vol_read_buf]
+    mov rdx, 1024
+    call fs_vol_read_file64
+    jc .fail67
+    cmp rax, 1000
+    jne .fail67
+    cmp dword [rsi], 'MS-D'      ; "MS-D" LE
+    jne .fail67
+    ; Small buffer truncates (min(size, bufsize)).
+    lea rdi, [rel vol_name_readme]
+    lea rsi, [rel vol_read_buf]
+    mov rdx, 100
+    call fs_vol_read_file64
+    jc .fail67
+    cmp rax, 100
+    jne .fail67
+    ; Missing file must fail with CF.
+    lea rdi, [rel vol_name_missing]
+    lea rsi, [rel vol_read_buf]
+    mov rdx, 1024
+    call fs_vol_read_file64
+    jnc .fail67
+    xor eax, eax
+    jmp .done67
+.fail67:
+    mov rax, 1
+.done67:
+    pop r11
+    pop r10
+    pop r9
+    pop r8
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rcx
+    pop rbx
+    ret
+
+; ------------------------------------------------------------
+; Test 68: RTC date/time (INT21 AH=2Ah-2Dh).
+;   GETDATE/GETTIME sane ranges, SET round-trip with restore,
+;   invalid SET rejected, one INT 0x21 trap routing check.
+; ------------------------------------------------------------
+test_rtc_datetime:
+    push rbx
+    push rcx
+    push rdx
+    push rsi
+    push rdi
+    push r8
+    push r9
+    push r10
+    push r11
+    ; GETDATE direct: RCX=year RDX=(mon<<8)|day AL=wday
+    call handler_getdate
+    jc .fail68
+    cmp rcx, 1980
+    jb .fail68
+    cmp rcx, 2099
+    ja .fail68
+    mov rax, rdx
+    shr rax, 8
+    and rax, 0xFF
+    cmp rax, 1
+    jb .fail68
+    cmp rax, 12
+    ja .fail68
+    mov rax, rdx
+    and rax, 0xFF
+    cmp rax, 1
+    jb .fail68
+    cmp rax, 31
+    ja .fail68
+    cmp al, 6
+    ja .fail68
+    mov r10, rcx          ; save year
+    mov r11, rdx          ; save mon/day
+    ; GETTIME direct: RCX=(hr<<8)|min RDX=(sec<<8)
+    call handler_gettime
+    jc .fail68b
+    mov rax, rcx
+    shr rax, 8
+    cmp rax, 24
+    jae .fail68b
+    mov rax, rcx
+    and rax, 0xFF
+    cmp rax, 60
+    jae .fail68b
+    mov rax, rdx
+    shr rax, 8
+    cmp rax, 60
+    jae .fail68b
+    push r10
+    push r11
+    mov r8, rcx           ; save time
+    push r8
+    mov r9, rdx
+    push r9
+    ; SETDATE 2001-02-28 then verify
+    mov rcx, 2001
+    mov rdx, 0x021C       ; mon=2 day=28
+    call handler_setdate
+    jc .fail68c
+    test al, al
+    jnz .fail68c
+    call handler_getdate
+    jc .fail68c
+    cmp rcx, 2001
+    jne .fail68c
+    cmp rdx, 0x021C
+    jne .fail68c
+    ; SETTIME 12:34:56 then verify
+    mov rcx, 0x0C22       ; hr=12 min=34
+    mov rdx, 0x3800       ; sec=56
+    call handler_settime
+    jc .fail68c
+    call handler_gettime
+    jc .fail68c
+    cmp rcx, 0x0C22
+    jne .fail68c
+    cmp rdx, 0x3800
+    jne .fail68c
+    ; Restore original date/time
+    pop r9
+    mov rdx, r9
+    pop r8
+    mov rcx, r8
+    call handler_settime
+    jc .fail68c
+    pop r11
+    mov rdx, r11
+    pop r10
+    mov rcx, r10
+    call handler_setdate
+    jc .fail68c
+    ; Invalid SETDATE (month 13) rejected
+    mov rcx, 2001
+    mov rdx, 0x0D01
+    call handler_setdate
+    jnc .fail68
+    cmp al, 0xFF
+    jne .fail68
+    ; Invalid SETTIME (hour 25) rejected
+    mov rcx, 0x1900
+    mov rdx, 0
+    call handler_settime
+    jnc .fail68
+    ; Trap routing: AH=2Ch via CPU INT 0x21
+    mov rax, 0x2C00
+    int 0x21
+    mov rax, rcx
+    shr rax, 8
+    cmp rax, 24
+    jae .fail68
+    ; Trap routing: AH=2Ah via dispatch
+    mov rax, 0x2A00
+    call syscall_dispatch64
+    jc .fail68
+    cmp rcx, 1980
+    jb .fail68
+    xor eax, eax
+    jmp .done68
+.fail68c:
+    add rsp, 32           ; drop 4 saved qwords (r9/r8/r11/r10)
+.fail68b:
+.fail68:
+    mov rax, 1
+.done68:
+    pop r11
+    pop r10
+    pop r9
+    pop r8
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rcx
+    pop rbx
+    ret
+
+; ------------------------------------------------------------
+; Test 69: AUX/COM/LIST + VERIFY/NEWBASE/disk pointers.
+; ------------------------------------------------------------
+test_aux_misc:
+    push rbx
+    push rcx
+    push rdx
+    push rsi
+    push rdi
+    ; PUNCH 'Z' -> COM1, AL=0 CF=0
+    mov dl, 'Z'
+    call handler_punch
+    jc .fail69
+    test al, al
+    jnz .fail69
+    ; LIST 'L' -> COM1 capture
+    mov dl, 'L'
+    call handler_list
+    jc .fail69
+    ; READER is non-blocking: must return either way (no hang possible)
+    call handler_reader
+    ; carry either way is legal; AL must be 0 when CF=1
+    jc .reader_empty_ok
+    jmp .reader_done
+.reader_empty_ok:
+    test al, al
+    jnz .fail69
+.reader_done:
+    ; VERIFY set/get/reject
+    mov al, 1
+    call handler_verify
+    jc .fail69
+    mov al, 0
+    call handler_verify
+    jc .fail69
+    mov al, 2
+    call handler_verify
+    jnc .fail69
+    ; NEWBASE -> paragraphs > 0
+    call handler_newbase
+    jc .fail69
+    test rax, rax
+    jz .fail69
+    ; GETFATPT -> RBX != 0, AL == 9 (volume fatsiz)
+    call handler_getfatpt
+    jc .fail69
+    test rbx, rbx
+    jz .fail69
+    cmp al, 9
+    jne .fail69
+    ; GETFATPTDL drive 0 ok, drive 9 rejected
+    mov dl, 0
+    call handler_getfatptdl
+    jc .fail69
+    mov dl, 9
+    call handler_getfatptdl
+    jnc .fail69
+    ; GETDSKPT -> RBX != 0
+    call handler_getdskpt
+    jc .fail69
+    test rbx, rbx
+    jz .fail69
+    ; GETRDONLY -> media 0xF0
+    call handler_getrdonly
+    jc .fail69
+    cmp al, 0xF0
+    jne .fail69
+    ; SETATTRIB get on HELLO.TXT (build FCB in aux_fcb)
+    lea rdi, [rel aux_fcb]
+    mov rcx, 80
+    xor al, al
+.clear_fcb69:
+    mov [rdi], al
+    inc rdi
+    dec rcx
+    jnz .clear_fcb69
+    lea rdi, [rel aux_fcb]
+    mov byte [rdi], 1
+    mov dword [rdi+1], 'HELL'
+    mov dword [rdi+5], 'O   '
+    mov byte [rdi+9], 'T'
+    mov byte [rdi+10], 'X'
+    mov byte [rdi+11], 'T'
+    xor al, al            ; get
+    lea rdx, [rel aux_fcb]
+    call handler_setattrib
+    jc .fail69
+    cmp cl, 0x20          ; mkfat12 writes archive attr
+    jne .fail69
+    ; set same value back (exercises write+flush with no net change)
+    mov al, 1
+    mov cl, 0x20
+    lea rdx, [rel aux_fcb]
+    call handler_setattrib
+    jc .fail69
+    ; dispatch path: AH=05 LIST via syscall_dispatch64
+    mov dl, 'Q'
+    mov rax, 0x0500
+    call syscall_dispatch64
+    jc .fail69
+    xor eax, eax
+    jmp .done69
+.fail69:
+    mov rax, 1
+.done69:
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rcx
+    pop rbx
+    ret
+
+; ------------------------------------------------------------
+; Test 70: FCB file ops, read-only, on the real volume.
+;   MAKEFCB/OPEN/FILESIZE/RNDRD/BLKRD/SRCHFRST/SRCHNXT/CLOSE + dispatch.
+; ------------------------------------------------------------
+test_fcb_file:
+    push rbx
+    push rcx
+    push rdx
+    push rsi
+    push rdi
+    push r8
+    push r9
+    push r10
+    ; MAKEFCB "HELLO.TXT" (mode 0, no wildcards -> AL=0)
+    lea rsi, [rel fcb_str_hello]
+    lea rdi, [rel aux_fcb]
+    xor al, al
+    call handler_makefcb
+    cmp al, 0
+    jne .fail70
+    cmp byte [rsi], 0
+    jne .fail70
+    ; OPEN
+    lea rdx, [rel aux_fcb]
+    call handler_open
+    jc .fail70
+    test al, al
+    jnz .fail70
+    cmp dword [rel aux_fcb+16], 128   ; recsiz defaulted (FCB64.recsiz @16)
+    jne .fail70
+    ; SETDMA to vol_read_buf
+    lea rdx, [rel vol_read_buf]
+    call handler_setdma
+    ; FILESIZE -> RR = ceil(filsiz/128); cross-check against filsiz
+    lea rdx, [rel aux_fcb]
+    call handler_filesize
+    jc .fail70
+    mov rcx, [rel aux_fcb+20]         ; filsiz (FCB64.filsiz @20)
+    mov rax, [rel aux_fcb+65]         ; RR (FCB64.rr @65)
+    test rax, rax
+    jz .fail70
+    mov r9, rax
+    shl r9, 7                         ; rr*128 >= filsiz?
+    cmp r9, rcx
+    jb .fail70
+    sub r9, 128                       ; (rr-1)*128 < filsiz?
+    cmp r9, rcx
+    jae .fail70
+    ; RNDRD record 0 -> "Hello"
+    mov qword [rel aux_fcb+65], 0
+    lea rdx, [rel aux_fcb]
+    call handler_rndrd
+    jc .fail70
+    test al, al
+    jnz .fail70
+    cmp dword [rel vol_read_buf], 'Hell'
+    jne .fail70
+    ; BLKRD 2 records at RR=0 (HELLO is 2 records of 128)
+    mov qword [rel aux_fcb+65], 0
+    mov rcx, 2
+    lea rdx, [rel aux_fcb]
+    call handler_blkrd
+    jc .fail70
+    cmp rcx, 2
+    jne .fail70
+    ; SRCHFRST "*.TXT" (wild -> AL=1 from MAKEFCB)
+    lea rsi, [rel fcb_str_wild]
+    lea rdi, [rel aux_fcb]
+    xor al, al
+    call handler_makefcb
+    cmp al, 1
+    jne .fail70
+    lea rdx, [rel aux_fcb]
+    call handler_srchfrst
+    jc .fail70
+    cmp dword [rel vol_read_buf], 'HELL'   ; first .TXT = HELLO
+    jne .fail70
+    lea rdx, [rel aux_fcb]
+    call handler_srchnxt
+    jc .fail70
+    cmp dword [rel vol_read_buf], 'READ'   ; second .TXT = README
+    jne .fail70
+    lea rdx, [rel aux_fcb]
+    call handler_srchnxt
+    jnc .fail70                        ; no third .TXT
+    ; CLOSE (HELLO still open in this FCB? FCB now holds wild pattern;
+    ; rebuild + reopen + close for a clean CLOSE test)
+    lea rsi, [rel fcb_str_hello]
+    lea rdi, [rel aux_fcb]
+    xor al, al
+    call handler_makefcb
+    lea rdx, [rel aux_fcb]
+    call handler_open
+    jc .fail70
+    lea rdx, [rel aux_fcb]
+    call handler_close
+    jc .fail70
+    ; Dispatch path: AH=0Fh OPEN via syscall_dispatch64
+    lea rdx, [rel aux_fcb]
+    mov rax, 0x0F00
+    call syscall_dispatch64
+    jc .fail70
+    ; Dispatch path: AH=29h MAKEFCB via int 0x21 (AL=mode in live AL)
+    lea rsi, [rel fcb_str_hello]
+    lea rdi, [rel aux_fcb]
+    mov rax, 0x2900
+    int 0x21
+    cmp al, 0
+    jne .fail70
+    xor eax, eax
+    jmp .done70
+.fail70:
+    mov rax, 1
+.done70:
+    pop r10
+    pop r9
+    pop r8
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rcx
+    pop rbx
+    ret
+
+; ------------------------------------------------------------
+; Test 71: FCB create/write/read/rename/delete round-trip on SCRATCH.
+;   Starts with a clearing DELETE (idempotent across rebooted runs).
+; ------------------------------------------------------------
+test_fcb_write:
+    push rbx
+    push rcx
+    push rdx
+    push rsi
+    push rdi
+    push r8
+    push r9
+    push r10
+    ; Build SCRATCH FCB; clearing delete first (ignore result).
+    lea rsi, [rel fcb_str_scratch]
+    lea rdi, [rel aux_fcb]
+    mov al, 1                          ; skip leading seps (none here)
+    call handler_makefcb
+    lea rdx, [rel aux_fcb]
+    call handler_delete
+    ; CREATE
+    lea rdx, [rel aux_fcb]
+    call handler_create
+    jc .fail71
+    test al, al
+    jnz .fail71
+    cmp dword [rel aux_fcb+20], 0      ; filsiz 0
+    jne .fail71
+    ; Fill DMA half 2 (vol_read_buf+512) with 512B pattern 'A'+i%26
+    ; (4 records of 128). NOTE: SEQ ops transfer exactly one record at
+    ; the current DMA (DOS semantics); only block ops stride DMA.
+    lea rdi, [rel vol_read_buf+512]
+    mov rcx, 512
+    mov al, 'A'
+    mov r8, rdi
+.pat71:
+    mov [r8], al
+    inc r8
+    inc al
+    cmp al, 'Z'+1
+    jne .nowrap71
+    mov al, 'A'
+.nowrap71:
+    dec rcx
+    jnz .pat71
+    ; BLKWRT 3 records at RR=0 from DMA half 2.
+    lea rdx, [rel vol_read_buf+512]
+    call handler_setdma
+    mov qword [rel aux_fcb+65], 0      ; RR=0
+    mov rcx, 3
+    lea rdx, [rel aux_fcb]
+    call handler_blkwrt
+    jc .fail71
+    cmp rcx, 3
+    jne .fail71
+    cmp qword [rel aux_fcb+65], 3     ; RR advanced by block count
+    jne .fail71
+    cmp dword [rel aux_fcb+20], 384   ; filsiz grew
+    jne .fail71
+    ; SEQWRT 1 record at P=3 (extent=0,nr=3) from DMA buf+896.
+    lea rdx, [rel vol_read_buf+896]
+    call handler_setdma
+    mov word [rel aux_fcb+12], 0      ; extent (FCB64.extent @12)
+    mov byte [rel aux_fcb+64], 3      ; nr (FCB64.nr @64)
+    lea rdx, [rel aux_fcb]
+    call handler_seqwrt
+    jc .fail71
+    test al, al
+    jnz .fail71
+    cmp dword [rel aux_fcb+20], 512   ; filsiz grew to 4 records
+    jne .fail71
+    ; Read back via BLKRD into half 1 (zeroed first).
+    lea rdi, [rel vol_read_buf]
+    mov rcx, 512
+    xor al, al
+.zero71:
+    mov [rdi], al
+    inc rdi
+    dec rcx
+    jnz .zero71
+    lea rdx, [rel vol_read_buf]
+    call handler_setdma
+    mov qword [rel aux_fcb+65], 0
+    mov rcx, 4
+    lea rdx, [rel aux_fcb]
+    call handler_blkrd
+    jc .fail71
+    cmp rcx, 4
+    jne .fail71
+    cmp qword [rel aux_fcb+65], 4     ; RR advanced by block count
+    jne .fail71
+    ; Verify 512 bytes against the pattern.
+    lea rsi, [rel vol_read_buf]
+    mov rcx, 512
+    mov al, 'A'
+    mov r8, rsi
+.vfy71:
+    cmp [r8], al
+    jne .fail71
+    inc r8
+    inc al
+    cmp al, 'Z'+1
+    jne .nowrap71b
+    mov al, 'A'
+.nowrap71b:
+    dec rcx
+    jnz .vfy71
+    ; SETRNDREC: extent=0,nr=2 -> RR=2; RNDRD RR=2 gives 3rd record.
+    mov word [rel aux_fcb+12], 0      ; extent (FCB64.extent @12)
+    mov byte [rel aux_fcb+64], 2      ; nr (FCB64.nr @64)
+    lea rdx, [rel aux_fcb]
+    call handler_setrndrec
+    jc .fail71
+    cmp qword [rel aux_fcb+65], 2
+    jne .fail71
+    lea rdx, [rel aux_fcb]
+    call handler_rndrd
+    jc .fail71
+    ; 3rd record starts at pattern offset 256: 256 % 26 = 22 -> 'W'.
+    cmp byte [rel vol_read_buf], 'W'
+    jne .fail71
+    ; CLOSE (syncs size), then RENAME to RENAMED TXT.
+    lea rdx, [rel aux_fcb]
+    call handler_close
+    jc .fail71
+    lea rsi, [rel fcb_new_renamed]
+    lea rdi, [rel aux_fcb+16]
+    mov rcx, 11
+    cld
+    rep movsb
+    lea rdx, [rel aux_fcb]
+    call handler_rename
+    jc .fail71
+    test al, al
+    jnz .fail71
+    ; Old name gone, new name found.
+    lea rsi, [rel fcb_str_scratch]
+    lea rdi, [rel aux_fcb]
+    mov al, 1
+    call handler_makefcb
+    lea rdx, [rel aux_fcb]
+    call handler_srchfrst
+    jnc .fail71
+    lea rsi, [rel fcb_str_renamed]
+    lea rdi, [rel aux_fcb]
+    mov al, 1
+    call handler_makefcb
+    lea rdx, [rel aux_fcb]
+    call handler_srchfrst
+    jc .fail71
+    ; DELETE renamed; verify gone; double-delete fails.
+    lea rdx, [rel aux_fcb]
+    call handler_delete
+    jc .fail71
+    lea rdx, [rel aux_fcb]
+    call handler_srchfrst
+    jnc .fail71
+    lea rdx, [rel aux_fcb]
+    call handler_delete
+    jnc .fail71
+    xor eax, eax
+    jmp .done71
+.fail71:
+    mov rax, 1
+.done71:
+    pop r10
+    pop r9
+    pop r8
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rcx
+    pop rbx
+    ret
+
+; ------------------------------------------------------------
+; Test 72: Shell line dispatch (G3) without keyboard.
+;   sh_exec_line("DIR")=0, ("TYPE HELLO.TXT")=0, ("TEST")=0 (spawn+reap),
+;   ("FOOBAR")=1 (not found, correct handling), ("")=1, ("EXIT")=2.
+; ------------------------------------------------------------
+test_shell_exec:
+    push rbx
+    push rcx
+    push rdx
+    push rsi
+    push rdi
+    lea rdi, [rel shl_dir]
+    call sh_exec_line
+    test rax, rax
+    jnz .fail72
+    lea rdi, [rel shl_type]
+    call sh_exec_line
+    test rax, rax
+    jnz .fail72
+    lea rdi, [rel shl_test]
+    call sh_exec_line
+    test rax, rax
+    jnz .fail72
+    lea rdi, [rel shl_bad]
+    call sh_exec_line
+    cmp rax, 1
+    jne .fail72
+    lea rdi, [rel shl_empty]
+    call sh_exec_line
+    cmp rax, 1
+    jne .fail72
+    lea rdi, [rel shl_exit]
+    call sh_exec_line
+    cmp rax, 2
+    jne .fail72
+    xor eax, eax
+    jmp .done72
+.fail72:
+    mov rax, 1
+.done72:
+    pop rdi
+    pop rsi
     pop rdx
     pop rcx
     pop rbx
@@ -4294,11 +5111,11 @@ test_int21_roundtrip:
 
 ; ------------------------------------------------------------
 ; Phase11 tests [51]-[58]: Full IDT (IVT replacement)
-;   PIC master 0x20 / slave 0x28, exc 0-31 diagnostics, IRQ0 @0x20,
-;   IRQ14 @0x2E, DOS 0x21 preserved, IRQ1 masked (polling) but
-;   handler tested via spare vector 0x2F. All use CPU `int` (proper
-;   IRETQ frames); error vectors (8/10-14/17/21) verified via IDT
-;   read only (software `int` pushes no error, would corrupt err stub).
+;   PIC master 0x28 / slave 0x30, exc 0-31 diagnostics, IRQ0 @0x28,
+;   IRQ1 @0x29 installed, IRQ14 @0x36, DOS 0x21 preserved. All use CPU
+;   `int` (proper IRETQ frames); error vectors (8/10-14/17/21) verified
+;   via IDT read only (software `int` pushes no error, would corrupt
+;   err stub).
 ; ------------------------------------------------------------
 ; Test 51: Full IDT structure + IMR masked
 test_idt_full:
@@ -4356,23 +5173,36 @@ test_idt_full:
     mov rbx, rax
     cmp byte [rbx+0x21*16+5], 0xEE
     jne .fail51
-    ; vector 0x20 timer + 0x2E disk kernel gates
-    mov rdi, 0x20
+    ; vector 0x28 timer + 0x29 kbd + 0x36 disk kernel gates
+    mov rdi, 0x28
     call idt_get_vector64
     lea rbx, [rel irq0_timer_handler]
     cmp rax, rbx
     jne .fail51
-    mov rdi, 0x2E
+    mov rdi, 0x29
+    call idt_get_vector64
+    lea rbx, [rel irq1_kbd_handler]
+    cmp rax, rbx
+    jne .fail51
+    mov rdi, 0x36
     call idt_get_vector64
     lea rbx, [rel irq14_disk_handler]
     cmp rax, rbx
     jne .fail51
     call idt_get_base64
     mov rbx, rax
-    cmp byte [rbx+0x20*16+5], 0x8E
+    cmp byte [rbx+0x28*16+5], 0x8E
     jne .fail51
-    cmp byte [rbx+0x2E*16+5], 0x8E
+    cmp byte [rbx+0x29*16+5], 0x8E
     jne .fail51
+    cmp byte [rbx+0x36*16+5], 0x8E
+    jne .fail51
+    ; old 0x20 slot is a default gate now, not the timer
+    mov rdi, 0x20
+    call idt_get_vector64
+    lea rbx, [rel irq0_timer_handler]
+    cmp rax, rbx
+    je .fail51
     ; IMR masked (deterministic polling drivers)
     call pic_get_mask64
     cmp rax, 0xFFFF
@@ -4500,10 +5330,15 @@ test_pic_remap:
     lea rbx, [rel int21_entry]
     cmp rax, rbx
     jne .fail53
-    ; timer/disk vectors intact
-    mov rdi, 0x20
+    ; timer/disk/kbd vectors intact
+    mov rdi, 0x28
     call idt_get_vector64
     lea rbx, [rel irq0_timer_handler]
+    cmp rax, rbx
+    jne .fail53
+    mov rdi, 0x29
+    call idt_get_vector64
+    lea rbx, [rel irq1_kbd_handler]
     cmp rax, rbx
     jne .fail53
     ; unmask IRQ0 -> bit0 clear (0xFFFE low)
@@ -4557,7 +5392,7 @@ test_pic_remap:
     pop rbx
     ret
 
-; Test 54: Timer IRQ0 via INT 0x20
+; Test 54: Timer IRQ0 via INT 0x28
 test_timer_irq:
     push rbx
     push rcx
@@ -4570,7 +5405,7 @@ test_timer_irq:
     test rax, rax
     jnz .fail54
     mov rbx, 0x5678
-    int 0x20
+    int 0x28
     cmp rbx, 0x5678
     jne .fail54
     call idt_get_tick64
@@ -4579,7 +5414,7 @@ test_timer_irq:
     call idt_get_fault_count64
     test rax, rax
     jnz .fail54
-    int 0x20
+    int 0x28
     call idt_get_tick64
     cmp rax, 2
     jne .fail54
@@ -4593,7 +5428,10 @@ test_timer_irq:
     pop rbx
     ret
 
-; Test 55: Keyboard IRQ1 handler via spare vector 0x2F
+; Test 55: Keyboard IRQ1 handler at its installed vector 0x29
+;   (installed since the 0x28/0x30 remap clears DOS 0x21). Fires the
+;   real handler via CPU `int`: with no key pending it EOIs cleanly,
+;   preserves regs, faults nothing, and leaves DOS 0x21 alone.
 test_kbd_irq:
     push rbx
     push rcx
@@ -4601,59 +5439,42 @@ test_kbd_irq:
     push rsi
     push rdi
     push r8
-    ; save 0x2F
-    mov rdi, 0x2F
-    call idt_get_vector64
-    mov r8, rax
-    ; install irq1 handler at 0x2F (USER gate via set_vector)
-    mov rdi, 0x2F
-    lea rsi, [rel irq1_kbd_handler]
-    call idt_set_vector64
-    test rax, rax
-    jnz .fail55
-    mov rdi, 0x2F
+    ; 0x29 must already point at the installed handler (no swap needed)
+    mov rdi, 0x29
     call idt_get_vector64
     lea rbx, [rel irq1_kbd_handler]
     cmp rax, rbx
-    jne .fail55b
+    jne .fail55
     ; flush queue, record fault count
     call kbd_flush
     call idt_get_fault_count64
-    mov rbx, rax
+    mov r8, rax
     ; fire (no hw data expected: just EOI, no crash, regs preserved)
     mov rcx, 0x9ABC
-    int 0x2F
+    int 0x29
     cmp rcx, 0x9ABC
-    jne .fail55b
+    jne .fail55
     call idt_get_fault_count64
-    cmp rax, rbx
-    jne .fail55b
+    cmp rax, r8
+    jne .fail55
+    ; with a queued scancode the IRQ path still EOIs cleanly: push a
+    ; make code directly, fire, then pop it back (queue order kept)
+    mov al, 0x1E
+    call kbd_queue_push
+    jc .fail55
+    int 0x29
+    call kbd_queue_pop
+    jc .fail55
+    cmp al, 0x1E
+    jne .fail55
     ; DOS 0x21 untouched (still int21)
     mov rdi, 0x21
     call idt_get_vector64
     lea rbx, [rel int21_entry]
     cmp rax, rbx
-    jne .fail55b
-    ; restore 0x2F
-    mov rdi, 0x2F
-    mov rsi, r8
-    test rsi, rsi
-    jz .fail55b
-    call idt_set_vector64
-    test rax, rax
-    jnz .fail55b
+    jne .fail55
     xor eax, eax
     jmp .done55
-.fail55b:
-    ; try restore before failing
-    push rax
-    mov rdi, 0x2F
-    mov rsi, r8
-    test rsi, rsi
-    jz .skip_rest55
-    call idt_set_vector64
-.skip_rest55:
-    pop rax
 .fail55:
     mov rax, 1
 .done55:
@@ -4665,7 +5486,7 @@ test_kbd_irq:
     pop rbx
     ret
 
-; Test 56: Disk IRQ14 via INT 0x2E
+; Test 56: Disk IRQ14 via INT 0x36
 test_disk_irq:
     push rbx
     push rcx
@@ -4675,7 +5496,7 @@ test_disk_irq:
     test rax, rax
     jnz .fail56
     mov rbx, 0x1357
-    int 0x2E
+    int 0x36
     cmp rbx, 0x1357
     jne .fail56
     call idt_get_irq14_count64
@@ -4684,7 +5505,7 @@ test_disk_irq:
     call idt_get_fault_count64
     test rax, rax
     jnz .fail56
-    int 0x2E
+    int 0x36
     call idt_get_irq14_count64
     cmp rax, 2
     jne .fail56
@@ -4707,33 +5528,33 @@ test_irq_vectors:
     push rdi
     push r8
     push r9
-    ; save 0x20 via GETVECT
-    mov al, 0x20
+    ; save 0x28 via GETVECT
+    mov al, 0x28
     call handler_getvect
     mov r8, rbx
     test r8, r8
     jz .fail57
-    ; set 0x20 to dummy
+    ; set 0x28 to dummy
     mov rax, 0x2500
-    mov al, 0x20
+    mov al, 0x28
     mov rdx, 0x12345000
     call handler_setvect
     test rax, rax
     jnz .fail57
-    mov al, 0x20
+    mov al, 0x28
     call handler_getvect
     cmp rbx, 0x12345000
     jne .fail57b
-    ; restore 0x20 to timer
+    ; restore 0x28 to timer
     mov rax, 0x2500
-    mov al, 0x20
+    mov al, 0x28
     mov rdx, r8
     call handler_setvect
     test rax, rax
     jnz .fail57b
     ; verify timer works after restore
     call idt_reset_stats64
-    int 0x20
+    int 0x28
     call idt_get_tick64
     cmp rax, 1
     jne .fail57b
@@ -4744,7 +5565,7 @@ test_irq_vectors:
     jne .fail57b
     ; bad SETVECT RDX=0 fails
     mov rax, 0x2500
-    mov al, 0x20
+    mov al, 0x28
     xor edx, edx
     call handler_setvect
     test rax, rax
@@ -4754,7 +5575,7 @@ test_irq_vectors:
 .fail57b:
     push rax
     mov rax, 0x2500
-    mov al, 0x20
+    mov al, 0x28
     mov rdx, r8
     test rdx, rdx
     jz .skip_rest57
@@ -4789,8 +5610,8 @@ test_idt_stress:
     cmp rax, 2
     jne .fail58
     ; IRQs
-    int 0x20
-    int 0x2E
+    int 0x28
+    int 0x36
     call idt_get_tick64
     cmp rax, 1
     jne .fail58
@@ -4949,12 +5770,12 @@ msg_test47 db " [47] DATE/TIME get/set/parse... ",0
 msg_test48 db " [48] External EXEC via spawn... ",0
 msg_test49 db " [49] Batch open/next/expand... ",0
 msg_test50 db " [50] Dispatch + stress... ",0
-msg_test51 db " [51] Full IDT 0-31/0x20/0x21/0x2E + IMR... ",0
+msg_test51 db " [51] Full IDT 0-31/0x28/0x21/0x36 + IMR... ",0
 msg_test52 db " [52] Exceptions 0/3/4 diag + preserve... ",0
-msg_test53 db " [53] PIC remap 0x20/0x28 + mask/unmask... ",0
-msg_test54 db " [54] Timer IRQ0 @0x20 tick + EOI... ",0
-msg_test55 db " [55] Kbd IRQ1 via spare 0x2F (DOS safe)... ",0
-msg_test56 db " [56] Disk IRQ14 @0x2E count + EOI... ",0
+msg_test53 db " [53] PIC remap 0x28/0x30 + mask/unmask... ",0
+msg_test54 db " [54] Timer IRQ0 @0x28 tick + EOI... ",0
+msg_test55 db " [55] Kbd IRQ1 @0x29 installed + EOI... ",0
+msg_test56 db " [56] Disk IRQ14 @0x36 count + EOI... ",0
 msg_test57 db " [57] IRQ SETVECT/GETVECT + DOS kept... ",0
 msg_test58 db " [58] IDT stress + DOS after remap... ",0
 msg_test59 db " [59] RSP 16B + I/O/IST stacks... ",0
@@ -4965,6 +5786,12 @@ msg_test63 db " [63] IRQ stacks IST==0 + timer preserve... ",0
 msg_test64 db " [64] PUSH/POP 64-bit + near CALL + DF... ",0
 msg_test65 db " [65] Canary init/intact/detect + stress... ",0
 msg_test66 db " [66] ABI stress + DOS after harden... ",0
+msg_test67 db " [67] Real FAT12 volume mount + file read... ",0
+msg_test68 db " [68] RTC date/time get/set (INT21 2A-2D)... ",0
+msg_test69 db " [69] AUX/LIST + VERIFY/NEWBASE/disk info... ",0
+msg_test70 db " [70] FCB open/rndread/search/makefcb... ",0
+msg_test71 db " [71] FCB create/write/read/rename/delete... ",0
+msg_test72 db " [72] Shell line dispatch (DIR/TYPE/EXEC)... ",0
 msg_pass db "PASS",13,10,0
 msg_fail db "FAIL",13,10,0
 msg_summary db 13,10,"Summary: ",0
@@ -4992,6 +5819,20 @@ msg_phase12_ok db "Phase12 stack/ABI (16B+SysV+canary): ALL TESTS PASS",13,10,0
 msg_phase12_fail db "Phase12: SOME TESTS FAILED",13,10,0
 p9_dollar db "P9$INT21$ via INT$",0
 p9_hello3 db "Hi!",0
+vol_name_hello db "HELLO   TXT"
+vol_name_readme db "README  TXT"
+vol_name_missing db "NOFILE  TXT"
+fcb_str_hello db "HELLO.TXT",0
+fcb_str_wild db "*.TXT",0
+fcb_str_scratch db "SCRATCH.TXT",0
+fcb_str_renamed db "RENAMED.TXT",0
+fcb_new_renamed db "RENAMED TXT"
+shl_dir db "DIR",13,0
+shl_type db "TYPE HELLO.TXT",13,0
+shl_test db "TEST",13,0
+shl_bad db "FOOBAR",13,0
+shl_empty db 13,0
+shl_exit db "EXIT",13,0
 
 str_hello db "Hello64",0
 str_lower db "hello",0

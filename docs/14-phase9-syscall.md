@@ -202,3 +202,5 @@ cover `int→conout/vga` + `bufin→conout` depth. PIC masked, `sti` safe.
 **Next:** Phase 10 command interpreter (`COMMAND64` on top of `INT 21h`:
 `DIR/COPY/DEL/TYPE` via `FCB64` + `09/0A/3F/40`, `EXEC` via `4Bh`, batch via
 `0A`; `VER/PROMPT/PATH` via `ENV`).
+
+**Update (closure):** see `docs/19-closure-g1-g6.md` for what changed after this report.

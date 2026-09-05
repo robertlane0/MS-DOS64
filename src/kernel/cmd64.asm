@@ -926,6 +926,42 @@ cmd_path_get64:
     mov rax, 1
     ret
 
+; cmd_emit_both — AL=char -> VGA + COM1 (serial parity for the REPL;
+; VGA-only output would vanish from serial.log / stdio transcripts).
+cmd_emit_both:
+    push rax
+    push rdx
+    mov ah, al
+    movzx edi, ah
+    mov al, ah
+    call vga_putc
+    mov dx, 0x3FD
+    in al, dx
+    test al, 0x20
+    jz .drop_cb
+    mov al, ah
+    mov dx, 0x3F8
+    out dx, al
+.drop_cb:
+    pop rdx
+    pop rax
+    ret
+
+; cmd_print_both — RSI=NUL string -> VGA + COM1.
+cmd_print_both:
+    push rax
+    push rsi
+.loop_cb:
+    lodsb
+    test al, al
+    jz .done_cb
+    call cmd_emit_both
+    jmp .loop_cb
+.done_cb:
+    pop rsi
+    pop rax
+    ret
+
 ; cmd_rem64 RDI=line -> 0 (comment no-op, COMMAND REM jumps to COMMAND)
 cmd_rem64:
     xor eax, eax
@@ -934,7 +970,7 @@ cmd_rem64:
 cmd_pause64:
     push rbx
     lea rsi, [rel cmd_pause_msg]
-    call vga_print
+    call cmd_print_both
     xor eax, eax
     pop rbx
     ret
@@ -944,7 +980,7 @@ cmd_echo64:
     jz .echo_ok
     push rbx
     mov rsi, rdi
-    call vga_print
+    call cmd_print_both
     pop rbx
 .echo_ok:
     xor eax, eax

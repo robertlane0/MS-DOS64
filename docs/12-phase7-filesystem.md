@@ -171,3 +171,5 @@ so `cluster→LBA` hits scratch, never the real image.
 
 **Next:** Phase 8 PSP/process loader (64-bit `PSP64` already in `include/psp.inc`;
 `fs_fcb_open`/`file_read_cluster` are the loader's disk primitives).
+
+**Update (closure):** see `docs/19-closure-g1-g6.md` for what changed after this report.

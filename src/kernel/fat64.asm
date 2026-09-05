@@ -11,6 +11,7 @@ global fat_dir_read64
 global fat_test_pack_unpack
 global dma_get_linear
 global dma_set_linear
+extern fs_dir_read64
 
 ; fat_unpack64 — 64-bit UNPACK
 fat_unpack64:
@@ -123,19 +124,13 @@ fat_next_entry64:
     pop rax
     ret
 
+; fat_dir_read64 — real directory-block read (DIRREAD analog).
+;   ABI is identical to fs_dir_read64: RBP = DPB64 ptr, AL = dir block #
+;   (0..dirsec-1), RDI = 512B buffer. Out: RAX 0 ok, 1 fail (ATA error).
+;   Implemented as a tail-call so the Phase-3 symbol stays wired to the
+;   ATA-backed path instead of shipping as a no-op stub (see G5).
 fat_dir_read64:
-    push rax
-    push rbx
-    push rcx
-    push rdx
-    push rbp
-    pop rbp
-    pop rdx
-    pop rcx
-    pop rbx
-    pop rax
-    clc
-    ret
+    jmp fs_dir_read64
 
 dma_get_linear:
     mov rdi, [rel DMAADD64]
