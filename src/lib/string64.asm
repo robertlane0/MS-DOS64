@@ -169,12 +169,6 @@ loop_replacement_demo:
 .done:
     ret
 
-; Alternative showing LOOP still assembles but we avoid it:
-loop_old_style:
-    ; This still works in 64-bit, but dec/jnz is preferred
-    ; loop .target  ; 16-bit relative, uses RCX in 64-bit
-    ret
-
 ; ------------------------------------------------------------
 ; XLAT replacement — XLAT is valid but uses DS:BX + AL; we replace with explicit indexed move
 ;   Original: XLAT at MSDOS.ASM:3545, IO.ASM:735 XLAT, 750 XLAT

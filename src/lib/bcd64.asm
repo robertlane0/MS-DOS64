@@ -9,7 +9,6 @@ default rel
 section .text
 
 global bcd_aam_replacement   ; AL binary -> AH/AL unpacked BCD (AAM)
-global bcd_aad_replacement   ; AH/AL unpacked BCD -> AL binary + AH zero (AAD)
 global bcd_aad_replacement_final
 global bcd_pack_byte         ; pack two BCD digits into byte
 global bcd_unpack_byte       ; unpack byte into two BCD digits
@@ -72,45 +71,15 @@ bcd_aam_32:
     ret
 
 ; ------------------------------------------------------------
-; bcd_aad_replacement — replaces AAD (ASCII Adjust before Division)
+; AAD replacement — replaces AAD (ASCII Adjust before Division)
 ;   Input: AH = tens digit (0-9), AL = ones digit (0-9) — unpacked BCD
 ;   Output: AL = AH*10+AL, AH=0
 ;   Original: AAD  ; AL = AH*10+AL ; AH=0  (used before DIV to convert BCD->binary)
 ;   Invalid in 64-bit.
 ;   Replacement: explicit MUL/ADD or LEA
+;   NOTE: earlier placeholder/broken AAD attempts were removed as
+;   dead code; the canonical implementation is the _final variant below.
 ; ------------------------------------------------------------
-bcd_aad_replacement:
-    ; Method: AL = AH*10 + AL
-    mov bl, ah           ; save AH
-    mov bh, 0
-    mov al, bl
-    mov bl, 10
-    mul bl               ; AL *10? Actually need AH*10: better use separate
-    ret ; placeholder — full implementation below
-
-bcd_aad_full:
-    ; Correct: AH*10 + AL -> AL
-    push rbx
-    movzx eax, ah        ; EAX = AH
-    movzx ebx, al        ; EBX = AL (save)
-    mov ecx, 10
-    mul ecx              ; EAX = AH*10 (but mul ecx uses EAX*ECX -> EDX:EAX)
-    ; Instead simpler: imul eax, eax, 10  then add ebx
-    pop rbx
-    ret
-
-; Simpler correct implementation:
-bcd_aad_simple:
-    ; In: AH, AL unpacked
-    ; Out: AL = AH*10+AL, AH=0
-    movzx ebx, ah
-    imul ebx, ebx, 10    ; EBX = AH*10
-    movzx eax, al
-    add eax, ebx         ; EAX = AH*10+AL
-    mov al, al           ; AL already low
-    mov ah, 0
-    ret
-
 ; Even simpler using LEA (demonstrates 64-bit addressing trick):
 bcd_aad_lea:
     movzx ebx, ah
