@@ -106,8 +106,25 @@ extern idt_init64
 extern idt_load64
 extern idt_set_vector64
 extern idt_get_vector64
+extern idt_get_base64
 extern idt_test_vectors
 extern int21_entry
+extern pic_remap64
+extern pic_get_mask64
+extern pic_set_mask64
+extern pic_mask_irq64
+extern pic_unmask_irq64
+extern irq0_timer_handler
+extern irq1_kbd_handler
+extern irq14_disk_handler
+extern idt_get_tick64
+extern idt_get_irq14_count64
+extern idt_get_fault_count64
+extern idt_get_last_vector64
+extern idt_get_last_error64
+extern idt_get_last_rip64
+extern idt_get_exc_count64
+extern idt_reset_stats64
 extern kbd_queue_push
 extern kbd_queue_pop
 extern kbd_flush
@@ -229,8 +246,11 @@ _start:
     mov rsi, hello_phase10
     call vga_print
     call serial_print64
+    mov rsi, hello_phase11
+    call vga_print
+    call serial_print64
 
-    ; Run Phase 3+4+5+6+7+8+9+10 tests, count passes
+    ; Run Phase 3+4+5+6+7+8+9+10+11 tests, count passes
     xor r12, r12          ; passed count in R12 (callee-saved, demonstrates R8-R15)
     xor r13, r13          ; failed count in R13
     mov r14, 0            ; test index
@@ -1085,6 +1105,142 @@ _start:
     call vga_print
     call serial_print64
 
+    ; ---- Test 51: Full IDT structure 0-31/0x20/0x21/0x2E + IMR (Phase11) ----
+    mov rsi, msg_test51
+    call vga_print
+    call serial_print64
+    call test_idt_full
+    test rax, rax
+    jz .t51_pass
+    inc r13
+    mov rsi, msg_fail
+    jmp .t51_done
+.t51_pass:
+    inc r12
+    mov rsi, msg_pass
+.t51_done:
+    call vga_print
+    call serial_print64
+
+    ; ---- Test 52: Exception diagnostics via INT 0/3/4 (Phase11) ----
+    mov rsi, msg_test52
+    call vga_print
+    call serial_print64
+    call test_exc_diag
+    test rax, rax
+    jz .t52_pass
+    inc r13
+    mov rsi, msg_fail
+    jmp .t52_done
+.t52_pass:
+    inc r12
+    mov rsi, msg_pass
+.t52_done:
+    call vga_print
+    call serial_print64
+
+    ; ---- Test 53: PIC remap 0x20/0x28 + mask/unmask (Phase11) ----
+    mov rsi, msg_test53
+    call vga_print
+    call serial_print64
+    call test_pic_remap
+    test rax, rax
+    jz .t53_pass
+    inc r13
+    mov rsi, msg_fail
+    jmp .t53_done
+.t53_pass:
+    inc r12
+    mov rsi, msg_pass
+.t53_done:
+    call vga_print
+    call serial_print64
+
+    ; ---- Test 54: Timer IRQ0 @0x20 tick + EOI (Phase11) ----
+    mov rsi, msg_test54
+    call vga_print
+    call serial_print64
+    call test_timer_irq
+    test rax, rax
+    jz .t54_pass
+    inc r13
+    mov rsi, msg_fail
+    jmp .t54_done
+.t54_pass:
+    inc r12
+    mov rsi, msg_pass
+.t54_done:
+    call vga_print
+    call serial_print64
+
+    ; ---- Test 55: Keyboard IRQ1 handler via spare vector (Phase11) ----
+    mov rsi, msg_test55
+    call vga_print
+    call serial_print64
+    call test_kbd_irq
+    test rax, rax
+    jz .t55_pass
+    inc r13
+    mov rsi, msg_fail
+    jmp .t55_done
+.t55_pass:
+    inc r12
+    mov rsi, msg_pass
+.t55_done:
+    call vga_print
+    call serial_print64
+
+    ; ---- Test 56: Disk IRQ14 @0x2E count + EOI (Phase11) ----
+    mov rsi, msg_test56
+    call vga_print
+    call serial_print64
+    call test_disk_irq
+    test rax, rax
+    jz .t56_pass
+    inc r13
+    mov rsi, msg_fail
+    jmp .t56_done
+.t56_pass:
+    inc r12
+    mov rsi, msg_pass
+.t56_done:
+    call vga_print
+    call serial_print64
+
+    ; ---- Test 57: IRQ vectors SETVECT/GETVECT + DOS preserved (Phase11) ----
+    mov rsi, msg_test57
+    call vga_print
+    call serial_print64
+    call test_irq_vectors
+    test rax, rax
+    jz .t57_pass
+    inc r13
+    mov rsi, msg_fail
+    jmp .t57_done
+.t57_pass:
+    inc r12
+    mov rsi, msg_pass
+.t57_done:
+    call vga_print
+    call serial_print64
+
+    ; ---- Test 58: IDT stress + DOS round-trip after remap (Phase11) ----
+    mov rsi, msg_test58
+    call vga_print
+    call serial_print64
+    call test_idt_stress
+    test rax, rax
+    jz .t58_pass
+    inc r13
+    mov rsi, msg_fail
+    jmp .t58_done
+.t58_pass:
+    inc r12
+    mov rsi, msg_pass
+.t58_done:
+    call vga_print
+    call serial_print64
+
     ; ---- Summary ----
     mov rsi, msg_summary
     call vga_print
@@ -1126,6 +1282,9 @@ _start:
     mov rsi, msg_phase10_fail
     call vga_print
     call serial_print64
+    mov rsi, msg_phase11_fail
+    call vga_print
+    call serial_print64
     jmp .hlt
 .all_pass:
     mov rsi, msg_phase3_ok
@@ -1150,6 +1309,9 @@ _start:
     call vga_print
     call serial_print64
     mov rsi, msg_phase10_ok
+    call vga_print
+    call serial_print64
+    mov rsi, msg_phase11_ok
     call vga_print
     call serial_print64
 
@@ -3976,6 +4138,541 @@ test_int21_roundtrip:
     ret
 
 ; ------------------------------------------------------------
+; Phase11 tests [51]-[58]: Full IDT (IVT replacement)
+;   PIC master 0x20 / slave 0x28, exc 0-31 diagnostics, IRQ0 @0x20,
+;   IRQ14 @0x2E, DOS 0x21 preserved, IRQ1 masked (polling) but
+;   handler tested via spare vector 0x2F. All use CPU `int` (proper
+;   IRETQ frames); error vectors (8/10-14/17/21) verified via IDT
+;   read only (software `int` pushes no error, would corrupt err stub).
+; ------------------------------------------------------------
+; Test 51: Full IDT structure + IMR masked
+test_idt_full:
+    push rbx
+    push rcx
+    push rdx
+    push rsi
+    push rdi
+    push r8
+    push r9
+    ; IDTR via SIDT: limit 4095, base == idt_get_base64
+    ; (copy SIDT out before calls: calls push ret addr, would shift [rsp])
+    sub rsp, 16
+    sidt [rsp]
+    movzx ecx, word [rsp]
+    mov rsi, [rsp+2]
+    add rsp, 16
+    cmp cx, 4095
+    jne .fail51
+    call idt_get_base64
+    cmp rax, rsi
+    jne .fail51
+    ; vectors 0 vs 1 distinct (per-vector stubs, not shared default)
+    mov rdi, 0
+    call idt_get_vector64
+    mov r8, rax
+    test r8, r8
+    jz .fail51
+    mov rdi, 1
+    call idt_get_vector64
+    mov r9, rax
+    test r9, r9
+    jz .fail51
+    cmp r8, r9
+    je .fail51
+    ; vector 0 type 0x8E kernel, selector 0x08
+    call idt_get_base64
+    mov rbx, rax
+    cmp byte [rbx+5], 0x8E
+    jne .fail51
+    cmp word [rbx+2], 0x08
+    jne .fail51
+    ; vector 8 (err) type kernel
+    call idt_get_base64
+    mov rbx, rax
+    cmp byte [rbx+8*16+5], 0x8E
+    jne .fail51
+    ; vector 0x21 DOS type 0xEE + handler
+    mov rdi, 0x21
+    call idt_get_vector64
+    lea rbx, [rel int21_entry]
+    cmp rax, rbx
+    jne .fail51
+    call idt_get_base64
+    mov rbx, rax
+    cmp byte [rbx+0x21*16+5], 0xEE
+    jne .fail51
+    ; vector 0x20 timer + 0x2E disk kernel gates
+    mov rdi, 0x20
+    call idt_get_vector64
+    lea rbx, [rel irq0_timer_handler]
+    cmp rax, rbx
+    jne .fail51
+    mov rdi, 0x2E
+    call idt_get_vector64
+    lea rbx, [rel irq14_disk_handler]
+    cmp rax, rbx
+    jne .fail51
+    call idt_get_base64
+    mov rbx, rax
+    cmp byte [rbx+0x20*16+5], 0x8E
+    jne .fail51
+    cmp byte [rbx+0x2E*16+5], 0x8E
+    jne .fail51
+    ; IMR masked (deterministic polling drivers)
+    call pic_get_mask64
+    cmp rax, 0xFFFF
+    jne .fail51
+    ; old overlap 0x08 is exc stub, not timer
+    mov rdi, 0x08
+    call idt_get_vector64
+    lea rbx, [rel irq0_timer_handler]
+    cmp rax, rbx
+    je .fail51
+    call idt_test_vectors
+    test rax, rax
+    jnz .fail51
+    xor eax, eax
+    jmp .done51
+.fail51:
+    mov rax, 1
+.done51:
+    pop r9
+    pop r8
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rcx
+    pop rbx
+    ret
+
+; Test 52: Exception diagnostics via INT 0/3/4
+test_exc_diag:
+    push rbx
+    push rcx
+    push rdx
+    push rsi
+    push rdi
+    push r8
+    push r9
+    call idt_reset_stats64
+    call idt_get_fault_count64
+    test rax, rax
+    jnz .fail52
+    ; int 0 (#DE) with RBX preservation check
+    mov rbx, 0x1234
+    int 0
+    cmp rbx, 0x1234
+    jne .fail52
+    call idt_get_fault_count64
+    cmp rax, 1
+    jne .fail52
+    call idt_get_last_vector64
+    cmp rax, 0
+    jne .fail52
+    call idt_get_last_error64
+    cmp rax, 0
+    jne .fail52
+    call idt_get_last_rip64
+    test rax, rax
+    jz .fail52
+    mov rdi, 0
+    call idt_get_exc_count64
+    cmp rax, 1
+    jne .fail52
+    ; tick unchanged (IRQ separate)
+    call idt_get_tick64
+    test rax, rax
+    jnz .fail52
+    ; int 3 (#BP)
+    int 3
+    call idt_get_fault_count64
+    cmp rax, 2
+    jne .fail52
+    call idt_get_last_vector64
+    cmp rax, 3
+    jne .fail52
+    mov rdi, 3
+    call idt_get_exc_count64
+    cmp rax, 1
+    jne .fail52
+    ; int 4 (#OF)
+    int 4
+    call idt_get_fault_count64
+    cmp rax, 3
+    jne .fail52
+    call idt_get_last_vector64
+    cmp rax, 4
+    jne .fail52
+    ; error vectors present via IDT read (not via int: no error pushed)
+    mov rdi, 13
+    call idt_get_vector64
+    test rax, rax
+    jz .fail52
+    mov rdi, 14
+    call idt_get_vector64
+    test rax, rax
+    jz .fail52
+    xor eax, eax
+    jmp .done52
+.fail52:
+    mov rax, 1
+.done52:
+    pop r9
+    pop r8
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rcx
+    pop rbx
+    ret
+
+; Test 53: PIC remap + mask/unmask
+test_pic_remap:
+    push rbx
+    push rcx
+    push rdx
+    push rdi
+    push rsi
+    call pic_remap64
+    test rax, rax
+    jnz .fail53
+    call pic_get_mask64
+    cmp rax, 0xFFFF
+    jne .fail53
+    ; DOS preserved after remap
+    mov rdi, 0x21
+    call idt_get_vector64
+    lea rbx, [rel int21_entry]
+    cmp rax, rbx
+    jne .fail53
+    ; timer/disk vectors intact
+    mov rdi, 0x20
+    call idt_get_vector64
+    lea rbx, [rel irq0_timer_handler]
+    cmp rax, rbx
+    jne .fail53
+    ; unmask IRQ0 -> bit0 clear (0xFFFE low)
+    mov rdi, 0
+    call pic_unmask_irq64
+    test rax, rax
+    jnz .fail53
+    call pic_get_mask64
+    mov rbx, rax
+    test bl, 1
+    jnz .fail53
+    ; mask IRQ0 again -> bit set
+    mov rdi, 0
+    call pic_mask_irq64
+    test rax, rax
+    jnz .fail53
+    call pic_get_mask64
+    cmp rax, 0xFFFF
+    jne .fail53
+    ; bad irq 16 fails
+    mov rdi, 16
+    call pic_mask_irq64
+    test rax, rax
+    jz .fail53
+    mov rdi, 16
+    call pic_unmask_irq64
+    test rax, rax
+    jz .fail53
+    ; DOS still works after remap (AH=19 GETDRV)
+    mov rax, 0x1900
+    int 0x21
+    cmp al, 0
+    jne .fail53b
+    xor eax, eax
+    jmp .done53
+.fail53b:
+    ; restore drive? GETDRV doesn't change, just fail
+.fail53:
+    mov rax, 1
+.done53:
+    ; leave masked for determinism
+    push rax
+    mov al, 0xFF
+    out 0x21, al
+    out 0xA1, al
+    pop rax
+    pop rsi
+    pop rdi
+    pop rdx
+    pop rcx
+    pop rbx
+    ret
+
+; Test 54: Timer IRQ0 via INT 0x20
+test_timer_irq:
+    push rbx
+    push rcx
+    push rdx
+    call idt_reset_stats64
+    call idt_get_tick64
+    test rax, rax
+    jnz .fail54
+    call idt_get_fault_count64
+    test rax, rax
+    jnz .fail54
+    mov rbx, 0x5678
+    int 0x20
+    cmp rbx, 0x5678
+    jne .fail54
+    call idt_get_tick64
+    cmp rax, 1
+    jne .fail54
+    call idt_get_fault_count64
+    test rax, rax
+    jnz .fail54
+    int 0x20
+    call idt_get_tick64
+    cmp rax, 2
+    jne .fail54
+    xor eax, eax
+    jmp .done54
+.fail54:
+    mov rax, 1
+.done54:
+    pop rdx
+    pop rcx
+    pop rbx
+    ret
+
+; Test 55: Keyboard IRQ1 handler via spare vector 0x2F
+test_kbd_irq:
+    push rbx
+    push rcx
+    push rdx
+    push rsi
+    push rdi
+    push r8
+    ; save 0x2F
+    mov rdi, 0x2F
+    call idt_get_vector64
+    mov r8, rax
+    ; install irq1 handler at 0x2F (USER gate via set_vector)
+    mov rdi, 0x2F
+    lea rsi, [rel irq1_kbd_handler]
+    call idt_set_vector64
+    test rax, rax
+    jnz .fail55
+    mov rdi, 0x2F
+    call idt_get_vector64
+    lea rbx, [rel irq1_kbd_handler]
+    cmp rax, rbx
+    jne .fail55b
+    ; flush queue, record fault count
+    call kbd_flush
+    call idt_get_fault_count64
+    mov rbx, rax
+    ; fire (no hw data expected: just EOI, no crash, regs preserved)
+    mov rcx, 0x9ABC
+    int 0x2F
+    cmp rcx, 0x9ABC
+    jne .fail55b
+    call idt_get_fault_count64
+    cmp rax, rbx
+    jne .fail55b
+    ; DOS 0x21 untouched (still int21)
+    mov rdi, 0x21
+    call idt_get_vector64
+    lea rbx, [rel int21_entry]
+    cmp rax, rbx
+    jne .fail55b
+    ; restore 0x2F
+    mov rdi, 0x2F
+    mov rsi, r8
+    test rsi, rsi
+    jz .fail55b
+    call idt_set_vector64
+    test rax, rax
+    jnz .fail55b
+    xor eax, eax
+    jmp .done55
+.fail55b:
+    ; try restore before failing
+    push rax
+    mov rdi, 0x2F
+    mov rsi, r8
+    test rsi, rsi
+    jz .skip_rest55
+    call idt_set_vector64
+.skip_rest55:
+    pop rax
+.fail55:
+    mov rax, 1
+.done55:
+    pop r8
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rcx
+    pop rbx
+    ret
+
+; Test 56: Disk IRQ14 via INT 0x2E
+test_disk_irq:
+    push rbx
+    push rcx
+    push rdx
+    call idt_reset_stats64
+    call idt_get_irq14_count64
+    test rax, rax
+    jnz .fail56
+    mov rbx, 0x1357
+    int 0x2E
+    cmp rbx, 0x1357
+    jne .fail56
+    call idt_get_irq14_count64
+    cmp rax, 1
+    jne .fail56
+    call idt_get_fault_count64
+    test rax, rax
+    jnz .fail56
+    int 0x2E
+    call idt_get_irq14_count64
+    cmp rax, 2
+    jne .fail56
+    xor eax, eax
+    jmp .done56
+.fail56:
+    mov rax, 1
+.done56:
+    pop rdx
+    pop rcx
+    pop rbx
+    ret
+
+; Test 57: IRQ vectors SETVECT/GETVECT + DOS preserved
+test_irq_vectors:
+    push rbx
+    push rcx
+    push rdx
+    push rsi
+    push rdi
+    push r8
+    push r9
+    ; save 0x20 via GETVECT
+    mov al, 0x20
+    call handler_getvect
+    mov r8, rbx
+    test r8, r8
+    jz .fail57
+    ; set 0x20 to dummy
+    mov rax, 0x2500
+    mov al, 0x20
+    mov rdx, 0x12345000
+    call handler_setvect
+    test rax, rax
+    jnz .fail57
+    mov al, 0x20
+    call handler_getvect
+    cmp rbx, 0x12345000
+    jne .fail57b
+    ; restore 0x20 to timer
+    mov rax, 0x2500
+    mov al, 0x20
+    mov rdx, r8
+    call handler_setvect
+    test rax, rax
+    jnz .fail57b
+    ; verify timer works after restore
+    call idt_reset_stats64
+    int 0x20
+    call idt_get_tick64
+    cmp rax, 1
+    jne .fail57b
+    ; DOS 0x21 still works (AH=19)
+    mov rax, 0x1900
+    int 0x21
+    cmp al, 0
+    jne .fail57b
+    ; bad SETVECT RDX=0 fails
+    mov rax, 0x2500
+    mov al, 0x20
+    xor edx, edx
+    call handler_setvect
+    test rax, rax
+    jz .fail57b
+    xor eax, eax
+    jmp .done57
+.fail57b:
+    push rax
+    mov rax, 0x2500
+    mov al, 0x20
+    mov rdx, r8
+    test rdx, rdx
+    jz .skip_rest57
+    call handler_setvect
+.skip_rest57:
+    pop rax
+.fail57:
+    mov rax, 1
+.done57:
+    pop r9
+    pop r8
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rcx
+    pop rbx
+    ret
+
+; Test 58: IDT stress + DOS round-trip after remap
+test_idt_stress:
+    push rbx
+    push rcx
+    push rdx
+    push rsi
+    push rdi
+    call idt_reset_stats64
+    call kbd_flush
+    ; exc sequence
+    int 0
+    int 3
+    call idt_get_fault_count64
+    cmp rax, 2
+    jne .fail58
+    ; IRQs
+    int 0x20
+    int 0x2E
+    call idt_get_tick64
+    cmp rax, 1
+    jne .fail58
+    call idt_get_irq14_count64
+    cmp rax, 1
+    jne .fail58
+    ; DOS round-trip still fine (AH=02/09/19)
+    mov rax, 0x0200
+    mov dl, 'S'
+    int 0x21
+    mov rax, 0x0900
+    lea rdx, [rel p9_dollar]
+    int 0x21
+    mov rax, 0x1900
+    int 0x21
+    cmp al, 0
+    jne .fail58
+    ; fault count still 2 (IRQs + DOS don't fault)
+    call idt_get_fault_count64
+    cmp rax, 2
+    jne .fail58
+    call mem_validate64
+    test rax, rax
+    jnz .fail58
+    xor eax, eax
+    jmp .done58
+.fail58:
+    mov rax, 1
+.done58:
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rcx
+    pop rbx
+    ret
+
+; ------------------------------------------------------------
 ; Serial/VGA helpers
 ; ------------------------------------------------------------
 init_serial64:
@@ -4045,6 +4742,7 @@ hello_phase7 db "Phase7: File System Adaptation — FAT12 on LBA, DPB/DIR/FCB64"
 hello_phase8 db "Phase8: Process Management — PSP64, ENV, Loader, EXEC/EXIT",13,10,0
 hello_phase9 db "Phase9: System Call Interface — INT 21h IDT gate + AH handlers",13,10,0
 hello_phase10 db "Phase10: Command Interpreter — COMMAND64 parser/builtins/exec/batch",13,10,0
+hello_phase11 db "Phase11: Interrupt Descriptor Table — full IDT, PIC remap, IRQ handlers",13,10,0
 msg_test1 db " [1] Register mapping (AX->RAX, R8-R15)... ",0
 msg_test2 db " [2] String ops (REP MOVSB, SCASB, LOOP->DEC)... ",0
 msg_test3 db " [3] BCD (AAM/AAD -> DIV/MUL, CBW, MUL/DIV)... ",0
@@ -4095,6 +4793,14 @@ msg_test47 db " [47] DATE/TIME get/set/parse... ",0
 msg_test48 db " [48] External EXEC via spawn... ",0
 msg_test49 db " [49] Batch open/next/expand... ",0
 msg_test50 db " [50] Dispatch + stress... ",0
+msg_test51 db " [51] Full IDT 0-31/0x20/0x21/0x2E + IMR... ",0
+msg_test52 db " [52] Exceptions 0/3/4 diag + preserve... ",0
+msg_test53 db " [53] PIC remap 0x20/0x28 + mask/unmask... ",0
+msg_test54 db " [54] Timer IRQ0 @0x20 tick + EOI... ",0
+msg_test55 db " [55] Kbd IRQ1 via spare 0x2F (DOS safe)... ",0
+msg_test56 db " [56] Disk IRQ14 @0x2E count + EOI... ",0
+msg_test57 db " [57] IRQ SETVECT/GETVECT + DOS kept... ",0
+msg_test58 db " [58] IDT stress + DOS after remap... ",0
 msg_pass db "PASS",13,10,0
 msg_fail db "FAIL",13,10,0
 msg_summary db 13,10,"Summary: ",0
@@ -4116,6 +4822,8 @@ msg_phase9_ok db "Phase9 syscall interface (INT 21h): ALL TESTS PASS",13,10,0
 msg_phase9_fail db "Phase9: SOME TESTS FAILED",13,10,0
 msg_phase10_ok db "Phase10 command interpreter (COMMAND64): ALL TESTS PASS",13,10,0
 msg_phase10_fail db "Phase10: SOME TESTS FAILED",13,10,0
+msg_phase11_ok db "Phase11 IDT full (remap+IRQ+exc): ALL TESTS PASS",13,10,0
+msg_phase11_fail db "Phase11: SOME TESTS FAILED",13,10,0
 p9_dollar db "P9$INT21$ via INT$",0
 p9_hello3 db "Hi!",0
 

@@ -1,5 +1,5 @@
-# MS-DOS64 – 64-bit BIOS boot build (Phase 10 - command interpreter)
-# Phase 10: COMMAND64 parser/builtins/exec/batch (DIR/COPY/DEL/REN/TYPE/CLS/DATE/TIME/VER/PROMPT/PATH/PAUSE/REM) + all prior phases
+# MS-DOS64 – 64-bit BIOS boot build (Phase 11 - full IDT)
+# Phase 11: IVT->IDT completion (exc 0-31 diagnostics, PIC 0x20/0x28 remap, IRQ0/14, DOS 0x21 kept) + all prior phases
 # Requires: nasm >=2.15, ld (binutils), qemu or bochs
 BUILD := build
 SRC_BOOT := src/boot

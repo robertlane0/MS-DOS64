@@ -1,20 +1,23 @@
-; MS-DOS64 src/kernel/idt64.asm — Phase 9: System Call Interface (INT 21h IDT gate)
-; Converts MSDOS.ASM SETVECT (MSDOS.ASM:3342, INTBASE+AL*4) + DISPATCH (MSDOS.ASM:349)
-; + COMMAND entry (INT 21h/INT 33/CALL5) to flat 64-bit long-mode IDT.
+; MS-DOS64 src/kernel/idt64.asm — Phase 11: Full IDT (IVT replacement)
+; Converts real-mode IVT at 0000:0000 (256 far ptrs, MSDOS SETVECT:3342,
+; DISPATCH:349, INT 20h/21h/22/23/24) to flat 64-bit long-mode IDT.
 ;
-; Original: real-mode IVT at 0000:0000, 256 far ptrs (4B each), DOS vectors
-;           INT 20h (ABORT), INT 21h (DOS), INT 22/23/24 (exit/Ctrl-C/error),
-;           SETVECT writes DS:[INTBASE+AL*4]=DX/DS.
-; 64-bit:   256-entry IDT (16B each, 4096B), interrupt gates (type 0x8E kernel,
-;           0xEE user for INT 0x21 DPL=3), selector 0x08 (GDT64 code), IST=0.
-;           Exceptions 0-31 point to default stubs (error-code aware) that IRETQ.
-;           Vector 0x21 points to int21_entry (Option B, DOS-compatible).
-;           SETVECT (AH=25h) / GETVECT (AH=35h DOS2 ext) read/write IDT entries.
+; Original: IVT 1024B, DOS vectors INT 20h ABORT, 21h DOS, 22/23/24 exit/Ctrl-C,
+;           hardware INT 08h timer IRQ0, 09h kbd IRQ1, 0Eh disk IRQ14 (PIC overlap).
+; 64-bit (Phase 9): 256-entry IDT 4096B, 0xEE DPL3 for 0x21, 0x8E else,
+;           error-aware default stubs, int21_entry Option B, PIC masked.
+; 64-bit (Phase 11): per-vector exception stubs 0-31 with diagnostics
+;           (vector+error+RIP recorded, per-vector counts), PIC remapped
+;           master 0x20 / slave 0x28 (standard, fixes INT8/#DF overlap),
+;           IRQ0 timer @0x20 (tick+EOI), IRQ14 disk @0x2E (count+EOI slave+master),
+;           IRQ1 kbd handler provided (reads 0x60->queue+EOI) but NOT installed
+;           at 0x21 to preserve DOS compat (master+1 == 0x21 collision; IRQ1 stays
+;           masked, polling driver Phase5 suffices; handler tested via spare vector).
+;           All IRQs masked after remap for deterministic tests; unmask API provided.
 ;
-; int21_entry preserves DOS AH-function convention: user RAX holds AH=func,
-; RBX/RCX/RDX/RSI/RDI hold args (BX/CX/DX/SI/DI 16-bit zero-extended).
-; Handler results return via trap frame (STKPTRS64) + RAX/RBX + CF in RFLAGS
-; (CF propagated to IRETQ frame, like DOS AL=0/FF + AH error).
+; IDT entry (16B, AGENTS.md Phase11 IDT_ENTRY):
+;   +0 offset_low (RIP 0-15), +2 selector 0x08, +4 IST 0, +5 type_attr,
+;   +6 offset_mid (16-31), +8 offset_high (32-63), +12 reserved 0.
 ;
 bits 64
 default rel
@@ -31,14 +34,40 @@ global int21_entry
 global idt_default_handler
 global idt_default_handler_err
 global idt_test_vectors
+; Phase 11 new exports
+global pic_remap64
+global pic_get_mask64
+global pic_set_mask64
+global pic_mask_irq64
+global pic_unmask_irq64
+global irq0_timer_handler
+global irq1_kbd_handler
+global irq14_disk_handler
+global exc_common
+global idt_get_tick64
+global idt_get_irq14_count64
+global idt_get_fault_count64
+global idt_get_last_vector64
+global idt_get_last_error64
+global idt_get_last_rip64
+global idt_get_exc_count64
+global idt_reset_stats64
 
 extern syscall_dispatch64
 extern handler_conout
+extern kbd_queue_push
 
 %define IDT_ENTRIES 256
 %define IDT_CODE_SEL 0x08
 %define IDT_TYPE_KERNEL 0x8E   ; P=1 DPL=0 64-bit interrupt gate
 %define IDT_TYPE_USER 0xEE     ; P=1 DPL=3 64-bit interrupt gate (INT 21h)
+%define PIC_MASTER_CMD 0x20
+%define PIC_MASTER_DATA 0x21
+%define PIC_SLAVE_CMD 0xA0
+%define PIC_SLAVE_DATA 0xA1
+%define IRQ_TIMER_VEC 0x20
+%define IRQ_DISK_VEC 0x2E      ; slave 0x28 + IRQ14-8=6 -> 0x2E
+%define DOS_VEC 0x21
 
 section .bss
 align 16
@@ -46,6 +75,21 @@ global idt_table
 idt_table: resb 4096          ; 256 * 16
 global idt_ptr
 idt_ptr: resb 10              ; limit(2) + base(8) for LIDT
+alignb 8
+global idt_tick_count
+idt_tick_count: resq 1
+global idt_irq14_count
+idt_irq14_count: resq 1
+global idt_fault_count
+idt_fault_count: resq 1
+global idt_last_vector
+idt_last_vector: resq 1
+global idt_last_error
+idt_last_error: resq 1
+global idt_last_rip
+idt_last_rip: resq 1
+global idt_exc_counts
+idt_exc_counts: resq 32
 
 section .data
 align 8
@@ -89,8 +133,467 @@ idt_set_entry_raw:
     ret
 
 ; ------------------------------------------------------------
-; idt_init64 — fill IDT: 0-31 exceptions (error-aware), 0x21 INT21 (DPL3),
-;              rest default. Builds IDTR. Does NOT LIDT (call idt_load64).
+; pic_delay — small IO delay for PIC init (POST port, harmless)
+; ------------------------------------------------------------
+pic_delay:
+    push rax
+    in al, 0x80
+    pop rax
+    ret
+
+; ------------------------------------------------------------
+; pic_remap64 — remap 8259 PIC master 0x20 / slave 0x28 (standard).
+;   ICW1 0x11 -> 0x20/0xA0, ICW2 offsets, ICW3 cascade (master IRQ2,
+;   slave id 2), ICW4 0x01 8086 mode. Ends masked (0xFF/0xFF) for
+;   deterministic polling drivers (Phase5). Safe with IF=0/1 (no STI/CLI).
+;   Out: RAX 0
+; ------------------------------------------------------------
+pic_remap64:
+    push rax
+    mov al, 0x11
+    out PIC_MASTER_CMD, al
+    call pic_delay
+    out PIC_SLAVE_CMD, al
+    call pic_delay
+    mov al, 0x20              ; master offset
+    out PIC_MASTER_DATA, al
+    call pic_delay
+    mov al, 0x28              ; slave offset
+    out PIC_SLAVE_DATA, al
+    call pic_delay
+    mov al, 0x04              ; master: slave at IRQ2
+    out PIC_MASTER_DATA, al
+    call pic_delay
+    mov al, 0x02              ; slave: cascade id 2
+    out PIC_SLAVE_DATA, al
+    call pic_delay
+    mov al, 0x01              ; 8086 mode
+    out PIC_MASTER_DATA, al
+    call pic_delay
+    out PIC_SLAVE_DATA, al
+    call pic_delay
+    mov al, 0xFF              ; mask all (deterministic, polling drivers)
+    out PIC_MASTER_DATA, al
+    call pic_delay
+    out PIC_SLAVE_DATA, al
+    call pic_delay
+    pop rax
+    xor eax, eax
+    ret
+
+; ------------------------------------------------------------
+; pic_get_mask64 — read combined IMR
+;   Out: RAX bits 0-7 master (0x21), 8-15 slave (0xA1)
+; ------------------------------------------------------------
+pic_get_mask64:
+    push rdx
+    push rcx
+    mov dx, PIC_MASTER_DATA
+    in al, dx
+    movzx ecx, al             ; master
+    mov dx, PIC_SLAVE_DATA
+    in al, dx
+    movzx eax, al
+    shl eax, 8
+    or eax, ecx
+    pop rcx
+    pop rdx
+    ret
+
+; ------------------------------------------------------------
+; pic_set_mask64 — write combined IMR
+;   In: RDI bits 0-7 master, 8-15 slave
+; ------------------------------------------------------------
+pic_set_mask64:
+    push rax
+    push rdx
+    mov eax, edi
+    mov dx, PIC_MASTER_DATA
+    out dx, al
+    shr eax, 8
+    mov dx, PIC_SLAVE_DATA
+    out dx, al
+    pop rdx
+    pop rax
+    xor eax, eax
+    ret
+
+; ------------------------------------------------------------
+; pic_mask_irq64 — set one IMR bit
+;   In: RDI irq 0..15. Out: RAX 0 ok, 1 bad
+; ------------------------------------------------------------
+pic_mask_irq64:
+    cmp rdi, 15
+    ja .bad_m
+    push rcx
+    push rdx
+    push rdi
+    call pic_get_mask64        ; RAX=mask
+    mov rcx, [rsp]             ; irq (pushed RDI)
+    mov rdx, 1
+    shl rdx, cl
+    or rax, rdx
+    mov rdi, rax
+    call pic_set_mask64
+    pop rdi
+    pop rdx
+    pop rcx
+    xor eax, eax
+    ret
+.bad_m:
+    mov rax, 1
+    ret
+
+; ------------------------------------------------------------
+; pic_unmask_irq64 — clear one IMR bit
+;   In: RDI irq 0..15. Out: RAX 0 ok, 1 bad
+; ------------------------------------------------------------
+pic_unmask_irq64:
+    cmp rdi, 15
+    ja .bad_u
+    push rcx
+    push rdx
+    push rdi
+    call pic_get_mask64
+    mov rcx, [rsp]
+    mov rdx, 1
+    shl rdx, cl
+    not rdx
+    and rax, rdx
+    mov rdi, rax
+    call pic_set_mask64
+    pop rdi
+    pop rdx
+    pop rcx
+    xor eax, eax
+    ret
+.bad_u:
+    mov rax, 1
+    ret
+
+; ------------------------------------------------------------
+; Exception per-vector stubs — push vector (+dummy 0 if CPU pushes
+; no error), jmp exc_common. Error vectors (CPU pushes error):
+; 8,10,11,12,13,14,17,21. All others push dummy 0 first so common
+; always sees [vector][error][RIP][CS][RFLAGS].
+; NOTE: software `int n` never pushes error, so tests must only
+; `int` non-error vectors (0,3,4,6...); error vectors verified
+; via IDT read, not via `int`.
+; ------------------------------------------------------------
+exc_stub_0:
+    push 0
+    push 0
+    jmp exc_common
+exc_stub_1:
+    push 0
+    push 1
+    jmp exc_common
+exc_stub_2:
+    push 0
+    push 2
+    jmp exc_common
+exc_stub_3:
+    push 0
+    push 3
+    jmp exc_common
+exc_stub_4:
+    push 0
+    push 4
+    jmp exc_common
+exc_stub_5:
+    push 0
+    push 5
+    jmp exc_common
+exc_stub_6:
+    push 0
+    push 6
+    jmp exc_common
+exc_stub_7:
+    push 0
+    push 7
+    jmp exc_common
+exc_stub_8:
+    push 8
+    jmp exc_common
+exc_stub_9:
+    push 0
+    push 9
+    jmp exc_common
+exc_stub_10:
+    push 10
+    jmp exc_common
+exc_stub_11:
+    push 11
+    jmp exc_common
+exc_stub_12:
+    push 12
+    jmp exc_common
+exc_stub_13:
+    push 13
+    jmp exc_common
+exc_stub_14:
+    push 14
+    jmp exc_common
+exc_stub_15:
+    push 0
+    push 15
+    jmp exc_common
+exc_stub_16:
+    push 0
+    push 16
+    jmp exc_common
+exc_stub_17:
+    push 17
+    jmp exc_common
+exc_stub_18:
+    push 0
+    push 18
+    jmp exc_common
+exc_stub_19:
+    push 0
+    push 19
+    jmp exc_common
+exc_stub_20:
+    push 0
+    push 20
+    jmp exc_common
+exc_stub_21:
+    push 21
+    jmp exc_common
+exc_stub_22:
+    push 0
+    push 22
+    jmp exc_common
+exc_stub_23:
+    push 0
+    push 23
+    jmp exc_common
+exc_stub_24:
+    push 0
+    push 24
+    jmp exc_common
+exc_stub_25:
+    push 0
+    push 25
+    jmp exc_common
+exc_stub_26:
+    push 0
+    push 26
+    jmp exc_common
+exc_stub_27:
+    push 0
+    push 27
+    jmp exc_common
+exc_stub_28:
+    push 0
+    push 28
+    jmp exc_common
+exc_stub_29:
+    push 0
+    push 29
+    jmp exc_common
+exc_stub_30:
+    push 0
+    push 30
+    jmp exc_common
+exc_stub_31:
+    push 0
+    push 31
+    jmp exc_common
+
+; ------------------------------------------------------------
+; exc_common — shared fault recorder. Stack on entry:
+;   [vector][error][RIP][CS][RFLAGS]. Saves 15 GPRs, records
+;   vector/error/RIP + fault_count + per-vector count, restores,
+;   drops vector+error, IRETQ. Preserves all GPRs + RFLAGS (except
+;   fault计数 side effects). Safe for software `int n` tests.
+; ------------------------------------------------------------
+exc_common:
+    push r15
+    push r14
+    push r13
+    push r12
+    push r11
+    push r10
+    push r9
+    push r8
+    push rbp
+    push rdi
+    push rsi
+    push rdx
+    push rcx
+    push rbx
+    push rax
+    ; RSP+120=vector, +128=error, +136=RIP (15 pushes *8)
+    mov rax, [rsp+120]
+    mov [rel idt_last_vector], rax
+    mov rax, [rsp+128]
+    mov [rel idt_last_error], rax
+    mov rax, [rsp+136]
+    mov [rel idt_last_rip], rax
+    inc qword [rel idt_fault_count]
+    mov rax, [rsp+120]
+    cmp rax, 32
+    jae .skip_pv
+    mov rcx, rax
+    shl rcx, 3
+    lea rax, [rel idt_exc_counts]
+    add rax, rcx
+    inc qword [rax]
+.skip_pv:
+    pop rax
+    pop rbx
+    pop rcx
+    pop rdx
+    pop rsi
+    pop rdi
+    pop rbp
+    pop r8
+    pop r9
+    pop r10
+    pop r11
+    pop r12
+    pop r13
+    pop r14
+    pop r15
+    add rsp, 16               ; drop vector+error
+    iretq
+
+; ------------------------------------------------------------
+; irq0_timer_handler — IRQ0 @0x20. Tick++, EOI master, IRETQ.
+;   Preserves all GPRs. Runs with IF=0 (interrupt gate).
+; ------------------------------------------------------------
+irq0_timer_handler:
+    push r15
+    push r14
+    push r13
+    push r12
+    push r11
+    push r10
+    push r9
+    push r8
+    push rbp
+    push rdi
+    push rsi
+    push rdx
+    push rcx
+    push rbx
+    push rax
+    inc qword [rel idt_tick_count]
+    mov al, 0x20
+    out PIC_MASTER_CMD, al
+    pop rax
+    pop rbx
+    pop rcx
+    pop rdx
+    pop rsi
+    pop rdi
+    pop rbp
+    pop r8
+    pop r9
+    pop r10
+    pop r11
+    pop r12
+    pop r13
+    pop r14
+    pop r15
+    iretq
+
+; ------------------------------------------------------------
+; irq1_kbd_handler — IRQ1 kbd (NOT installed at 0x21: collides
+;   with DOS INT 0x21 after master remap 0x20+1. IRQ1 stays masked;
+;   polling driver Phase5 used. Handler tested via spare vector.)
+;   Checks OBF 0x64:0x01, reads 0x60, pushes queue (drop if full),
+;   EOI master, IRETQ. Preserves all GPRs.
+; ------------------------------------------------------------
+irq1_kbd_handler:
+    push r15
+    push r14
+    push r13
+    push r12
+    push r11
+    push r10
+    push r9
+    push r8
+    push rbp
+    push rdi
+    push rsi
+    push rdx
+    push rcx
+    push rbx
+    push rax
+    mov dx, 0x64
+    in al, dx
+    test al, 0x01
+    jz .k_no_data
+    mov dx, 0x60
+    in al, dx
+    call kbd_queue_push       ; CF ignored (drop if full)
+.k_no_data:
+    mov al, 0x20
+    out PIC_MASTER_CMD, al
+    pop rax
+    pop rbx
+    pop rcx
+    pop rdx
+    pop rsi
+    pop rdi
+    pop rbp
+    pop r8
+    pop r9
+    pop r10
+    pop r11
+    pop r12
+    pop r13
+    pop r14
+    pop r15
+    iretq
+
+; ------------------------------------------------------------
+; irq14_disk_handler — IRQ14 @0x2E (slave 0x28+6). Count++,
+;   EOI slave+master (cascade via IRQ2), IRETQ. Preserves all.
+; ------------------------------------------------------------
+irq14_disk_handler:
+    push r15
+    push r14
+    push r13
+    push r12
+    push r11
+    push r10
+    push r9
+    push r8
+    push rbp
+    push rdi
+    push rsi
+    push rdx
+    push rcx
+    push rbx
+    push rax
+    inc qword [rel idt_irq14_count]
+    mov al, 0x20
+    out PIC_SLAVE_CMD, al
+    out PIC_MASTER_CMD, al
+    pop rax
+    pop rbx
+    pop rcx
+    pop rdx
+    pop rsi
+    pop rdi
+    pop rbp
+    pop r8
+    pop r9
+    pop r10
+    pop r11
+    pop r12
+    pop r13
+    pop r14
+    pop r15
+    iretq
+
+; ------------------------------------------------------------
+; idt_init64 — fill IDT: 0-31 per-vector exc stubs (error-aware),
+;   0x20 timer IRQ, 0x21 DOS DPL3, 0x2E disk IRQ, rest default.
+;   Builds IDTR. Does NOT LIDT/remap (call idt_load64).
 ;   Out: RAX 0
 ; ------------------------------------------------------------
 idt_init64:
@@ -100,40 +603,23 @@ idt_init64:
     push rsi
     push rdx
     push r8
-    ; default = no-error stub, kernel gate
+    ; default = no-error stub, kernel gate for 32..255 (except specials)
     lea r8, [rel idt_default_handler]
     xor ecx, ecx
 .fill_loop:
     cmp ecx, IDT_ENTRIES
     jae .fill_done
     cmp ecx, 0x21
-    je .skip_fill            ; set below with USER gate
+    je .skip_fill
+    cmp ecx, 32
+    jb .skip_fill              ; 0-31 set explicitly below
+    cmp ecx, IRQ_TIMER_VEC
+    je .skip_fill
+    cmp ecx, IRQ_DISK_VEC
+    je .skip_fill
     mov rdi, rcx
     mov rsi, r8
-    ; error-code vectors need err stub (pop before IRETQ)
-    cmp rdi, 8
-    je .use_err
-    cmp rdi, 10
-    je .use_err
-    cmp rdi, 11
-    je .use_err
-    cmp rdi, 12
-    je .use_err
-    cmp rdi, 13
-    je .use_err
-    cmp rdi, 14
-    je .use_err
-    cmp rdi, 17
-    je .use_err
-    cmp rdi, 21
-    je .use_err
     mov rdx, IDT_TYPE_KERNEL
-    jmp .do_set
-.use_err:
-    lea rax, [rel idt_default_handler_err]
-    mov rsi, rax
-    mov rdx, IDT_TYPE_KERNEL
-.do_set:
     push rcx
     push r8
     call idt_set_entry_raw
@@ -143,10 +629,149 @@ idt_init64:
     inc ecx
     jmp .fill_loop
 .fill_done:
-    ; vector 0x21 -> int21_entry, USER gate (DPL3, DOS-compatible)
-    mov rdi, 0x21
+    ; 0-31 exception stubs (explicit LEA, no table -> no RIP+SIB pitfalls)
+    mov rdi, 0
+    lea rsi, [rel exc_stub_0]
+    mov rdx, IDT_TYPE_KERNEL
+    call idt_set_entry_raw
+    mov rdi, 1
+    lea rsi, [rel exc_stub_1]
+    mov rdx, IDT_TYPE_KERNEL
+    call idt_set_entry_raw
+    mov rdi, 2
+    lea rsi, [rel exc_stub_2]
+    mov rdx, IDT_TYPE_KERNEL
+    call idt_set_entry_raw
+    mov rdi, 3
+    lea rsi, [rel exc_stub_3]
+    mov rdx, IDT_TYPE_KERNEL
+    call idt_set_entry_raw
+    mov rdi, 4
+    lea rsi, [rel exc_stub_4]
+    mov rdx, IDT_TYPE_KERNEL
+    call idt_set_entry_raw
+    mov rdi, 5
+    lea rsi, [rel exc_stub_5]
+    mov rdx, IDT_TYPE_KERNEL
+    call idt_set_entry_raw
+    mov rdi, 6
+    lea rsi, [rel exc_stub_6]
+    mov rdx, IDT_TYPE_KERNEL
+    call idt_set_entry_raw
+    mov rdi, 7
+    lea rsi, [rel exc_stub_7]
+    mov rdx, IDT_TYPE_KERNEL
+    call idt_set_entry_raw
+    mov rdi, 8
+    lea rsi, [rel exc_stub_8]
+    mov rdx, IDT_TYPE_KERNEL
+    call idt_set_entry_raw
+    mov rdi, 9
+    lea rsi, [rel exc_stub_9]
+    mov rdx, IDT_TYPE_KERNEL
+    call idt_set_entry_raw
+    mov rdi, 10
+    lea rsi, [rel exc_stub_10]
+    mov rdx, IDT_TYPE_KERNEL
+    call idt_set_entry_raw
+    mov rdi, 11
+    lea rsi, [rel exc_stub_11]
+    mov rdx, IDT_TYPE_KERNEL
+    call idt_set_entry_raw
+    mov rdi, 12
+    lea rsi, [rel exc_stub_12]
+    mov rdx, IDT_TYPE_KERNEL
+    call idt_set_entry_raw
+    mov rdi, 13
+    lea rsi, [rel exc_stub_13]
+    mov rdx, IDT_TYPE_KERNEL
+    call idt_set_entry_raw
+    mov rdi, 14
+    lea rsi, [rel exc_stub_14]
+    mov rdx, IDT_TYPE_KERNEL
+    call idt_set_entry_raw
+    mov rdi, 15
+    lea rsi, [rel exc_stub_15]
+    mov rdx, IDT_TYPE_KERNEL
+    call idt_set_entry_raw
+    mov rdi, 16
+    lea rsi, [rel exc_stub_16]
+    mov rdx, IDT_TYPE_KERNEL
+    call idt_set_entry_raw
+    mov rdi, 17
+    lea rsi, [rel exc_stub_17]
+    mov rdx, IDT_TYPE_KERNEL
+    call idt_set_entry_raw
+    mov rdi, 18
+    lea rsi, [rel exc_stub_18]
+    mov rdx, IDT_TYPE_KERNEL
+    call idt_set_entry_raw
+    mov rdi, 19
+    lea rsi, [rel exc_stub_19]
+    mov rdx, IDT_TYPE_KERNEL
+    call idt_set_entry_raw
+    mov rdi, 20
+    lea rsi, [rel exc_stub_20]
+    mov rdx, IDT_TYPE_KERNEL
+    call idt_set_entry_raw
+    mov rdi, 21
+    lea rsi, [rel exc_stub_21]
+    mov rdx, IDT_TYPE_KERNEL
+    call idt_set_entry_raw
+    mov rdi, 22
+    lea rsi, [rel exc_stub_22]
+    mov rdx, IDT_TYPE_KERNEL
+    call idt_set_entry_raw
+    mov rdi, 23
+    lea rsi, [rel exc_stub_23]
+    mov rdx, IDT_TYPE_KERNEL
+    call idt_set_entry_raw
+    mov rdi, 24
+    lea rsi, [rel exc_stub_24]
+    mov rdx, IDT_TYPE_KERNEL
+    call idt_set_entry_raw
+    mov rdi, 25
+    lea rsi, [rel exc_stub_25]
+    mov rdx, IDT_TYPE_KERNEL
+    call idt_set_entry_raw
+    mov rdi, 26
+    lea rsi, [rel exc_stub_26]
+    mov rdx, IDT_TYPE_KERNEL
+    call idt_set_entry_raw
+    mov rdi, 27
+    lea rsi, [rel exc_stub_27]
+    mov rdx, IDT_TYPE_KERNEL
+    call idt_set_entry_raw
+    mov rdi, 28
+    lea rsi, [rel exc_stub_28]
+    mov rdx, IDT_TYPE_KERNEL
+    call idt_set_entry_raw
+    mov rdi, 29
+    lea rsi, [rel exc_stub_29]
+    mov rdx, IDT_TYPE_KERNEL
+    call idt_set_entry_raw
+    mov rdi, 30
+    lea rsi, [rel exc_stub_30]
+    mov rdx, IDT_TYPE_KERNEL
+    call idt_set_entry_raw
+    mov rdi, 31
+    lea rsi, [rel exc_stub_31]
+    mov rdx, IDT_TYPE_KERNEL
+    call idt_set_entry_raw
+    ; IRQ0 timer @0x20
+    mov rdi, IRQ_TIMER_VEC
+    lea rsi, [rel irq0_timer_handler]
+    mov rdx, IDT_TYPE_KERNEL
+    call idt_set_entry_raw
+    ; DOS INT 0x21 USER gate (DPL3, DOS-compatible)
+    mov rdi, DOS_VEC
     lea rsi, [rel int21_entry]
     mov rdx, IDT_TYPE_USER
+    call idt_set_entry_raw
+    ; IRQ14 disk @0x2E
+    mov rdi, IRQ_DISK_VEC
+    lea rsi, [rel irq14_disk_handler]
+    mov rdx, IDT_TYPE_KERNEL
     call idt_set_entry_raw
     ; build IDTR: limit=4095, base=idt_table
     mov word [rel idt_ptr], 4095
@@ -162,18 +787,17 @@ idt_init64:
     ret
 
 ; ------------------------------------------------------------
-; idt_load64 — mask PIC (polling drivers, no IRQs), LIDT, STI.
-;   Phase9: native VGA/ATA/KBD use polling (no IRQ), timer IRQ0 would
-;   fire as INT 8 (PIC overlap, no remap yet — Phase11). INT 8 expects
-;   #DF error code, but IRQ pushes none, so err stub would corrupt stack
-;   (Bochs check_cs loop). Mask master/slave PIC (0x21/0xA1=0xFF) to
-;   prevent IRQs; STI then safe (software INT 0x21 works with IF=0/1).
+; idt_load64 — remap PIC (0x20/0x28, masked), LIDT, STI.
+;   Phase9 masked without remap (timer would fire as INT 8 -> #DF
+;   stack corruption). Phase11 remaps first so masked state is safe
+;   and future unmask delivers to 0x20+/0x28+ (no CPU overlap).
 ; ------------------------------------------------------------
 idt_load64:
     push rax
+    call pic_remap64
     mov al, 0xFF
-    out 0x21, al              ; mask master PIC (IRQ0-7, incl timer IRQ0->INT8)
-    out 0xA1, al              ; mask slave PIC (IRQ8-15)
+    out PIC_MASTER_DATA, al    ; re-assert mask (remap already masked)
+    out PIC_SLAVE_DATA, al
     pop rax
     lidt [rel idt_ptr]
     sti
@@ -229,7 +853,64 @@ idt_get_base64:
     ret
 
 ; ------------------------------------------------------------
-; Default handlers — do nothing, IRETQ. Err version pops error code.
+; Phase 11 stat getters / reset (all preserve caller regs except RAX)
+; ------------------------------------------------------------
+idt_get_tick64:
+    mov rax, [rel idt_tick_count]
+    ret
+idt_get_irq14_count64:
+    mov rax, [rel idt_irq14_count]
+    ret
+idt_get_fault_count64:
+    mov rax, [rel idt_fault_count]
+    ret
+idt_get_last_vector64:
+    mov rax, [rel idt_last_vector]
+    ret
+idt_get_last_error64:
+    mov rax, [rel idt_last_error]
+    ret
+idt_get_last_rip64:
+    mov rax, [rel idt_last_rip]
+    ret
+; In: RDI=vector 0..31. Out: RAX=count (0 if bad)
+idt_get_exc_count64:
+    cmp rdi, 31
+    ja .bad_ec
+    mov rax, rdi
+    shl rax, 3
+    lea rcx, [rel idt_exc_counts]
+    add rcx, rax
+    mov rax, [rcx]
+    ret
+.bad_ec:
+    xor eax, eax
+    ret
+; Zero tick/irq14/fault/last/per-vector. Out: RAX 0
+idt_reset_stats64:
+    push rdi
+    push rcx
+    mov qword [rel idt_tick_count], 0
+    mov qword [rel idt_irq14_count], 0
+    mov qword [rel idt_fault_count], 0
+    mov qword [rel idt_last_vector], 0
+    mov qword [rel idt_last_error], 0
+    mov qword [rel idt_last_rip], 0
+    lea rdi, [rel idt_exc_counts]
+    mov rcx, 32
+.zero_loop:
+    mov qword [rdi], 0
+    add rdi, 8
+    dec rcx
+    jnz .zero_loop
+    pop rcx
+    pop rdi
+    xor eax, eax
+    ret
+
+; ------------------------------------------------------------
+; Default handlers — kept for Phase9 compat (vectors 32+, except
+; 0x20/0x21/0x2E which now point to IRQ/DOS). Do nothing, IRETQ.
 ; ------------------------------------------------------------
 idt_default_handler:
     iretq
@@ -350,7 +1031,9 @@ extern DSKSTACK_TOP64
 
 ; ------------------------------------------------------------
 ; idt_test_vectors — self-check helper (called by Phase9 tests)
-;   Out: RAX 0 ok (0x21==int21_entry, 0x00==default, DPL bits correct)
+;   Out: RAX 0 ok (0x21==int21_entry, 0x00==exc_stub_0, DPL bits correct)
+;   Phase11: vector 0 now points to exc_stub_0 (not default) but still
+;   kernel gate 0x8E selector 0x08, so same checks pass.
 ; ------------------------------------------------------------
 idt_test_vectors:
     push rbx
