@@ -51,15 +51,6 @@ bcd_aam_replacement:
     xchg al, ah          ; now AH=quot, AL=rem matches AAM
     ret
 
-; Alternative using 64-bit registers and R8B (demonstrates R8-R15):
-bcd_aam_r8:
-    movzx eax, al        ; zero extend AL to EAX
-    mov r8b, 10
-    xor edx, edx
-    div r8b              ; still 8-bit? Actually DIV r8b uses AX. For 64-bit demo use 32-bit:
-    ; Better: movzx eax,al ; mov ecx,10 ; div ecx? Need 32-bit variant
-    ret
-
 ; Pure 64-bit version using 32-bit DIV:
 bcd_aam_32:
     movzx eax, al
@@ -76,19 +67,10 @@ bcd_aam_32:
 ;   Output: AL = AH*10+AL, AH=0
 ;   Original: AAD  ; AL = AH*10+AL ; AH=0  (used before DIV to convert BCD->binary)
 ;   Invalid in 64-bit.
-;   Replacement: explicit MUL/ADD or LEA
+;   Replacement: explicit IMUL/ADD (see _final variant below)
 ;   NOTE: earlier placeholder/broken AAD attempts were removed as
 ;   dead code; the canonical implementation is the _final variant below.
 ; ------------------------------------------------------------
-; Even simpler using LEA (demonstrates 64-bit addressing trick):
-bcd_aad_lea:
-    movzx ebx, ah
-    lea eax, [rbx*4 + rbx] ; EBX*5
-    lea eax, [rax*2]      ; *2 => *10
-    movzx ecx, al         ; need original AL? Save earlier
-    ; Full sequence needs to preserve original AL
-    ret
-
 ; Final correct and tested version used by drivers:
 bcd_aad_replacement_final:
     push rbx
