@@ -1,6 +1,6 @@
 # MS-DOS64 — 64-bit BIOS Bootable DOS (from MS-DOS 1.25)
 
-> Phase 1 (Architecture Analysis) **complete**. Phase 2 (Boot & Long Mode) **complete** — boots via BIOS MBR → 64-bit on Bochs & QEMU. **Phase 3 (Register & Instruction Conversion) complete** — 7/7 PASS. **Phase 4 (Addressing Mode Transformation) complete** — 12/12 PASS. **Phase 5 (BIOS Interrupt Replacement, Option C) complete** — 16/16 PASS (native VGA/ATA/KBD) on both emulators. **Phase 6 (Memory Management Overhaul) complete** — 21/21 PASS (MCB64 coalesce/resize/validate/protection, AH=48h/49h/4Ah) on both emulators. **Phase 7 (File System Adaptation) complete** — 27/27 PASS (FAT12 on LBA: BPB→DPB, chain, dir, FCB64) on both emulators. **Phase 8 (Process Management) complete** — 34/34 PASS (PSP64/env/loader/spawn/exit, AH=4Bh/4Ch, INT20h) on both emulators. **Phase 9 (System Call Interface) complete** — 42/42 PASS (INT 21h IDT gate DPL3 + AH=01/02/09/0A/0D/0E/19/25/35/3F/40/4C) on both emulators. **Phase 10 (Command Interpreter) complete** — 50/50 PASS (COMMAND64 parser/builtins/exec/batch: DIR/COPY/DEL/REN/TYPE/CLS/DATE/TIME/VER/PROMPT/PATH/PAUSE/REM) on both emulators. **Phase 11 (Interrupt Descriptor Table) complete** — 58/58 PASS (full IDT 0-31 diagnostics, PIC 0x20/0x28 remap, IRQ0/14, DOS 0x21 kept) on both emulators.
+> Phase 1 (Architecture Analysis) **complete**. Phase 2 (Boot & Long Mode) **complete** — boots via BIOS MBR → 64-bit on Bochs & QEMU. **Phase 3 (Register & Instruction Conversion) complete** — 7/7 PASS. **Phase 4 (Addressing Mode Transformation) complete** — 12/12 PASS. **Phase 5 (BIOS Interrupt Replacement, Option C) complete** — 16/16 PASS (native VGA/ATA/KBD) on both emulators. **Phase 6 (Memory Management Overhaul) complete** — 21/21 PASS (MCB64 coalesce/resize/validate/protection, AH=48h/49h/4Ah) on both emulators. **Phase 7 (File System Adaptation) complete** — 27/27 PASS (FAT12 on LBA: BPB→DPB, chain, dir, FCB64) on both emulators. **Phase 8 (Process Management) complete** — 34/34 PASS (PSP64/env/loader/spawn/exit, AH=4Bh/4Ch, INT20h) on both emulators. **Phase 9 (System Call Interface) complete** — 42/42 PASS (INT 21h IDT gate DPL3 + AH=01/02/09/0A/0D/0E/19/25/35/3F/40/4C) on both emulators. **Phase 10 (Command Interpreter) complete** — 50/50 PASS (COMMAND64 parser/builtins/exec/batch: DIR/COPY/DEL/REN/TYPE/CLS/DATE/TIME/VER/PROMPT/PATH/PAUSE/REM) on both emulators. **Phase 11 (Interrupt Descriptor Table) complete** — 58/58 PASS (full IDT 0-31 diagnostics, PIC 0x20/0x28 remap, IRQ0/14, DOS 0x21 kept) on both emulators. **Phase 12 (Stack and Calling Conventions) complete** — 66/66 PASS (RSP 16B, System V RDI/RSI/RDX/RCX/R8/R9, callee-saved, canary, IST reserve) on both emulators.
 
 Original source: Microsoft MS-DOS v1.25 (MIT), Tim Paterson 86-DOS. This repo converts the 16-bit real-mode SCP dialect to a flat 64-bit long-mode OS that boots via legacy BIOS MBR on Bochs x86-64.
 
@@ -18,16 +18,16 @@ Original source: Microsoft MS-DOS v1.25 (MIT), Tim Paterson 86-DOS. This repo co
 
 All tables include `file:line` refs and were generated from live `grep -n` over the source.
 
-### Build & Run (Phase 11 — Interrupt Descriptor Table)
+### Build & Run (Phase 12 — Stack and Calling Conventions)
 
 ```bash
-make            # builds 512B MBR + stage2 (1K) + kernel (50K, 14 objs) + dos64.img (10M)
+make            # builds 512B MBR + stage2 (1K) + kernel (53K, 15 objs) + dos64.img (10M)
 make run-bochs  # Bochs 3.0 ryzen, 256MiB, serial.log + VGA at 0xB8000
 make run-qemu   # qemu-system-x86_64 -serial stdio alternative (also 64-bit)
 make clean
 ```
 
-**Verify boot (Phase 11):**
+**Verify boot (Phase 12):**
 
 ```bash
 # Bochs (target) — remove stale lock first
@@ -42,14 +42,15 @@ rm -f bochs.log serial.log build/dos64.img.lock && make && BXSHARE=/nix/store/..
 # Phase9: System Call Interface — INT 21h IDT gate + AH handlers
 # Phase10: Command Interpreter — COMMAND64 parser/builtins/exec/batch
 # Phase11: Interrupt Descriptor Table — full IDT, PIC remap, IRQ handlers
-#  [1]...PASS ... [42]...PASS / [43]...PASS ... [50]...PASS / [51]...PASS ... [58]...PASS / Summary: 58 passed, 0 failed / Phase11 IDT full (remap+IRQ+exc): ALL TESTS PASS
+# Phase12: Stack & Calling Conventions — System V ABI, 16B, callee-saved
+#  [1]...PASS ... [42]...PASS / [43]...PASS ... [50]...PASS / [51]...PASS ... [58]...PASS / [59]...PASS ... [66]...PASS / Summary: 66 passed, 0 failed / Phase12 stack/ABI (16B+SysV+canary): ALL TESTS PASS
 # Note: [30]/[32]/[33] emit single-letter progress markers (A–N/a–h/p–$) before PASS (fail-point isolation).
 
-# QEMU alternative (also shows Phase11 suite)
+# QEMU alternative (also shows Phase12 suite)
 timeout 12 qemu-system-x86_64 -drive file=build/dos64.img,format=raw -serial stdio -display none
 
 # Quick QEMU verify:
-# Phase11: Interrupt Descriptor Table ... / [1]...PASS ... [58]...PASS / Summary: 58 passed, 0 failed
+# Phase12: Stack & Calling Conventions ... / [1]...PASS ... [66]...PASS / Summary: 66 passed, 0 failed
 ```
 
 ### Project Layout
@@ -61,14 +62,14 @@ IO.ASM             IO.SYS + BIOS jump table (1933)
 COMMAND.ASM        resident/transient shell (2165)
 STDDOS.ASM         build wrapper (23)
 src/boot/          mbr.asm (512B MBR, A20, INT13 LBA/CHS) + stage2.asm (real→protected→long, 128 sectors) + gdt.asm
-src/kernel/        main.asm (Phase11 harness, 58 tests, _start @0x100000) + cmd64.asm (COMMAND64: parser/COMTAB64/builtins/exec/batch, 47 exports) + fat64.asm (UNPACK/PACK) + fs64.asm (FAT12 on LBA: BPB/chain/dir/FCB64, 19 exports) + mem64.asm (MCB64: coalesce/resize/validate/protect, 24 exports) + proc64.asm (PSP64/env/loader/spawn/exit, 21 exports) + syscall64.asm (SAVREGS/DISPATCH64 77 entries, AH=01/02/09/0A/0D/0E/19/25/35/3F/40/48h/49h/4Ah/4Bh/4Ch, I/O+DSK 4K stacks) + idt64.asm (full IDT 0-31 diagnostics, PIC 0x20/0x28 remap, IRQ0 @0x20/IRQ14 @0x2E, DOS 0x21 DPL3, 24 exports)
+src/kernel/        main.asm (Phase12 harness, 66 tests, _start @0x100000) + stack64.asm (stack/ABI: 16B, SysV RDI..R9, callee-saved, canary, IST1/2 reserve, 23 exports) + cmd64.asm (COMMAND64: parser/COMTAB64/builtins/exec/batch, 47 exports) + fat64.asm (UNPACK/PACK) + fs64.asm (FAT12 on LBA: BPB/chain/dir/FCB64, 19 exports) + mem64.asm (MCB64: coalesce/resize/validate/protect, 24 exports) + proc64.asm (PSP64/env/loader/spawn/exit, 21 exports) + syscall64.asm (SAVREGS/DISPATCH64 77 entries, AH=01/02/09/0A/0D/0E/19/25/35/3F/40/48h/49h/4Ah/4Bh/4Ch, I/O+DSK 4K stacks 16-aligned) + idt64.asm (full IDT 0-31 diagnostics, PIC 0x20/0x28 remap, IRQ0 @0x20/IRQ14 @0x2E, DOS 0x21 DPL3, 24 exports)
 src/drivers/       vga.asm (0xB8000 text, cursor, scroll) + ata.asm (0x1F0 PIO LBA28, CHS→LBA, scratch LBA200/500+) + kbd.asm (0x60/0x64 PS/2, queue, tables) — native Option C
 src/lib/           string64.asm (REP/LOOP/XLAT) + bcd64.asm (AAM/AAD→DIV, CBW etc.) + addr64.asm (seg:off→linear, RIP-rel, far→near)
-include/           fcb.inc/dpb.inc/psp.inc/mcb.inc/regs.inc/fs.inc (64-bit strucs, STKPTRS64, DIRENT, BPB)
-docs/              00-phase1-summary + 01..06 analysis + 07-phase2-boot + 08-phase3-register-conversion + 09-phase4-addressing + 10-phase5-bios-drivers + 11-phase6-memory + 12-phase7-filesystem + 13-phase8-process + 14-phase9-syscall + 15-phase10-command + 16-phase11-idt (Phase 11 report)
+include/           fcb.inc/dpb.inc/psp.inc/mcb.inc/regs.inc/fs.inc/stack.inc (64-bit strucs, STKPTRS64, DIRENT, BPB, STACK_TOP/ABI macros)
+docs/              00-phase1-summary + 01..06 analysis + 07-phase2-boot + 08-phase3-register-conversion + 09-phase4-addressing + 10-phase5-bios-drivers + 11-phase6-memory + 12-phase7-filesystem + 13-phase8-process + 14-phase9-syscall + 15-phase10-command + 16-phase11-idt + 17-phase12-stack (Phase 12 report)
 bochsrc.txt        Bochs 3.0 ryzen, 256MiB, ata0 10MiB flat, VBE, serial.log
 linker.ld          flat link at 0x100000 (*.text.start first)
-build/             mbr.bin, stage2.bin (≈1K), kernel.bin (50K, 97 sec), kernel.elf (157K), dos64.img (10M)
+build/             mbr.bin, stage2.bin (≈1K), kernel.bin (53K, 103 sec), kernel.elf (165K), dos64.img (10M)
 ```
 
 ## Source License
@@ -172,4 +173,14 @@ See `docs/15-phase10-command.md` for the full report.
 - **Bugs fixed** 3 defects: BSS `align 8`→`alignb 8` warnings, SIDT base read after `call` (RSP shift; copy before calls), dead double-read in `pic_get_mask64` (`push rcx` + single read).
 
 See `docs/16-phase11-idt.md` for the full report.
+
+## Phase 12 Status — Stack and Calling Conventions (System V ABI) Complete
+
+- **Scope** DOS 1.25 16-bit `SS:SP` + near/far `CALL` + `PUSH segment` + `LES/LDS` far loads → flat 64-bit `RSP` System V ABI: `RSP%16==0` before `CALL` (8 inside), `RDI,RSI,RDX,RCX,R8,R9` first 6 args + stack for 7th+ (16B-aligned), `RAX` return, `RBX/RBP/R12-R15` callee-saved, `DF=0`, near `CALL/RET` only, 64-bit `PUSH/POP` only.
+- **Kernel modules** `stack64.asm` 23 exports (15 helpers: `init/get_rsp/align_offset/caller_aligned`, `abi_sum6/sum8/callee_demo/caller_clobber`, `recurse/canary_init/check`, `irq_align/push_balance/df_check/near_call` + `stack_dbg_char` + 8 `stack_test_*`); `include/stack.inc` (`STACK_TOP64 0x90000`, `ALIGN_RSP16`, `ABI_PUSH/POP_CALLEE` with `R10` dummy so `RAX` stays free); `syscall64.asm` BSS `alignb 16` before `IOSTACK/DSKSTACK` so both tops are 16-aligned; `main` 66 tests (`[59]` align, `[60]` callee, `[61]` args, `[62]` depth, `[63]` IRQ, `[64]` push, `[65]` canary, `[66]` stress).
+- **Build** 15 `elf64` objects (+`stack64.o`), kernel `53244B` (103 sectors, ≤128). `make` → `build/kernel.bin` (53K) + `dos64.img` (10M).
+- **Test** Both emulators show **`[1]...PASS` through `[66]...PASS / Summary: 66 passed, 0 failed`** plus all ten `ALL TESTS PASS` banners (serial.log + VGA). No `#UD/#GP/#PF/#DF/check_cs` (Bochs only SND panic, as before).
+- **Bugs fixed** 2 defects: `IOSTACK_TOP`/`DSKSTACK_TOP %16==8` (24B `SPSAVE/SSSAVE/CONTSTK` before 4K stacks; added `alignb 16` pad → tops aligned, `[59]` PASS); `[63]` strict `0x20==0x8E` fails after Phase11 `[57]` restores `0x20` via `SETVECT` (always `USER 0xEE` gate, still functional) → accept `0x8E/0xEE` for IRQ vectors, exact `0xEE` kept for DOS `0x21`.
+
+See `docs/17-phase12-stack.md` for the full report.
 

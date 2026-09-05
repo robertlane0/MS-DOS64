@@ -1,5 +1,5 @@
-; MS-DOS64 64-bit kernel — Phase 10: Command Interpreter (COMMAND64)
-; Phase 2 long-mode entry at 0x100000 plus Phase 3 + Phase 4 + Phase 5 + Phase 6 + Phase 7 + Phase 8 + Phase 9 + Phase 10 tests
+; MS-DOS64 64-bit kernel — Phase 12: Stack & Calling Conventions (System V ABI)
+; Phase 2 long-mode entry at 0x100000 plus Phase 3 + Phase 4 + Phase 5 + Phase 6 + Phase 7 + Phase 8 + Phase 9 + Phase 10 + Phase 11 + Phase 12 tests
 ; Phase 3: RAX/RBX/RCX/RDX/RSI/RDI/RBP/RSP 64-bit, R8-R15, REP with RCX,
 ;          AAM/AAD->DIV/MUL, XLAT->MOV, LES/LDS->flat, PUSH seg elimination
 ; Phase 4: seg:off->linear (seg<<4+off), OFFSET DOSGROUP->rel, RIP-relative,
@@ -211,6 +211,16 @@ extern cmd_test_exec
 extern cmd_test_batch
 extern cmd_test_dispatch
 
+; Phase 12 stack & ABI (System V: RDI/RSI/RDX/RCX/R8/R9, 16B, callee-saved)
+extern stack_test_align
+extern stack_test_callee
+extern stack_test_args
+extern stack_test_depth
+extern stack_test_irq
+extern stack_test_push
+extern stack_test_canary
+extern stack_test_stress
+
 _start:
     mov rsp, 0x90000
     and rsp, -16
@@ -249,8 +259,11 @@ _start:
     mov rsi, hello_phase11
     call vga_print
     call serial_print64
+    mov rsi, hello_phase12
+    call vga_print
+    call serial_print64
 
-    ; Run Phase 3+4+5+6+7+8+9+10+11 tests, count passes
+    ; Run Phase 3+4+5+6+7+8+9+10+11+12 tests, count passes
     xor r12, r12          ; passed count in R12 (callee-saved, demonstrates R8-R15)
     xor r13, r13          ; failed count in R13
     mov r14, 0            ; test index
@@ -1241,6 +1254,142 @@ _start:
     call vga_print
     call serial_print64
 
+    ; ---- Test 59: RSP 16B alignment + I/O/IST stacks (Phase12) ----
+    mov rsi, msg_test59
+    call vga_print
+    call serial_print64
+    call stack_test_align
+    test rax, rax
+    jz .t59_pass
+    inc r13
+    mov rsi, msg_fail
+    jmp .t59_done
+.t59_pass:
+    inc r12
+    mov rsi, msg_pass
+.t59_done:
+    call vga_print
+    call serial_print64
+
+    ; ---- Test 60: Callee-saved RBX/RBP/R12-R15 + caller clobber (Phase12) ----
+    mov rsi, msg_test60
+    call vga_print
+    call serial_print64
+    call stack_test_callee
+    test rax, rax
+    jz .t60_pass
+    inc r13
+    mov rsi, msg_fail
+    jmp .t60_done
+.t60_pass:
+    inc r12
+    mov rsi, msg_pass
+.t60_done:
+    call vga_print
+    call serial_print64
+
+    ; ---- Test 61: System V args 6-reg + 2-stack + return (Phase12) ----
+    mov rsi, msg_test61
+    call vga_print
+    call serial_print64
+    call stack_test_args
+    test rax, rax
+    jz .t61_pass
+    inc r13
+    mov rsi, msg_fail
+    jmp .t61_done
+.t61_pass:
+    inc r12
+    mov rsi, msg_pass
+.t61_done:
+    call vga_print
+    call serial_print64
+
+    ; ---- Test 62: Nested-call depth 32 + RSP restore (Phase12) ----
+    mov rsi, msg_test62
+    call vga_print
+    call serial_print64
+    call stack_test_depth
+    test rax, rax
+    jz .t62_pass
+    inc r13
+    mov rsi, msg_fail
+    jmp .t62_done
+.t62_pass:
+    inc r12
+    mov rsi, msg_pass
+.t62_done:
+    call vga_print
+    call serial_print64
+
+    ; ---- Test 63: IRQ/exc stacks IST==0 + timer preserve (Phase12) ----
+    mov rsi, msg_test63
+    call vga_print
+    call serial_print64
+    call stack_test_irq
+    test rax, rax
+    jz .t63_pass
+    inc r13
+    mov rsi, msg_fail
+    jmp .t63_done
+.t63_pass:
+    inc r12
+    mov rsi, msg_pass
+.t63_done:
+    call vga_print
+    call serial_print64
+
+    ; ---- Test 64: PUSH/POP 64-bit + near CALL/RET + DF=0 (Phase12) ----
+    mov rsi, msg_test64
+    call vga_print
+    call serial_print64
+    call stack_test_push
+    test rax, rax
+    jz .t64_pass
+    inc r13
+    mov rsi, msg_fail
+    jmp .t64_done
+.t64_pass:
+    inc r12
+    mov rsi, msg_pass
+.t64_done:
+    call vga_print
+    call serial_print64
+
+    ; ---- Test 65: Canary init/intact/detect + depth stress (Phase12) ----
+    mov rsi, msg_test65
+    call vga_print
+    call serial_print64
+    call stack_test_canary
+    test rax, rax
+    jz .t65_pass
+    inc r13
+    mov rsi, msg_fail
+    jmp .t65_done
+.t65_pass:
+    inc r12
+    mov rsi, msg_pass
+.t65_done:
+    call vga_print
+    call serial_print64
+
+    ; ---- Test 66: ABI stress + DOS round-trip after hardening (Phase12) ----
+    mov rsi, msg_test66
+    call vga_print
+    call serial_print64
+    call stack_test_stress
+    test rax, rax
+    jz .t66_pass
+    inc r13
+    mov rsi, msg_fail
+    jmp .t66_done
+.t66_pass:
+    inc r12
+    mov rsi, msg_pass
+.t66_done:
+    call vga_print
+    call serial_print64
+
     ; ---- Summary ----
     mov rsi, msg_summary
     call vga_print
@@ -1285,6 +1434,9 @@ _start:
     mov rsi, msg_phase11_fail
     call vga_print
     call serial_print64
+    mov rsi, msg_phase12_fail
+    call vga_print
+    call serial_print64
     jmp .hlt
 .all_pass:
     mov rsi, msg_phase3_ok
@@ -1312,6 +1464,9 @@ _start:
     call vga_print
     call serial_print64
     mov rsi, msg_phase11_ok
+    call vga_print
+    call serial_print64
+    mov rsi, msg_phase12_ok
     call vga_print
     call serial_print64
 
@@ -4743,6 +4898,7 @@ hello_phase8 db "Phase8: Process Management — PSP64, ENV, Loader, EXEC/EXIT",1
 hello_phase9 db "Phase9: System Call Interface — INT 21h IDT gate + AH handlers",13,10,0
 hello_phase10 db "Phase10: Command Interpreter — COMMAND64 parser/builtins/exec/batch",13,10,0
 hello_phase11 db "Phase11: Interrupt Descriptor Table — full IDT, PIC remap, IRQ handlers",13,10,0
+hello_phase12 db "Phase12: Stack & Calling Conventions — System V ABI, 16B, callee-saved",13,10,0
 msg_test1 db " [1] Register mapping (AX->RAX, R8-R15)... ",0
 msg_test2 db " [2] String ops (REP MOVSB, SCASB, LOOP->DEC)... ",0
 msg_test3 db " [3] BCD (AAM/AAD -> DIV/MUL, CBW, MUL/DIV)... ",0
@@ -4801,6 +4957,14 @@ msg_test55 db " [55] Kbd IRQ1 via spare 0x2F (DOS safe)... ",0
 msg_test56 db " [56] Disk IRQ14 @0x2E count + EOI... ",0
 msg_test57 db " [57] IRQ SETVECT/GETVECT + DOS kept... ",0
 msg_test58 db " [58] IDT stress + DOS after remap... ",0
+msg_test59 db " [59] RSP 16B + I/O/IST stacks... ",0
+msg_test60 db " [60] Callee RBX/RBP/R12-R15 + clobber... ",0
+msg_test61 db " [61] SysV 6-reg + 2-stack args + ret... ",0
+msg_test62 db " [62] Nested depth 32 + RSP restore... ",0
+msg_test63 db " [63] IRQ stacks IST==0 + timer preserve... ",0
+msg_test64 db " [64] PUSH/POP 64-bit + near CALL + DF... ",0
+msg_test65 db " [65] Canary init/intact/detect + stress... ",0
+msg_test66 db " [66] ABI stress + DOS after harden... ",0
 msg_pass db "PASS",13,10,0
 msg_fail db "FAIL",13,10,0
 msg_summary db 13,10,"Summary: ",0
@@ -4824,6 +4988,8 @@ msg_phase10_ok db "Phase10 command interpreter (COMMAND64): ALL TESTS PASS",13,1
 msg_phase10_fail db "Phase10: SOME TESTS FAILED",13,10,0
 msg_phase11_ok db "Phase11 IDT full (remap+IRQ+exc): ALL TESTS PASS",13,10,0
 msg_phase11_fail db "Phase11: SOME TESTS FAILED",13,10,0
+msg_phase12_ok db "Phase12 stack/ABI (16B+SysV+canary): ALL TESTS PASS",13,10,0
+msg_phase12_fail db "Phase12: SOME TESTS FAILED",13,10,0
 p9_dollar db "P9$INT21$ via INT$",0
 p9_hello3 db "Hi!",0
 

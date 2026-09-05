@@ -74,12 +74,14 @@ global handler_exit_process
 %define DSKSTACK_SIZE 4096
 
 section .bss
-align 16
+alignb 16
 SPSAVE64:  resq 1
 SSSAVE64:  resq 1
 CONTSTK64: resq 1
+alignb 16
 IOSTACK64: resb IOSTACK_SIZE
 IOSTACK_TOP64:
+alignb 16
 DSKSTACK64: resb DSKSTACK_SIZE
 DSKSTACK_TOP64:
 SAV_EXIT64: resq 1

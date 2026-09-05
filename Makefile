@@ -1,5 +1,5 @@
-# MS-DOS64 – 64-bit BIOS boot build (Phase 11 - full IDT)
-# Phase 11: IVT->IDT completion (exc 0-31 diagnostics, PIC 0x20/0x28 remap, IRQ0/14, DOS 0x21 kept) + all prior phases
+# MS-DOS64 – 64-bit BIOS boot build (Phase 12 - stack & ABI)
+# Phase 12: Stack/ABI hardening (RSP 16B, System V RDI/RSI/RDX/RCX/R8/R9, callee-saved, canary, IST reserve) + all prior phases
 # Requires: nasm >=2.15, ld (binutils), qemu or bochs
 BUILD := build
 SRC_BOOT := src/boot
