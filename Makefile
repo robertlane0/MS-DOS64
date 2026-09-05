@@ -94,7 +94,7 @@ $(BUILD)/dos64-lean.img: $(BUILD)/mbr.bin $(BUILD)/stage2.bin $(LEAN_BUILD)/kern
 	@echo "Created $@ ($$(stat -c %s $@) bytes)"
 
 run-bochs: $(BUILD)/dos64.img
-	rm -f $(BUILD)/dos64.img.lock bochs.log
+	rm -f $(BUILD)/dos64.img.lock bochs.log serial.log
 	bochs -f bochsrc.txt -q
 
 run-qemu: $(BUILD)/dos64.img

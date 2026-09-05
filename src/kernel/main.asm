@@ -6353,7 +6353,7 @@ shl_exit db "EXIT",13,0
 str_hello db "Hello64",0
 str_lower db "hello",0
 xlat_table db 0x00,0x11,0x22,0x33,0x44
-demo_dollar_str db "DOS $ handler via PRTBUF (INT21 AH=09) test$",0
+demo_dollar_str db "DOS dollar handler via PRTBUF (INT21 AH=09) test$",0
 demo_dollar2 db "INT21 test$",0
 vga_test_str db "VGA",0
 ata_dbg_msg db " ATA DBG status=0x",0

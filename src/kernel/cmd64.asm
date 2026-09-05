@@ -928,6 +928,9 @@ cmd_path_get64:
 
 ; cmd_emit_both — AL=char -> VGA + COM1 (serial parity for the REPL;
 ; VGA-only output would vanish from serial.log / stdio transcripts).
+; Blocking for THR empty (see sh_serial_putc): Bochs baud timing made
+; the old drop-if-busy lose bytes; a missing UART reads 0xFF so this
+; never hangs.
 cmd_emit_both:
     push rax
     push rdx
@@ -935,14 +938,14 @@ cmd_emit_both:
     movzx edi, ah
     mov al, ah
     call vga_putc
+.wait_cb:
     mov dx, 0x3FD
     in al, dx
     test al, 0x20
-    jz .drop_cb
+    jz .wait_cb
     mov al, ah
     mov dx, 0x3F8
     out dx, al
-.drop_cb:
     pop rdx
     pop rax
     ret

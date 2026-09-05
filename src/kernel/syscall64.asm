@@ -1059,11 +1059,14 @@ handler_write_file:         ; AH=40h
 
 ; com1_write_char — polled COM1 0x3F8 transmit (AUXOUT/LIST backend)
 ;   In: DL = char. Out: CF 0 sent, CF 1 timeout. Preserves all but flags.
+;   (Char is stashed in BL: RCX is the spin budget and DX holds the
+;   port, so neither CL nor DH can hold it across the wait loop.)
 com1_write_char:
     push rax
+    push rbx
     push rcx
     push rdx
-    mov cl, dl
+    mov bl, dl                ; stash char (BL survives port I/O + countdown)
     mov rcx, 0x200000
     shl rcx, 4              ; generous spin budget (~5M polls)
 .wait_tx:
@@ -1077,12 +1080,13 @@ com1_write_char:
     jmp .done_tx
 .ready_tx:
     mov dx, 0x3F8
-    mov al, cl
+    mov al, bl
     out dx, al
     clc
 .done_tx:
     pop rdx
     pop rcx
+    pop rbx
     pop rax
     ret
 

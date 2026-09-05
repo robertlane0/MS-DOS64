@@ -102,19 +102,24 @@ sh_ext_com: db "COM"
 
 section .text
 
-; sh_serial_putc — AL=char -> COM1 (for serial echo; ignores timeout).
+; sh_serial_putc — AL=char -> COM1 (blocking for THR empty).
+; Bochs emulates 16550 baud timing, so THRE clears briefly after each
+; byte; the old drop-if-busy lost banner/prompt bytes on Bochs while
+; QEMU (instant THRE) never dropped. Blocking is safe: a missing UART
+; reads 0xFF (THRE set), so this never hangs; it only waits out the
+; real per-byte delay. Preserves RAX/RDX shape (AH scratch).
 sh_serial_putc:
     push rdx
     push rax
     mov ah, al
+.wait_sp:
     mov dx, 0x3FD
     in al, dx
     test al, 0x20
-    jz .drop_sp
+    jz .wait_sp
     mov al, ah
     mov dx, 0x3F8
     out dx, al
-.drop_sp:
     pop rax
     pop rdx
     ret
