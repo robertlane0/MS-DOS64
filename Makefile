@@ -10,21 +10,36 @@ SRC_LIB := src/lib
 NASM := nasm
 NASM_BIN := $(NASM) -f bin
 NASM_ELF := $(NASM) -f elf64 -g -F dwarf -I.
+# Self-test control (docs/05 §7): default full build runs the suite.
+#   Full: -DRUN_SELFTEST (default) -> _start runs tests 1..76 then shell.
+#   Lean: -DSKIP_SELFTEST -> _start skips suite, minimal init, shell direct.
+# Override with `make NASM_DEFS=-DSKIP_SELFTEST` or `make lean`.
+NASM_DEFS ?= -DRUN_SELFTEST
 
 # Kernel objects: all kernel, drivers, lib .asm files -> .o
 KERNEL_SRCS := $(wildcard $(SRC_KERNEL)/*.asm) $(wildcard $(SRC_DRIVERS)/*.asm) $(wildcard $(SRC_LIB)/*.asm)
 KERNEL_OBJS := $(patsubst %.asm,$(BUILD)/%.o,$(KERNEL_SRCS))
 
+# Lean kernel objects (separate dir so full/lean can coexist)
+LEAN_BUILD := $(BUILD)/lean
+LEAN_OBJS := $(patsubst %.asm,$(LEAN_BUILD)/%.o,$(KERNEL_SRCS))
+
 # Ensure build dirs exist for nested paths
 KERNEL_OBJ_DIRS := $(sort $(dir $(KERNEL_OBJS)))
+LEAN_OBJ_DIRS := $(sort $(dir $(LEAN_OBJS)))
 
 all: $(BUILD)/dos64.img
+
+lean: $(BUILD)/dos64-lean.img
 
 $(BUILD):
 	mkdir -p $(BUILD)
 
 # Helper to create build subdirectories
 $(KERNEL_OBJ_DIRS):
+	mkdir -p $@
+
+$(LEAN_OBJ_DIRS):
 	mkdir -p $@
 
 # Boot images
@@ -39,7 +54,10 @@ $(BUILD)/stage2.bin: $(SRC_BOOT)/stage2.asm $(SRC_BOOT)/gdt.asm | $(BUILD)
 
 # Rule for kernel .o from .asm (with include path)
 $(BUILD)/%.o: %.asm | $(KERNEL_OBJ_DIRS)
-	$(NASM_ELF) $< -o $@
+	$(NASM_ELF) $(NASM_DEFS) $< -o $@
+
+$(LEAN_BUILD)/%.o: %.asm | $(LEAN_OBJ_DIRS)
+	$(NASM_ELF) -DSKIP_SELFTEST $< -o $@
 
 $(BUILD)/kernel.elf: $(KERNEL_OBJS) linker.ld | $(BUILD)
 	ld -T linker.ld -o $@ $(BUILD)/src/kernel/main.o $(filter-out $(BUILD)/src/kernel/main.o,$(KERNEL_OBJS)) -nostdlib -Map=$(BUILD)/kernel.map || (cat $(BUILD)/kernel.map; exit 1)
@@ -58,6 +76,23 @@ $(BUILD)/dos64.img: $(BUILD)/mbr.bin $(BUILD)/stage2.bin $(BUILD)/kernel.bin | $
 	python3 tools/mkfat12.py $@
 	@echo "Created $@ ($$(stat -c %s $@) bytes)"
 
+$(LEAN_BUILD)/kernel.elf: $(LEAN_OBJS) linker.ld | $(BUILD)
+	ld -T linker.ld -o $@ $(LEAN_BUILD)/src/kernel/main.o $(filter-out $(LEAN_BUILD)/src/kernel/main.o,$(LEAN_OBJS)) -nostdlib -Map=$(LEAN_BUILD)/kernel.map || (cat $(LEAN_BUILD)/kernel.map; exit 1)
+	@echo "Lean kernel linked: $$(stat -c %s $@) bytes, objects: $(words $(LEAN_OBJS))"
+
+$(LEAN_BUILD)/kernel.bin: $(LEAN_BUILD)/kernel.elf | $(BUILD)
+	objcopy -O binary $< $@
+	@echo "Lean kernel binary: $$(stat -c %s $@) bytes ($$(expr $$(stat -c %s $@) / 512) sectors)"
+	@test $$(stat -c %s $@) -le $$(expr 176 \* 512) || (echo "Lean kernel too large for 176 sectors! Increase KERNEL_SECTORS"; exit 1)
+
+$(BUILD)/dos64-lean.img: $(BUILD)/mbr.bin $(BUILD)/stage2.bin $(LEAN_BUILD)/kernel.bin | $(BUILD)
+	dd if=/dev/zero of=$@ bs=1M count=10 status=none
+	dd if=$(BUILD)/mbr.bin of=$@ conv=notrunc status=none
+	dd if=$(BUILD)/stage2.bin of=$@ bs=512 seek=1 conv=notrunc status=none
+	dd if=$(LEAN_BUILD)/kernel.bin of=$@ bs=512 seek=16 conv=notrunc status=none
+	python3 tools/mkfat12.py $@
+	@echo "Created $@ ($$(stat -c %s $@) bytes)"
+
 run-bochs: $(BUILD)/dos64.img
 	rm -f $(BUILD)/dos64.img.lock bochs.log
 	bochs -f bochsrc.txt -q
@@ -65,8 +100,11 @@ run-bochs: $(BUILD)/dos64.img
 run-qemu: $(BUILD)/dos64.img
 	qemu-system-x86_64 -drive file=$(BUILD)/dos64.img,format=raw -serial stdio
 
+run-qemu-lean: $(BUILD)/dos64-lean.img
+	qemu-system-x86_64 -drive file=$(BUILD)/dos64-lean.img,format=raw -serial stdio
+
 clean:
 	rm -rf $(BUILD)/*.bin $(BUILD)/*.o $(BUILD)/*.img $(BUILD)/*.elf $(BUILD)/*.map $(BUILD)/*.lock
-	rm -rf $(BUILD)/src
+	rm -rf $(BUILD)/src $(BUILD)/lean
 
-.PHONY: all clean run-bochs run-qemu
+.PHONY: all lean clean run-bochs run-qemu run-qemu-lean

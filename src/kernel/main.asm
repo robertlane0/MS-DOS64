@@ -23,6 +23,19 @@ default rel
 %include "include/fcb.inc"
 %include "include/psp.inc"
 
+; Self-test control (docs/05-boot-and-testing-strategy.md §7):
+;   Full build (default): -DRUN_SELFTEST -> _start runs tests 1..N then shell.
+;   Lean build: -DSKIP_SELFTEST (or no -DRUN_SELFTEST via lean objects)
+;     -> _start skips the suite, does minimal init, enters shell directly.
+; Default to RUN_SELFTEST for backward compat (plain `make` still tests).
+%ifdef SKIP_SELFTEST
+%undef RUN_SELFTEST
+%else
+%ifndef RUN_SELFTEST
+%define RUN_SELFTEST
+%endif
+%endif
+
 section .text.start
 global _start
 
@@ -141,6 +154,8 @@ extern addr_test_canonical
 extern ata_init
 extern ata_init_clean
 extern ata_wait_not_busy
+extern ata_wait_ready
+extern ata_wait_drq
 extern ata_read_lba28
 extern ata_write_lba28
 extern ata_test_mbr_read
@@ -168,6 +183,11 @@ extern fs_test_file_read
 extern fs_test_fcb
 extern fs_mount_volume64
 extern fs_vol_read_file64
+extern fs_bpb_parse64
+extern fs_cluster_to_lba64
+extern fs_get_cluster64
+extern fs_vol_boot
+extern fs_vol_dpb
 extern handler_getdate
 extern handler_setdate
 extern handler_gettime
@@ -299,6 +319,8 @@ _start:
     call serial_print64
 
     ; Run Phase 3+4+5+6+7+8+9+10+11+12 tests, count passes
+    ; Full build only: lean (SKIP_SELFTEST) jumps over the suite to .lean_boot.
+%ifdef RUN_SELFTEST
     xor r12, r12          ; passed count in R12 (callee-saved, demonstrates R8-R15)
     xor r13, r13          ; failed count in R13
     mov r14, 0            ; test index
@@ -1527,6 +1549,74 @@ _start:
     call vga_print
     call serial_print64
 
+    ; ---- Test 73: Loader negative paths (image_size/entry/stack/bad hdr) ----
+    mov rsi, msg_test73
+    call vga_print
+    call serial_print64
+    call test_neg_verify
+    test rax, rax
+    jz .t73_pass
+    inc r13
+    mov rsi, msg_fail
+    jmp .t73_done
+.t73_pass:
+    inc r12
+    mov rsi, msg_pass
+.t73_done:
+    call vga_print
+    call serial_print64
+
+    ; ---- Test 74: ATA negative paths (range reject, no-hang waits) ----
+    mov rsi, msg_test74
+    call vga_print
+    call serial_print64
+    call test_ata_neg
+    test rax, rax
+    jz .t74_pass
+    inc r13
+    mov rsi, msg_fail
+    jmp .t74_done
+.t74_pass:
+    inc r12
+    mov rsi, msg_pass
+.t74_done:
+    call vga_print
+    call serial_print64
+
+    ; ---- Test 75: Syscall bounds (MAXCOM/MAXCOM+1/FF via dispatch+INT) ----
+    mov rsi, msg_test75
+    call vga_print
+    call serial_print64
+    call test_syscall_bounds
+    test rax, rax
+    jz .t75_pass
+    inc r13
+    mov rsi, msg_fail
+    jmp .t75_done
+.t75_pass:
+    inc r12
+    mov rsi, msg_pass
+.t75_done:
+    call vga_print
+    call serial_print64
+
+    ; ---- Test 76: FAT12/file negative paths (BPB/cluster/NULL/missing) ----
+    mov rsi, msg_test76
+    call vga_print
+    call serial_print64
+    call test_fs_neg
+    test rax, rax
+    jz .t76_pass
+    inc r13
+    mov rsi, msg_fail
+    jmp .t76_done
+.t76_pass:
+    inc r12
+    mov rsi, msg_pass
+.t76_done:
+    call vga_print
+    call serial_print64
+
     ; ---- Summary ----
     mov rsi, msg_summary
     call vga_print
@@ -1613,6 +1703,26 @@ _start:
 
     ; G3: enter the interactive COMMAND64 shell (returns only on EXIT).
     call shell_repl64
+    jmp .hlt
+
+%else
+    ; ---- Lean boot (SKIP_SELFTEST): no suite, minimal init, straight to shell.
+    ; Replicates the essential init the suite would have performed so the
+    ; shell alone still works in isolation (see docs/05 §7).
+.lean_boot:
+    call mem_init64
+    call proc_init64
+    call syscall_init
+    call kbd_init
+    call idt_init64
+    call idt_load64
+    call pic_remap64
+    call fs_mount_volume64
+    mov rsi, msg_lean
+    call vga_print
+    call serial_print64
+    call shell_repl64
+%endif
 
 .hlt:
     cli
@@ -3346,6 +3456,407 @@ test_shell_exec:
 .fail72:
     mov rax, 1
 .done72:
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rcx
+    pop rbx
+    ret
+
+; ------------------------------------------------------------
+; Test 73: Loader negative paths — proc_verify_image64 must reject
+;   corrupt headers gracefully (RAX=2) and proc_load_image64 must
+;   refuse them (CF=1), without faulting. Locks in the defensive
+;   checks in proc_verify_image64 (image_size, entry, stack, hdr).
+; ------------------------------------------------------------
+test_neg_verify:
+    push rbx
+    push rcx
+    push rdx
+    push rsi
+    push rdi
+    push r8
+    push r9
+    push r10
+    push r11
+    ; Build a valid EXE64 header + payload size 160 (32 hdr + 128 image)
+    lea rdi, [rel p8_exe_src]
+    mov dword [rdi+0], 0x34365A4D
+    mov dword [rdi+4], 32
+    mov qword [rdi+8], 128
+    mov dword [rdi+16], 0x10
+    mov dword [rdi+20], 1024
+    mov qword [rdi+24], 0
+    ; Valid EXE64 -> 1
+    lea rsi, [rel p8_exe_src]
+    mov rdx, 160
+    call proc_verify_image64
+    cmp rax, 1
+    jne .fail73
+    ; image_size larger than file (1000 > 160) -> 2
+    lea rdi, [rel p8_exe_src]
+    mov qword [rdi+8], 1000
+    lea rsi, [rel p8_exe_src]
+    mov rdx, 160
+    call proc_verify_image64
+    cmp rax, 2
+    jne .fail73
+    ; image_size == file size (160 > 160-32 allowed) -> 2
+    lea rdi, [rel p8_exe_src]
+    mov qword [rdi+8], 160
+    lea rsi, [rel p8_exe_src]
+    mov rdx, 160
+    call proc_verify_image64
+    cmp rax, 2
+    jne .fail73
+    ; Restore image_size 128
+    lea rdi, [rel p8_exe_src]
+    mov qword [rdi+8], 128
+    ; entry_offset == image_size (128 >= 128) -> 2
+    lea rdi, [rel p8_exe_src]
+    mov dword [rdi+16], 128
+    lea rsi, [rel p8_exe_src]
+    mov rdx, 160
+    call proc_verify_image64
+    cmp rax, 2
+    jne .fail73
+    ; entry_offset huge -> 2
+    lea rdi, [rel p8_exe_src]
+    mov dword [rdi+16], 1000
+    lea rsi, [rel p8_exe_src]
+    mov rdx, 160
+    call proc_verify_image64
+    cmp rax, 2
+    jne .fail73
+    ; Restore entry 0x10
+    lea rdi, [rel p8_exe_src]
+    mov dword [rdi+16], 0x10
+    ; stack_size > 64K -> 2
+    lea rdi, [rel p8_exe_src]
+    mov dword [rdi+20], 65537
+    lea rsi, [rel p8_exe_src]
+    mov rdx, 160
+    call proc_verify_image64
+    cmp rax, 2
+    jne .fail73
+    ; Restore stack 1024
+    lea rdi, [rel p8_exe_src]
+    mov dword [rdi+20], 1024
+    ; bad hdr_size 16 -> 2
+    lea rdi, [rel p8_exe_src]
+    mov dword [rdi+4], 16
+    lea rsi, [rel p8_exe_src]
+    mov rdx, 160
+    call proc_verify_image64
+    cmp rax, 2
+    jne .fail73b
+    ; proc_load_image64 must also refuse the bad header (CF=1), using a
+    ; dummy non-zero PSP (fails at verify, before any copy).
+    mov rdi, 0x200000
+    lea rsi, [rel p8_exe_src]
+    mov rdx, 160
+    call proc_load_image64
+    jnc .fail73b
+    ; Restore hdr_size 32
+    lea rdi, [rel p8_exe_src]
+    mov dword [rdi+4], 32
+    ; zero size -> 2
+    lea rsi, [rel p8_exe_src]
+    xor edx, edx
+    call proc_verify_image64
+    cmp rax, 2
+    jne .fail73
+    ; null src -> 2
+    xor esi, esi
+    mov rdx, 160
+    call proc_verify_image64
+    cmp rax, 2
+    jne .fail73
+    ; oversize > 16M -> 2
+    lea rsi, [rel p8_exe_src]
+    mov rdx, 17*1024*1024
+    call proc_verify_image64
+    cmp rax, 2
+    jne .fail73
+    ; valid COM pattern -> 0 (negatives did not break positives)
+    lea rdi, [rel p8_com_src]
+    mov rcx, 64
+    mov al, 0x51
+.fill73:
+    mov [rdi], al
+    inc rdi
+    inc al
+    dec rcx
+    jnz .fill73
+    lea rsi, [rel p8_com_src]
+    mov rdx, 64
+    call proc_verify_image64
+    cmp rax, 0
+    jne .fail73
+    ; valid EXE64 again after restores -> 1
+    lea rsi, [rel p8_exe_src]
+    mov rdx, 160
+    call proc_verify_image64
+    cmp rax, 1
+    jne .fail73
+    xor eax, eax
+    jmp .done73
+.fail73b:
+    ; restore hdr_size before failing (leave buffer valid for later)
+    push rax
+    lea rdi, [rel p8_exe_src]
+    mov dword [rdi+4], 32
+    pop rax
+.fail73:
+    mov rax, 1
+.done73:
+    pop r11
+    pop r10
+    pop r9
+    pop r8
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rcx
+    pop rbx
+    ret
+
+; ------------------------------------------------------------
+; Test 74: ATA negative paths — out-of-range LBA rejected fast
+;   (RAX=1, no hardware wait), wait helpers terminate (no hang),
+;   and a normal MBR read still works afterwards (no state damage).
+; ------------------------------------------------------------
+test_ata_neg:
+    push rbx
+    push rcx
+    push rdx
+    push rsi
+    push rdi
+    push r8
+    push r9
+    ; LBA 1<<28 out of range: read must fail fast with RAX=1
+    lea rdi, [rel vol_read_buf]
+    mov rsi, 0x10000000
+    mov rdx, 1
+    call ata_read_lba28
+    cmp rax, 1
+    jne .fail74
+    ; Same for write (range check, no media touched)
+    lea rdi, [rel vol_read_buf]
+    mov rsi, 0x10000000
+    mov rdx, 1
+    call ata_write_lba28
+    cmp rax, 1
+    jne .fail74
+    ; Max+1 variant also rejected
+    lea rdi, [rel vol_read_buf]
+    mov rsi, 0x10000001
+    mov rdx, 1
+    call ata_read_lba28
+    cmp rax, 1
+    jne .fail74
+    ; Wait helpers must return, not hang. Idle drive is not busy/ready.
+    call ata_wait_not_busy
+    jc .fail74
+    call ata_wait_ready
+    jc .fail74
+    ; DRQ without a command must time out (CF=1) rather than hang.
+    ; Reaching the next instruction already proves no-hang; the CF=1
+    ; check locks in the timeout path.
+    call ata_wait_drq
+    jnc .fail74
+    ; Normal LBA0 read still works after the rejects (state intact)
+    lea rdi, [rel vol_read_buf]
+    xor esi, esi
+    mov rdx, 1
+    call ata_read_lba28
+    test rax, rax
+    jnz .fail74
+    cmp word [rel vol_read_buf+510], 0xAA55
+    jne .fail74
+    xor eax, eax
+    jmp .done74
+.fail74:
+    mov rax, 1
+.done74:
+    pop r9
+    pop r8
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rcx
+    pop rbx
+    ret
+
+; ------------------------------------------------------------
+; Test 75: Syscall bounds — AH at/past MAXCOM (0x4C) graceful.
+;   0x4C dispatches (kernel EXIT fails CF=1, not bad-path AL=0);
+;   0x4D/0xFF return AL=0 CF=0 via dispatch and via CPU INT 0x21.
+; ------------------------------------------------------------
+test_syscall_bounds:
+    push rbx
+    push rcx
+    push rdx
+    push rsi
+    push rdi
+    push r8
+    push r9
+    push r10
+    push r11
+    call syscall_init
+    call proc_init64
+    ; AH=0x4C (MAXCOM) via dispatch as kernel: dispatched to EXIT which
+    ; fails (kernel cannot exit) with CF=1 — proves NOT the bad path.
+    clc
+    mov rax, 0x4C00
+    call syscall_dispatch64
+    jnc .fail75
+    ; AH=0x4D (MAXCOM+1) via dispatch: bad -> AL=0, CF stays 0
+    clc
+    mov rax, 0x4D00
+    call syscall_dispatch64
+    cmp al, 0
+    jne .fail75
+    jc .fail75
+    ; AH=0xFF via dispatch: bad -> AL=0
+    clc
+    mov rax, 0xFF00
+    call syscall_dispatch64
+    cmp al, 0
+    jne .fail75
+    ; AH=0x4D via CPU INT 0x21: bad -> AL=0, no fault
+    mov rax, 0x4D00
+    int 0x21
+    cmp al, 0
+    jne .fail75
+    ; AH=0xFF via CPU INT 0x21: bad -> AL=0
+    mov rax, 0xFF00
+    int 0x21
+    cmp al, 0
+    jne .fail75
+    ; AH=0x4C via CPU INT as kernel: dispatched, CF=1 (exit fails)
+    mov rax, 0x4C00
+    int 0x21
+    jnc .fail75
+    xor eax, eax
+    jmp .done75
+.fail75:
+    mov rax, 1
+.done75:
+    pop r11
+    pop r10
+    pop r9
+    pop r8
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rcx
+    pop rbx
+    ret
+
+; ------------------------------------------------------------
+; Test 76: FAT12/file negative paths — corrupt BPB rejected,
+;   bad clusters rejected, NULL/missing reads fail, valid still ok.
+;   All read-only: scratch DPB in p8_file_buf+512, never touches
+;   the mounted volume's real DPB/FAT/root.
+; ------------------------------------------------------------
+test_fs_neg:
+    push rbx
+    push rcx
+    push rdx
+    push rsi
+    push rdi
+    push rbp
+    push r8
+    push r9
+    push r10
+    call fs_mount_volume64
+    test rax, rax
+    jnz .fail76
+    ; NULL dest buffer -> CF=1 (no crash)
+    lea rdi, [rel vol_name_hello]
+    xor esi, esi
+    mov rdx, 1024
+    call fs_vol_read_file64
+    jnc .fail76
+    ; Missing file -> CF=1
+    lea rdi, [rel vol_name_missing]
+    lea rsi, [rel vol_read_buf]
+    mov rdx, 1024
+    call fs_vol_read_file64
+    jnc .fail76
+    ; Corrupt BPB (bytes/sector 123) -> parse fails
+    lea rsi, [rel fs_vol_boot]
+    lea rdi, [rel p8_file_buf]
+    mov rcx, 512
+    cld
+    rep movsb
+    lea rdi, [rel p8_file_buf]
+    mov word [rdi+11], 123
+    lea rsi, [rel p8_file_buf]
+    lea rbp, [rel p8_file_buf+512]
+    call fs_bpb_parse64
+    cmp rax, 1
+    jne .fail76
+    ; Zeroed boot sector -> parse fails
+    lea rdi, [rel p8_file_buf]
+    mov rcx, 512
+    xor al, al
+    cld
+    rep stosb
+    lea rsi, [rel p8_file_buf]
+    lea rbp, [rel p8_file_buf+512]
+    call fs_bpb_parse64
+    cmp rax, 1
+    jne .fail76
+    ; Valid boot sector still parses into scratch DPB (positives intact)
+    lea rsi, [rel fs_vol_boot]
+    lea rdi, [rel p8_file_buf]
+    mov rcx, 512
+    cld
+    rep movsb
+    lea rsi, [rel p8_file_buf]
+    lea rbp, [rel p8_file_buf+512]
+    call fs_bpb_parse64
+    test rax, rax
+    jnz .fail76
+    ; cluster->LBA rejects 0, 1, huge; accepts 2 (read-only on real DPB)
+    lea rbp, [rel fs_vol_dpb]
+    xor ebx, ebx
+    call fs_cluster_to_lba64
+    jnc .fail76
+    mov ebx, 1
+    call fs_cluster_to_lba64
+    jnc .fail76
+    mov ebx, 0xFFFFF
+    call fs_cluster_to_lba64
+    jnc .fail76
+    mov ebx, 2
+    call fs_cluster_to_lba64
+    jc .fail76
+    ; FAT get rejects 0, 1; accepts 2
+    lea rbp, [rel fs_vol_dpb]
+    mov rsi, [rbp+DPB64.fat]
+    test rsi, rsi
+    jz .fail76
+    mov rbx, 0
+    call fs_get_cluster64
+    jnc .fail76
+    mov rbx, 1
+    call fs_get_cluster64
+    jnc .fail76
+    mov rbx, 2
+    call fs_get_cluster64
+    jc .fail76
+    xor eax, eax
+    jmp .done76
+.fail76:
+    mov rax, 1
+.done76:
+    pop r10
+    pop r9
+    pop r8
+    pop rbp
     pop rdi
     pop rsi
     pop rdx
@@ -5792,6 +6303,11 @@ msg_test69 db " [69] AUX/LIST + VERIFY/NEWBASE/disk info... ",0
 msg_test70 db " [70] FCB open/rndread/search/makefcb... ",0
 msg_test71 db " [71] FCB create/write/read/rename/delete... ",0
 msg_test72 db " [72] Shell line dispatch (DIR/TYPE/EXEC)... ",0
+msg_test73 db " [73] Loader negative (image/entry/stack/bad hdr)... ",0
+msg_test74 db " [74] ATA negative (range reject, timeout, intact)... ",0
+msg_test75 db " [75] Syscall bounds (MAXCOM/MAXCOM+1/FF)... ",0
+msg_test76 db " [76] FAT12 negative (BPB/cluster/NULL/missing)... ",0
+msg_lean db "Lean boot (SKIP_SELFTEST): suite skipped, entering COMMAND64...",13,10,0
 msg_pass db "PASS",13,10,0
 msg_fail db "FAIL",13,10,0
 msg_summary db 13,10,"Summary: ",0

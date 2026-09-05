@@ -1,11 +1,13 @@
 # Phase 1 – Boot & Testing Strategy for 64-bit Conversion
 
 > **As built (2026-09-05):** this strategy is implemented — MBR → stage2 →
-> kernel at `0x100000` boots 72/72 PASS + `COMMAND64` REPL on QEMU (primary)
+> kernel at `0x100000` boots 76/76 PASS + `COMMAND64` REPL on QEMU (primary)
 > and Bochs. Concrete sizes/layout below reflect the code; the step rationale
 > is unchanged. See `README.md` + `docs/19-closure-g1-g6.md` for the final
 > state (chunked loads, `KERNEL_SECTORS 176`, FAT12 volume at LBA 512+,
-> PIC master `0x28`/slave `0x30`).
+> PIC master `0x28`/slave `0x30`). `make lean` builds a shell-only
+> `build/dos64-lean.img` (`SKIP_SELFTEST`, §7.1); tests 73–76 (§7.2) lock in
+> negative-path handling.
 
 ## 1. Why New Boot Chain Is Needed
 
@@ -137,6 +139,71 @@ Each stage has Bochs run:
 *Stage 6 – Syscalls.* Exercise `INT 21h` gate for `AH=09` print string.
 
 *Stage 7 – Shell.* `src/kernel/shell64.asm` REPL after the self-test suite: prompt loop over PS/2 + COM1 RX, `cmd_parse_line64` → builtins against the mounted volume + `*.COM` EXEC. QEMU `-serial stdio` drives it from a pipe.
+
+### 7.1 Build flag: full (self-test) vs lean (shell-only)
+
+The suite is no longer inseparable from the boot path. `src/kernel/main.asm`
+wraps the test-calling block in `_start` with a build flag:
+
+```nasm
+; Full: nasm -DRUN_SELFTEST  -> run tests 1..N, then shell_repl64
+; Lean: nasm -DSKIP_SELFTEST -> skip suite, minimal init, shell direct
+%ifdef SKIP_SELFTEST
+%undef RUN_SELFTEST
+%else
+%ifndef RUN_SELFTEST
+%define RUN_SELFTEST        ; plain `make` keeps the old behaviour
+%endif
+%endif
+```
+
+`Makefile` exposes both (objects are kept separate so the images can coexist):
+
+```bash
+make                    # full: build/dos64.img (RUN_SELFTEST, 76 tests + shell)
+make lean               # lean: build/dos64-lean.img (SKIP_SELFTEST, shell direct)
+make run-qemu           # boot full image, expect "Summary: 76 passed, 0"
+make run-qemu-lean      # boot lean image, expect "Lean boot ... entering COMMAND64..."
+```
+
+The lean path (`_start:.lean_boot`) still performs the essential init the
+suite would otherwise have done — `mem_init64`, `proc_init64`,
+`syscall_init`, `kbd_init`, `idt_init64`/`idt_load64`, `pic_remap64`,
+`fs_mount_volume64` (retried inside the shell) — prints `msg_lean`, then
+calls `shell_repl64`. This isolates the "does the shell alone still work"
+path and saves boot time (measurable via QEMU `-serial stdio` timestamp
+deltas); the full build still reports `N passed, 0` with the higher N.
+
+### 7.2 Negative-path coverage (tests 73–76)
+
+Positive-path coverage (all 77 `INT 21h` slots exercised) is now paired
+with systematic failure-mode checks, following the existing
+`msg_testN` / `inc r12` / `inc r13` pattern:
+
+* `[73] Loader negative` (`test_neg_verify`): `proc_verify_image64` with
+  `image_size` larger than the file (1000 vs 160, and 160 vs 160-32),
+  `entry_offset >= image_size`, `stack_size > 64K`, bad `hdr_size`,
+  zero size, NULL src, size > 16M → all `RAX=2`; valid COM → 0 and valid
+  EXE64 → 1 still hold; `proc_load_image64` on the bad header returns
+  `CF=1` before any copy.
+* `[74] ATA negative` (`test_ata_neg`): `ata_read/write_lba28` with LBA
+  `0x10000000`/`0x10000001` (≥ 2^28) fail fast with `RAX=1` (pure range
+  check, no hardware wait); `ata_wait_not_busy`/`ata_wait_ready` return
+  ready on the idle drive; `ata_wait_drq` with no command times out
+  (`CF=1`) rather than hanging; a normal LBA0 read (`0xAA55`) still works
+  afterwards (no state damage).
+* `[75] Syscall bounds` (`test_syscall_bounds`): `AH=0x4C` (MAXCOM) via
+  `syscall_dispatch64` and via CPU `int 0x21` dispatches (kernel EXIT
+  fails `CF=1`, proving it is *not* the bad path); `AH=0x4D`
+  (MAXCOM+1) and `AH=0xFF` return `AL=0`/`CF=0` via both paths without
+  faulting.
+* `[76] FAT12 negative` (`test_fs_neg`, read-only): `fs_vol_read_file64`
+  with NULL dest and with a missing name fails (`CF=1`);
+  `fs_bpb_parse64` on a corrupt (bytes/sector 123) and on a zeroed boot
+  sector fails into a scratch DPB in `p8_file_buf+512` (never the mounted
+  volume's real DPB), while the valid boot sector still parses;
+  `fs_cluster_to_lba64`/`fs_get_cluster64` reject clusters 0/1/huge and
+  accept cluster 2.
 
 ## 8. Bochs Config (AGENTS.md template)
 
