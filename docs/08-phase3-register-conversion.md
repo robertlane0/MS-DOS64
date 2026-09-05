@@ -244,3 +244,5 @@ Next: Phase 4 addressing mode (flat linear `RIP-rel`), Phase 5 native drivers (A
 
 *All claims verified via `make`, `hexdump -C`, `BXSHARE=... bochs -f bochsrc.txt -q`, `qemu-system-x86_64 -serial stdio`.*
 
+**Update (closure):** see `docs/19-closure-g1-g6.md` for what changed after this report.
+

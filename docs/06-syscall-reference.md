@@ -1,5 +1,15 @@
 # Appendix – DOS 1.25 System-Call Reference (from MSDOS.ASM DISPATCH)
 
+> **As built:** the 64-bit kernel implements a 77-entry `DISPATCH64`
+> (`AH=00h–4Ch`, `src/kernel/syscall64.asm:315`) via the DPL3 `INT 0x21` IDT
+> gate. Only DOS-reserved slots (`18h/20h/2Fh–34h/36h–3Eh/41h–47h`,
+> `INUSE`/`USERCODE` in DOS 1.25 itself) stay stubbed; everything else —
+> consoles, AUX/COM/LIST, drives, vectors, DMA, handles, alloc, FCB files,
+> date/time (CMOS RTC), VERIFY, EXEC/EXIT — is real. See
+> `docs/19-closure-g1-g6.md` G1 table for the handler→backing map. The
+> `00–46` table below documents the original DOS 1.25 source this was
+> converted from.
+
 Source: `MSDOS.ASM:349-397` `DISPATCH DW ABORT ... VERIFY` (MAXCALL=36, MAXCOM=46). Entry via:
 
 * `INT 21h / INT 33` (DOSGROUP:COMMAND, AH=func) – full 00-46

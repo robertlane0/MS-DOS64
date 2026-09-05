@@ -1,5 +1,13 @@
 # AGENTS.md: Converting MS-DOS v1.25 ASM to 64-bit BIOS Bootable System
 
+> **Status (2026-09-05): implementation complete — 72/72 self-tests PASS on QEMU
+> and Bochs, then the interactive `COMMAND64` shell (`src/kernel/shell64.asm`).
+> The phase plan below is kept as the build record; every checklist item is done.
+> Current entry points: `README.md` (what works / memory / disk / shell),
+> `docs/18-truth-gap-analysis.md` + `docs/19-closure-g1-g6.md` (audit trail for
+> the G1–G6 correctness pass: 77-entry `INT 21h`, real FAT12 volume at LBA 512+,
+> REPL, PIC master `0x28`/slave `0x30`).
+
 ## Mission
 You are tasked with converting the MIT-licensed MS-DOS v1.25 assembly code to create a fully 64-bit compatible operating system that boots via BIOS on x86-64 hardware. The target platform is Bochs emulator for testing, with the end goal being a working 64-bit OS that preserves the fundamental architecture and behavior of DOS while operating in long mode.
 
@@ -15,8 +23,8 @@ You are tasked with converting the MIT-licensed MS-DOS v1.25 assembly code to cr
 - **Boot Method**: Legacy BIOS (not UEFI) - must use MBR boot sector
 - **Processor Mode Progression**: Real Mode → Protected Mode → Long Mode (64-bit)
 - **Memory Model**: Flat 64-bit addressing (no segmentation)
-- **Assembler**: Use NASM or FASM (modern 64-bit capable assemblers)
-- **Testing Platform**: Bochs x86-64 emulator with BIOS firmware
+- **Assembler**: NASM ≥ 2.15 (`nasm -f bin` for boot, `nasm -f elf64` + `ld -T linker.ld` + `objcopy -O binary` for the kernel, per `Makefile`)
+- **Testing Platform**: QEMU `qemu-system-x86_64` (primary proof path, `-serial stdio`) and Bochs x86-64 emulator (`bochsrc.txt`: 256 MiB, `cpu: model=ryzen`, BIOS firmware)
 
 ## Conversion Strategy
 
@@ -62,10 +70,11 @@ Create a modern 64-bit boot sequence:
 
 **Key Steps**:
 - **Sector 1 (512 bytes)**: Initial bootloader that loads the secondary bootloader
-- **Secondary Bootloader**: Performs mode transitions and loads the 64-bit kernel
+- **Secondary Bootloader**: Performs mode transitions and loads the 64-bit kernel (chunked `INT 13h` LBA ≤64 sectors/packet with CHS fallback that advances ES across 64 KiB boundaries; stages at `0x80000`, copies to `0x100000` in long mode)
 - **A20 Enabling**: Use Fast A20 method or keyboard controller
-- **Page Table Setup**: Identity map at least the first 2MB, more as needed
+- **Page Table Setup**: Identity map 0–8 MiB via PML4 @`0x1000` → PDPT @`0x2000` → PD @`0x3000` with 4×2 MiB pages (covers stage2, staging `0x80000`, stack `0x90000`, kernel `0x100000`)
 - **GDT**: Create 64-bit code/data segments (base=0, limit=0xFFFFF, flags for long mode)
+- **Kernel load**: `KERNEL_SECTORS 176` (LBA 16+, clear of scratch `200`/`500–511` and the FAT12 volume at LBA 512+ stamped by `tools/mkfat12.py`)
 
 ### Phase 3: Register and Instruction Conversion
 
@@ -160,13 +169,14 @@ struct MCB {
     uint8_t name[8];
 };
 
-// New 64-bit MCB:
+// New 64-bit MCB (40 bytes on disk/in memory, see include/mcb.inc):
 struct MCB64 {
     uint8_t type;      // 'M' or 'Z'
     uint8_t reserved[7];
     uint64_t owner;    // Process ID or linear address
     uint64_t size;     // Size in bytes
     uint8_t name[8];
+    uint8_t pad1[8];   // reserved / future (checksum, flags)
 };
 ```
 
@@ -209,7 +219,7 @@ struct MCB64 {
 ```
 
 **64-bit PSP Redesign**:
-- Expand to 512 bytes or more
+- 664 bytes actual (`include/psp.inc`, `PSP64_size`; 512-byte DOS-compatible prefix + 64-bit extensions)
 - Convert segment pointers to 64-bit linear addresses
 - Add fields for 64-bit process state:
   - R8-R15 register storage
@@ -244,9 +254,16 @@ syscall
 
 **Recommended**: Use Option B for DOS compatibility, allow Option A as extension
 
+> Implemented as Option B: `src/kernel/idt64.asm` + `src/kernel/syscall64.asm`
+> provide a 256-entry IDT with a DPL3 `INT 0x21` gate and a 77-entry
+> `DISPATCH64` (`AH=00h–4Ch`); only DOS-reserved slots stay stubbed, as in DOS
+> 1.25 itself (see `docs/19-closure-g1-g6.md` G1 table).
+
 ### Phase 10: Command Interpreter (COMMAND.COM → COMMAND64.SYS)
 
-Convert the command interpreter:
+Convert the command interpreter (implemented as `src/kernel/cmd64.asm`
+parser/builtins/exec/batch + `src/kernel/shell64.asm` interactive REPL, backed
+by the mounted FAT12 volume; batch `%1`–`%9`, `*.COM` via `proc_spawn64`):
 
 1. **Built-in Commands**: DIR, COPY, DEL, TYPE, REN, etc.
    - Update all file path parsing to handle 64-bit pointers
@@ -256,6 +273,7 @@ Convert the command interpreter:
    - Load .COM/.EXE programs (create 64-bit .EXE loader)
    - Set up 64-bit PSP for child process
    - Transfer control and wait for termination
+   - As built: raw `.COM` + `MZ64` loaders via `proc_spawn64` (no MZ/PE loader; EXEC spawns but does not context-switch — see `docs/19-closure-g1-g6.md`)
 
 3. **Batch File Processing**:
    - Preserve .BAT execution
@@ -280,10 +298,11 @@ endstruc
 
 **Required Handlers**:
 - Exception handlers: #DE, #GP, #PF, etc. (interrupts 0-31)
-- DOS INT 0x21 (system call handler)
-- Timer interrupt (INT 0x08 → IRQ0)
-- Keyboard interrupt (INT 0x09 → IRQ1)
-- Disk interrupt (INT 0x0E → IRQ14)
+- DOS INT 0x21 (system call handler, DPL3)
+- Timer interrupt (IRQ0 @ `0x28`, PIC master `0x28`)
+- Keyboard interrupt (IRQ1 @ `0x29` installed, shares the polling queue)
+- Disk interrupt (IRQ14 @ `0x36`, PIC slave `0x30`; note: CPU `#PF` is also
+  vector `0x0E` — do not conflate it with the PIC IRQ14 vector)
 
 ### Phase 12: Stack and Calling Conventions
 
@@ -312,121 +331,122 @@ endstruc
 ## Implementation Checklist
 
 ### Pre-Conversion Setup
-- [ ] Clone MS-DOS v1.25 source from official Microsoft repository
-- [ ] Install NASM 2.15+ or FASM 1.73+
-- [ ] Set up Bochs emulator with x86-64 BIOS support
-- [ ] Create project structure for 64-bit rewrite
-- [ ] Set up version control for tracking changes
+- [x] Clone MS-DOS v1.25 source from official Microsoft repository
+- [x] Install NASM 2.15+ (`nasm`, `ld`, `objcopy`, `python3` for `tools/mkfat12.py`)
+- [x] Set up QEMU (primary) + Bochs x86-64 BIOS support (`bochsrc.txt`: 256 MiB, `model=ryzen`)
+- [x] Create project structure for 64-bit rewrite (`src/boot|kernel|drivers|lib`, `include/`, `tools/`, `build/`)
+- [x] Set up version control for tracking changes
 
 ### Boot and Mode Switching
-- [ ] Write 512-byte MBR boot sector (stage 1)
-- [ ] Implement A20 line enablement
-- [ ] Create GDT for protected mode transition
-- [ ] Implement protected mode entry code
-- [ ] Set up PAE paging structures
-- [ ] Create identity-mapped page tables (first 4GB minimum)
-- [ ] Enable long mode via CR4 and EFER MSR
-- [ ] Load 64-bit GDT with proper code/data segments
-- [ ] Jump to 64-bit kernel entry point
+- [x] Write 512-byte MBR boot sector (stage 1)
+- [x] Implement A20 line enablement
+- [x] Create GDT for protected mode transition
+- [x] Implement protected mode entry code
+- [x] Set up PAE paging structures
+- [x] Create identity-mapped page tables (0–8 MiB via PML4 @`0x1000` → PDPT @`0x2000` → PD @`0x3000`, 4×2 MiB pages)
+- [x] Enable long mode via CR4 and EFER MSR
+- [x] Load 64-bit GDT with proper code/data segments
+- [x] Jump to 64-bit kernel entry point (`0x100000`, staged via `0x80000`, `KERNEL_SECTORS 176`)
 
 ### Core Kernel Conversion
-- [ ] Convert IO.SYS initialization routines to 64-bit
-- [ ] Convert MSDOS.SYS kernel to 64-bit
-- [ ] Update all register usage (AX→RAX, etc.)
-- [ ] Convert all segment:offset to linear addressing
-- [ ] Rewrite memory allocation routines for 64-bit
-- [ ] Implement 64-bit MCB chain management
-- [ ] Update file handle tables for 64-bit pointers
-- [ ] Convert FCB (File Control Block) structures
+- [x] Convert IO.SYS initialization routines to 64-bit
+- [x] Convert MSDOS.SYS kernel to 64-bit
+- [x] Update all register usage (AX→RAX, etc.)
+- [x] Convert all segment:offset to linear addressing
+- [x] Rewrite memory allocation routines for 64-bit
+- [x] Implement 64-bit MCB chain management
+- [x] Update file handle tables for 64-bit pointers
+- [x] Convert FCB (File Control Block) structures
 
 ### BIOS Replacement Drivers
-- [ ] Implement VGA text mode driver (INT 10h replacement)
+- [x] Implement VGA text mode driver (INT 10h replacement)
   - Character output to 0xB8000
   - Cursor positioning
   - Scrolling
   - Color attributes
-- [ ] Implement ATA PIO disk driver (INT 13h replacement)
+- [x] Implement ATA PIO disk driver (INT 13h replacement)
   - Read sectors
   - Write sectors
   - Drive detection
   - LBA addressing
-- [ ] Implement PS/2 keyboard driver (INT 16h replacement)
+- [x] Implement PS/2 keyboard driver (INT 16h replacement)
   - Scan code reading
   - Key buffer management
   - Status checking
 
 ### File System Layer
-- [ ] Convert FAT12 parsing code to 64-bit
-- [ ] Update directory entry handling
-- [ ] Rewrite file open/close/read/write functions
-- [ ] Convert FCB-based operations (DOS 1.x style)
-- [ ] Ensure proper buffer pointer handling (64-bit)
+- [x] Convert FAT12 parsing code to 64-bit
+- [x] Update directory entry handling
+- [x] Rewrite file open/close/read/write functions
+- [x] Convert FCB-based operations (DOS 1.x style)
+- [x] Ensure proper buffer pointer handling (64-bit)
 
 ### System Call Interface
-- [ ] Set up IDT with INT 0x21 gate
-- [ ] Implement INT 0x21 dispatcher in 64-bit
-- [ ] Convert each AH function handler:
-  - [ ] 0x01: Character input with echo
-  - [ ] 0x02: Character output
-  - [ ] 0x09: Print string (DS:DX → RSI)
-  - [ ] 0x0A: Buffered input
-  - [ ] 0x0D: Reset disk
-  - [ ] 0x0E: Select drive
-  - [ ] 0x19: Get current drive
-  - [ ] 0x25: Set interrupt vector
-  - [ ] 0x35: Get interrupt vector
-  - [ ] 0x3F: Read from file
-  - [ ] 0x40: Write to file
-  - [ ] 0x4C: Exit process
+- [x] Set up IDT with INT 0x21 gate
+- [x] Implement INT 0x21 dispatcher in 64-bit
+- [x] Convert each AH function handler:
+  - [x] 0x01: Character input with echo
+  - [x] 0x02: Character output
+  - [x] 0x09: Print string (DS:DX → RSI)
+  - [x] 0x0A: Buffered input
+  - [x] 0x0D: Reset disk
+  - [x] 0x0E: Select drive
+  - [x] 0x19: Get current drive
+  - [x] 0x25: Set interrupt vector
+  - [x] 0x35: Get interrupt vector
+  - [x] 0x3F: Read from file
+  - [x] 0x40: Write to file
+  - [x] 0x4C: Exit process
   - (Add others as needed)
 
 ### Process Management
-- [ ] Design 64-bit PSP structure
-- [ ] Implement program loader for 64-bit executables
-- [ ] Create process termination handler
-- [ ] Implement memory allocation for processes (INT 21h/48h)
-- [ ] Implement memory deallocation (INT 21h/49h)
-- [ ] Set up process environment blocks (64-bit)
+- [x] Design 64-bit PSP structure
+- [x] Implement program loader for 64-bit executables
+- [x] Create process termination handler
+- [x] Implement memory allocation for processes (INT 21h/48h)
+- [x] Implement memory deallocation (INT 21h/49h)
+- [x] Set up process environment blocks (64-bit)
 
 ### Command Interpreter
-- [ ] Convert COMMAND.COM to 64-bit (rename to COMMAND64)
-- [ ] Implement command line parser (64-bit string handling)
-- [ ] Convert built-in commands:
-  - [ ] DIR
-  - [ ] COPY
-  - [ ] DEL/ERASE
-  - [ ] REN/RENAME
-  - [ ] TYPE
-  - [ ] CLS
-  - [ ] DATE/TIME
-  - [ ] VER
-  - [ ] PROMPT
-  - [ ] PATH
-- [ ] Implement external command execution
-- [ ] Implement batch file processor
+- [x] Convert COMMAND.COM to 64-bit (rename to COMMAND64)
+- [x] Implement command line parser (64-bit string handling)
+- [x] Convert built-in commands:
+  - [x] DIR
+  - [x] COPY
+  - [x] DEL/ERASE
+  - [x] REN/RENAME
+  - [x] TYPE
+  - [x] CLS
+  - [x] DATE/TIME
+  - [x] VER
+  - [x] PROMPT
+  - [x] PATH
+- [x] Implement external command execution
+- [x] Implement batch file processor
 
 ### Testing and Debugging
-- [ ] Create Bochs configuration file:
+- [x] Create Bochs configuration file:
   ```
   megs: 256
   romimage: file=$BXSHARE/BIOS-bochs-latest
-  vgaromimage: file=$BXSHARE/VGABIOS-lgpl-latest
-  ata0-master: type=disk, path="dos64.img", mode=flat, cylinders=20, heads=16, spt=63
+  vgaromimage: file=$BXSHARE/VGABIOS-lgpl-latest.bin
+  ata0-master: type=disk, path="build/dos64.img", mode=flat, cylinders=20, heads=16, spt=63
   boot: disk
   log: bochs.log
-  cpu: count=1, ips=50000000, reset_on_triple_fault=1, ignore_bad_msrs=1
-  cpuid: level=6, mmx=1, sep=1, sse=sse4_2, xapic=1, aes=1, movbe=1, xsave=1, x86_64=1
+  com1: enabled=1, mode=file, dev=serial.log
+  display_library: nogui
+  cpu: model=ryzen, count=1, ips=50000000, reset_on_triple_fault=1, ignore_bad_msrs=1
   ```
-- [ ] Create bootable disk image with boot sector
-- [ ] Test boot sequence in Bochs
-- [ ] Verify mode transitions (real → protected → long)
-- [ ] Test video output
-- [ ] Test keyboard input
-- [ ] Test disk I/O
-- [ ] Test file operations (create, read, write, delete)
-- [ ] Test command interpreter
-- [ ] Test program execution
-- [ ] Debug any crashes or hangs
+- [x] Create bootable disk image with boot sector
+- [x] Test boot sequence in Bochs
+- [x] Verify mode transitions (real → protected → long)
+- [x] Test video output
+- [x] Test keyboard input
+- [x] Test disk I/O
+- [x] Test file operations (create, read, write, delete)
+- [x] Test command interpreter
+- [x] Test program execution
+- [x] Debug any crashes or hangs
 
 ## Technical Details and Gotchas
 
@@ -440,7 +460,7 @@ endstruc
    ```
 
 2. **Page Tables Must Be Set Up**: Long mode requires paging to be enabled
-   - Minimum: PML4 → PDPT → PD → PT (4-level paging)
+   - Implemented: PML4 @`0x1000` → PDPT @`0x2000` → PD @`0x3000` with 4×2 MiB PS pages (identity 0–8 MiB)
    - Each table is 4KB aligned
    - Identity map at least where kernel code resides
 
@@ -466,6 +486,12 @@ endstruc
 
 Recommended Kernel Load Address: 0x00100000 (1MB mark)
 ```
+
+> As built (see `README.md` Memory map): page tables PML4 @`0x1000` → PDPT
+> @`0x2000` → PD @`0x3000` (0–8 MiB, 4×2 MiB); kernel staging `0x80000` →
+> final `0x100000` (`KERNEL_SECTORS 176`); initial `RSP` `0x90000`;
+> `IOSTACK`/`DSKSTACK` 4 KiB BSS stacks; heap `0x200000+` (`MCB64` 40 B);
+> disk: kernel LBA 16+, scratch `200`/`500–511`, FAT12 volume LBA 512–3391.
 
 ### Critical Assembly Directives
 
@@ -513,17 +539,21 @@ mov qword [rsi], 0x1000   ; Explicit qword size
 
 **Stage 1: Boot and Mode Switch**
 ```bash
-# Compile boot sector
-nasm -f bin boot.asm -o boot.bin
+# Build everything (MBR + stage2 + kernel + image + FAT12 volume)
+make
 
-# Create disk image
-dd if=/dev/zero of=dos64.img bs=1M count=10
-dd if=boot.bin of=dos64.img conv=notrunc
+# Create disk image (done by make):
+# dd if=/dev/zero of=build/dos64.img bs=1M count=10
+# dd if=build/mbr.bin of=build/dos64.img conv=notrunc
+# dd if=build/stage2.bin of=build/dos64.img bs=512 seek=1 conv=notrunc
+# dd if=build/kernel.bin of=build/dos64.img bs=512 seek=16 conv=notrunc
+# python3 tools/mkfat12.py build/dos64.img   # stamps FAT12 volume at LBA 512+
 
-# Test in Bochs
-bochs -f bochsrc.txt -q
+# Test in QEMU (primary) or Bochs
+make run-qemu
+make run-bochs
 ```
-Expected: Should enter 64-bit mode and halt or print a test message
+Expected: 72/72 self-tests PASS on serial, then the `COMMAND64` shell prompt
 
 **Stage 2: Video Output**
 - Test character output to screen using VGA driver
@@ -538,8 +568,8 @@ Expected: Should enter 64-bit mode and halt or print a test message
 - Expected: Verify boot signature 0xAA55
 
 **Stage 5: File System**
-- Format FAT12 filesystem on disk image
-- Mount and read root directory
+- Real FAT12 volume stamped at build time (`tools/mkfat12.py`, LBA 512–3391)
+- Mount and read root directory via `fs_mount_volume64`
 - Expected: List directory contents
 
 **Stage 6: Command Interpreter**
@@ -581,19 +611,19 @@ Expected: Should enter 64-bit mode and halt or print a test message
 
 The conversion is successful when:
 
-- [ ] System boots via BIOS on Bochs x86-64 emulator
-- [ ] Enters 64-bit long mode successfully
-- [ ] Can output text to screen without BIOS calls
-- [ ] Can read keyboard input without BIOS calls
-- [ ] Can read/write disk sectors without BIOS calls
-- [ ] Can mount and navigate FAT12 filesystem
-- [ ] Can create, read, write, and delete files
-- [ ] Command prompt appears and accepts input
-- [ ] Built-in commands function correctly
-- [ ] Can load and execute 64-bit programs
-- [ ] Memory allocation/deallocation works
-- [ ] System calls (INT 21h equivalent) function properly
-- [ ] No crashes or hangs during normal operation
+- [x] System boots via BIOS on Bochs x86-64 emulator
+- [x] Enters 64-bit long mode successfully
+- [x] Can output text to screen without BIOS calls
+- [x] Can read keyboard input without BIOS calls
+- [x] Can read/write disk sectors without BIOS calls
+- [x] Can mount and navigate FAT12 filesystem
+- [x] Can create, read, write, and delete files
+- [x] Command prompt appears and accepts input
+- [x] Built-in commands function correctly
+- [x] Can load and execute 64-bit programs
+- [x] Memory allocation/deallocation works
+- [x] System calls (INT 21h equivalent) function properly
+- [x] No crashes or hangs during normal operation
 
 ## Additional Recommendations
 

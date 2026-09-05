@@ -60,7 +60,7 @@ are the audit trail for the last correctness pass.
 | `0x7C00–0x7DFF` | MBR load address |
 | `0x7E00+` | Stage2 load address |
 | `0x80000` | Kernel staging buffer (copied to `0x100000`) |
-| `0x90000` | Initial `RSP` top; syscall `IOSTACK`/`DSKSTACK` (4 KiB each, 16-aligned) |
+| `0x90000` | Initial `RSP` top (16-aligned); syscall `IOSTACK`/`DSKSTACK` are separate 4 KiB BSS stacks (16-aligned tops) |
 | `0xB8000` | VGA text buffer |
 | `0x100000+` | Kernel (linked flat at 1 MiB, ~64 KiB / ~129 sectors) |
 | `0x200000+` | Heap (`MCB64` chain, first-fit) |
@@ -139,12 +139,12 @@ src/kernel/    main.asm (entry @0x100000, 72-test harness) + shell64.asm (REPL)
                fs64.asm (FAT12 mount/read/flush/alloc + FCB record-I/O core)
                mem64.asm (MCB64 manager) + proc64.asm (PSP64/env/loader/spawn)
                syscall64.asm (INT 21h dispatcher, 77 entries)
-               idt64.asm (IDT, PIC 0x28/0x30, IRQ0/IRQ1/IRQ14) + stack64.asm (ABI/canary)
+               idt64.asm (IDT, PIC master 0x28/slave 0x30: timer IRQ0@0x28, kbd IRQ1@0x29 installed, disk IRQ14@0x36) + stack64.asm (ABI/canary)
 src/drivers/   vga.asm (0xB8000 text) + ata.asm (0x1F0 PIO LBA28) + kbd.asm (PS/2 0x60/0x64)
 src/lib/       string64.asm + bcd64.asm (AAM/AAD->DIV, CBW equiv.) + addr64.asm (seg:off->linear)
 include/       fcb.inc/dpb.inc/psp.inc/mcb.inc/regs.inc/fs.inc/stack.inc (64-bit structures)
 tools/         mkfat12.py (stamps the FAT12 volume during make)
-MSDOS.ASM / IO.ASM / COMMAND.ASM   original MS-DOS v1.25 sources (reference, still built by STDDOS.ASM)
+MSDOS.ASM / IO.ASM / COMMAND.ASM   original MS-DOS v1.25 sources (reference only; STDDOS.ASM is the legacy wrapper — the 64-bit build uses src/ via Makefile)
 linker.ld      flat link at 0x100000 (.text.start first)   bochsrc.txt   Bochs config
 ```
 

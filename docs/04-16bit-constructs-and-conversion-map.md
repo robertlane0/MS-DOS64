@@ -161,21 +161,33 @@ real (BIOS) → protected (GDT 32-bit) → long (PAE + paging + EFER.LME → CR0
 ## 7. Converted File Layout (Target)
 
 ```
-src/boot/mbr.asm        # 512B boot0: INT 13h AH=42h extended read → load stage2 to 0x7E00, enable A20, GDT32
-src/boot/stage2.asm     # Enable PAE, build PML4/PDPT/PD at 0x1000-0x5000 identity-map 0-2MiB, set EFER, far jmp 64
+src/boot/mbr.asm        # 512B boot0: INT 13h LBA (chunked ≤64/packet) + CHS fallback (ES advances over 64K) → stage2 at 0x7E00, A20, GDT32
+src/boot/stage2.asm     # PAE + PML4 @0x1000/PDPT @0x2000/PD @0x3000 identity 0-8MiB (4×2MiB PS), EFER.LME, GDT64, staging 0x80000 → 0x100000 copy, KERNEL_SECTORS 176
 src/boot/gdt.asm        # GDT32 + GDT64 (code 0x9A, data 0x92, TSS if needed)
-src/kernel/main.asm     # 64-bit entry _start: clears BSS, sets stacks, calls kinit
-src/kernel/syscall.asm  # IDT + INT21 gate + dispatch table (47 entries, now 64-bit handlers)
-src/kernel/fat12.asm    # UNPACK/PACK/GETENTRY but with 64-bit cluster math
-src/kernel/io.asm       # Renamed driver calls: console.c/asm, disk.c
+src/kernel/main.asm     # 64-bit entry _start @0x100000 (section .text.start first): 72-test harness → shell_repl64
+src/kernel/shell64.asm  # interactive COMMAND64 REPL (prompt/line-edit/volume builtins/*.COM EXEC)
+src/kernel/cmd64.asm    # COMMAND64 parser/COMTAB64/builtins/batch (%1-%9)
+src/kernel/syscall64.asm # IDT INT 21h gate + DISPATCH64 (77 entries AH=00h-4Ch)
+src/kernel/fat64.asm    # UNPACK/PACK/GETENTRY 64-bit cluster math (+ fat_dir_read64 tail-calls fs_dir_read64)
+src/kernel/fs64.asm     # FAT12 mount/read/flush/alloc + FCB record-I/O core (volume LBA 512+)
+src/kernel/mem64.asm    # MCB64 manager (40B headers, first-fit/coalesce/resize)
+src/kernel/proc64.asm   # PSP64/env/loader(MZ64+COM)/spawn/terminate
+src/kernel/idt64.asm    # IDT 256×16B + PIC master 0x28/slave 0x30 (timer 0x28/kbd 0x29/disk 0x36)
+src/kernel/stack64.asm  # System V ABI/canary/IST reserve
 src/drivers/vga.asm     # writes 0xB8000, cursor via 0x3D4
-src/drivers/ata.asm     # PIO LBA28 (0x1F0-0x1F7), or AHCI
+src/drivers/ata.asm     # PIO LBA28 (0x1F0-0x1F7), scratch LBA 200
 src/drivers/kbd.asm     # port 0x60 scancode, queue
-src/drivers/rtc.asm     # CMOS 0x70/0x71 binary/BCD
-src/lib/string.asm      # REP helpers for flat
+src/lib/string64.asm    # REP helpers for flat
+src/lib/bcd64.asm       # DIV-based BCD (AAM/AAD invalid in 64-bit)
+src/lib/addr64.asm      # seg:off→linear + RIP-rel demos
 include/dpb.inc         # DPBLOCK64 struc
 include/fcb.inc         # FCBLOCK64 struc
-include/psp.inc         # PSP64 struc (512B)
+include/psp.inc         # PSP64 struc (664B actual, PSP64_size)
+include/mcb.inc         # MCB64 struc (40B, MCBSIZ64)
+include/regs.inc        # STKPTRS64 trap frame
+include/fs.inc          # DIRENT/BPB + FS_VOL_LBA 512 scratch defines
+include/stack.inc       # STACK_TOP64 0x90000 + ABI macros
+tools/mkfat12.py        # stamps the real FAT12 volume at LBA 512+ during make
 ```
 
 All new code `bits 64` `default rel`.

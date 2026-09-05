@@ -151,5 +151,6 @@ page tables `@0x1000/0x2000/0x3000` untouched by the allocator.
 - [x] `INT 21h AH=48h/49h/4Ah` handlers + `DISPATCH64` + balanced `leave64`
 - [x] Boot + 21 PASS on Bochs & QEMU, no faults
 
-**Next:** Phase 7 FAT12-on-LBA (CH
-...[truncated 615 chars]
+**Next:** Phase 7 FAT12-on-LBA (CHS→LBA, BPB→DPB, dir/file I/O on the ATA driver).
+
+**Update (closure):** see `docs/19-closure-g1-g6.md` for what changed after this report.

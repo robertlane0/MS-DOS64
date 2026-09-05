@@ -236,6 +236,7 @@ struct MCB64 {
  uint64_t owner; // linear addr or PID
  uint64_t size;  // bytes
  char name[8];
+ uint8_t pad1[8]; // reserved / future (40 bytes total, MCBSIZ64; see include/mcb.inc)
 };
 ```
 

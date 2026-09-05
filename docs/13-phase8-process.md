@@ -190,3 +190,5 @@ covers `spawn→alloc→env_set→strlen` depth (~280 B worst).
 **Next:** Phase 9 syscall dispatcher (`INT 21h` IDT gate + `AH` handlers
 `01/02/09/0A/.../3F/40/4C` on top of `proc/fs/mem`; `EXEC` path already
 exercises `4Bh/4Ch` via `DISPATCH64`, `SAVREGS/LEAVE` now frame-correct).
+
+**Update (closure):** see `docs/19-closure-g1-g6.md` for what changed after this report.

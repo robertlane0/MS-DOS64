@@ -230,3 +230,5 @@ BXSHARE=/nix/store/.../share/bochs timeout 6 bochs -f bochsrc.txt -q; cat serial
 
 *All claims verified via `make`, `nasm -f elf64`, `ld -T linker.ld`, `BXSHARE=... bochs -f bochsrc.txt -q`, `qemu-system-x86_64 -serial stdio` on 2026-08-30.*
 
+**Update (closure):** see `docs/19-closure-g1-g6.md` for what changed after this report.
+

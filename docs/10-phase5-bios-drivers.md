@@ -201,3 +201,5 @@ BXSHARE=/nix/store/.../share/bochs timeout 12 bochs -f bochsrc.txt -q; cat seria
 
 *All claims verified via `make`, `nasm -f elf64`, `ld -T linker.ld`, `BXSHARE=... bochs -f bochsrc.txt -q`, `qemu-system-x86_64 -serial stdio` on 2026-08-30.*
 
+**Update (closure):** ATA scratch moved `LBA100→200` once the kernel grew past 84 sectors (see `docs/15-phase10-command.md` bug 8 and `docs/19-closure-g1-g6.md`); current scratch is `200`/`500–511`, volume at LBA 512+. See `docs/19-closure-g1-g6.md` for what else changed after this report.
+
