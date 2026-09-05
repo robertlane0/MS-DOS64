@@ -1628,7 +1628,7 @@ _start:
     call serial_print64
     movzx rax, r13w
     call print_num_vga_serial
-    mov rsi, msg_nl
+    mov rsi, msg_summary3
     call vga_print
     call serial_print64
 
@@ -6312,6 +6312,7 @@ msg_pass db "PASS",13,10,0
 msg_fail db "FAIL",13,10,0
 msg_summary db 13,10,"Summary: ",0
 msg_summary2 db " passed, ",0
+msg_summary3 db " failed",13,10,0
 msg_nl db 13,10,0
 msg_phase3_ok db "Phase3 register conversion: ALL TESTS PASS",13,10,0
 msg_phase3_fail db "Phase3: SOME TESTS FAILED",13,10,0
