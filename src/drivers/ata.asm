@@ -755,8 +755,9 @@ ata_test_mbr_read:
     pop rdi
     ret
 
-; Test write LBA 1 then read back (uses stage2 area? but safe to test on unused LBA 100)
-; We pick LBA 100 which is beyond kernel (kernel at 16..80). Image is 10M (~20480 sectors), so 100 is safe.
+; Test write LBA then read back (uses safe scratch LBA 200)
+; We pick LBA 200 which is beyond kernel (kernel at 16..143 max 128 sectors) and below FS scratch 500+. Image 10M (~20480 sectors), so 200 safe.
+; (Was LBA 100, which overlapped kernel once kernel grew past 84 sectors in Phase10.)
 ata_test_write_readback:
     push rdi
     push rsi
@@ -774,9 +775,9 @@ ata_test_write_readback:
     inc al
     dec rcx
     jnz .fill
-    ; Write to LBA 100
+    ; Write to LBA 200 (safe scratch, beyond kernel 16..143, below FS 500+)
     lea rdi, [rel ata_test_buf]
-    mov rsi, 100
+    mov rsi, 200
     mov rdx, 1
     call ata_write_lba28
     test rax, rax
@@ -793,7 +794,7 @@ ata_test_write_readback:
     jnz .clear
     ; Read back
     lea rdi, [rel ata_test_buf]
-    mov rsi, 100
+    mov rsi, 200
     mov rdx, 1
     call ata_read_lba28
     test rax, rax
@@ -822,7 +823,7 @@ ata_test_write_readback:
     dec rcx
     jnz .zero2
     lea rdi, [rel ata_test_buf]
-    mov rsi, 100
+    mov rsi, 200
     mov rdx, 1
     call ata_write_lba28
     ; ignore result

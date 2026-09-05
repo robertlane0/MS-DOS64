@@ -1,6 +1,6 @@
 # MS-DOS64 — 64-bit BIOS Bootable DOS (from MS-DOS 1.25)
 
-> Phase 1 (Architecture Analysis) **complete**. Phase 2 (Boot & Long Mode) **complete** — boots via BIOS MBR → 64-bit on Bochs & QEMU. **Phase 3 (Register & Instruction Conversion) complete** — 7/7 PASS. **Phase 4 (Addressing Mode Transformation) complete** — 12/12 PASS. **Phase 5 (BIOS Interrupt Replacement, Option C) complete** — 16/16 PASS (native VGA/ATA/KBD) on both emulators. **Phase 6 (Memory Management Overhaul) complete** — 21/21 PASS (MCB64 coalesce/resize/validate/protection, AH=48h/49h/4Ah) on both emulators. **Phase 7 (File System Adaptation) complete** — 27/27 PASS (FAT12 on LBA: BPB→DPB, chain, dir, FCB64) on both emulators. **Phase 8 (Process Management) complete** — 34/34 PASS (PSP64/env/loader/spawn/exit, AH=4Bh/4Ch, INT20h) on both emulators. **Phase 9 (System Call Interface) complete** — 42/42 PASS (INT 21h IDT gate DPL3 + AH=01/02/09/0A/0D/0E/19/25/35/3F/40/4C) on both emulators.
+> Phase 1 (Architecture Analysis) **complete**. Phase 2 (Boot & Long Mode) **complete** — boots via BIOS MBR → 64-bit on Bochs & QEMU. **Phase 3 (Register & Instruction Conversion) complete** — 7/7 PASS. **Phase 4 (Addressing Mode Transformation) complete** — 12/12 PASS. **Phase 5 (BIOS Interrupt Replacement, Option C) complete** — 16/16 PASS (native VGA/ATA/KBD) on both emulators. **Phase 6 (Memory Management Overhaul) complete** — 21/21 PASS (MCB64 coalesce/resize/validate/protection, AH=48h/49h/4Ah) on both emulators. **Phase 7 (File System Adaptation) complete** — 27/27 PASS (FAT12 on LBA: BPB→DPB, chain, dir, FCB64) on both emulators. **Phase 8 (Process Management) complete** — 34/34 PASS (PSP64/env/loader/spawn/exit, AH=4Bh/4Ch, INT20h) on both emulators. **Phase 9 (System Call Interface) complete** — 42/42 PASS (INT 21h IDT gate DPL3 + AH=01/02/09/0A/0D/0E/19/25/35/3F/40/4C) on both emulators. **Phase 10 (Command Interpreter) complete** — 50/50 PASS (COMMAND64 parser/builtins/exec/batch: DIR/COPY/DEL/REN/TYPE/CLS/DATE/TIME/VER/PROMPT/PATH/PAUSE/REM) on both emulators.
 
 Original source: Microsoft MS-DOS v1.25 (MIT), Tim Paterson 86-DOS. This repo converts the 16-bit real-mode SCP dialect to a flat 64-bit long-mode OS that boots via legacy BIOS MBR on Bochs x86-64.
 
@@ -18,16 +18,16 @@ Original source: Microsoft MS-DOS v1.25 (MIT), Tim Paterson 86-DOS. This repo co
 
 All tables include `file:line` refs and were generated from live `grep -n` over the source.
 
-### Build & Run (Phase 9 — System Call Interface)
+### Build & Run (Phase 10 — Command Interpreter)
 
 ```bash
-make            # builds 512B MBR + stage2 (1K) + kernel (36K, 13 objs) + dos64.img (10M)
+make            # builds 512B MBR + stage2 (1K) + kernel (46K, 14 objs) + dos64.img (10M)
 make run-bochs  # Bochs 3.0 ryzen, 256MiB, serial.log + VGA at 0xB8000
 make run-qemu   # qemu-system-x86_64 -serial stdio alternative (also 64-bit)
 make clean
 ```
 
-**Verify boot (Phase 9):**
+**Verify boot (Phase 10):**
 
 ```bash
 # Bochs (target) — remove stale lock first
@@ -40,14 +40,15 @@ rm -f bochs.log serial.log build/dos64.img.lock && make && BXSHARE=/nix/store/..
 # Phase7: File System Adaptation — FAT12 on LBA, DPB/DIR/FCB64
 # Phase8: Process Management — PSP64, ENV, Loader, EXEC/EXIT
 # Phase9: System Call Interface — INT 21h IDT gate + AH handlers
-#  [1]...PASS ... [34]...PASS / [35]...PASS ... [42]...PASS / Summary: 42 passed, 0 failed / Phase9 syscall interface (INT 21h): ALL TESTS PASS
+# Phase10: Command Interpreter — COMMAND64 parser/builtins/exec/batch
+#  [1]...PASS ... [42]...PASS / [43]...PASS ... [50]...PASS / Summary: 50 passed, 0 failed / Phase10 command interpreter (COMMAND64): ALL TESTS PASS
 # Note: [30]/[32]/[33] emit single-letter progress markers (A–N/a–h/p–$) before PASS (fail-point isolation).
 
-# QEMU alternative (also shows Phase9 suite)
+# QEMU alternative (also shows Phase10 suite)
 timeout 12 qemu-system-x86_64 -drive file=build/dos64.img,format=raw -serial stdio -display none
 
 # Quick QEMU verify:
-# Phase9: System Call Interface ... / [1]...PASS ... [42]...PASS / Summary: 42 passed, 0 failed
+# Phase10: Command Interpreter ... / [1]...PASS ... [50]...PASS / Summary: 50 passed, 0 failed
 ```
 
 ### Project Layout
@@ -59,14 +60,14 @@ IO.ASM             IO.SYS + BIOS jump table (1933)
 COMMAND.ASM        resident/transient shell (2165)
 STDDOS.ASM         build wrapper (23)
 src/boot/          mbr.asm (512B MBR, A20, INT13 LBA/CHS) + stage2.asm (real→protected→long, 128 sectors) + gdt.asm
-src/kernel/        main.asm (Phase9 harness, 42 tests, _start @0x100000) + fat64.asm (UNPACK/PACK) + fs64.asm (FAT12 on LBA: BPB/chain/dir/FCB64, 19 exports) + mem64.asm (MCB64: coalesce/resize/validate/protect, 24 exports) + proc64.asm (PSP64/env/loader/spawn/exit, 21 exports) + syscall64.asm (SAVREGS/DISPATCH64 77 entries, AH=01/02/09/0A/0D/0E/19/25/35/3F/40/48h/49h/4Ah/4Bh/4Ch, I/O+DSK 4K stacks) + idt64.asm (256-entry IDT, INT 0x21 DPL3 gate, PIC mask, 7 exports)
-src/drivers/       vga.asm (0xB8000 text, cursor, scroll) + ata.asm (0x1F0 PIO LBA28, CHS→LBA) + kbd.asm (0x60/0x64 PS/2, queue, tables) — native Option C
+src/kernel/        main.asm (Phase10 harness, 50 tests, _start @0x100000) + cmd64.asm (COMMAND64: parser/COMTAB64/builtins/exec/batch, 47 exports) + fat64.asm (UNPACK/PACK) + fs64.asm (FAT12 on LBA: BPB/chain/dir/FCB64, 19 exports) + mem64.asm (MCB64: coalesce/resize/validate/protect, 24 exports) + proc64.asm (PSP64/env/loader/spawn/exit, 21 exports) + syscall64.asm (SAVREGS/DISPATCH64 77 entries, AH=01/02/09/0A/0D/0E/19/25/35/3F/40/48h/49h/4Ah/4Bh/4Ch, I/O+DSK 4K stacks) + idt64.asm (256-entry IDT, INT 0x21 DPL3 gate, PIC mask, 7 exports)
+src/drivers/       vga.asm (0xB8000 text, cursor, scroll) + ata.asm (0x1F0 PIO LBA28, CHS→LBA, scratch LBA200/500+) + kbd.asm (0x60/0x64 PS/2, queue, tables) — native Option C
 src/lib/           string64.asm (REP/LOOP/XLAT) + bcd64.asm (AAM/AAD→DIV, CBW etc.) + addr64.asm (seg:off→linear, RIP-rel, far→near)
 include/           fcb.inc/dpb.inc/psp.inc/mcb.inc/regs.inc/fs.inc (64-bit strucs, STKPTRS64, DIRENT, BPB)
-docs/              00-phase1-summary + 01..06 analysis + 07-phase2-boot + 08-phase3-register-conversion + 09-phase4-addressing + 10-phase5-bios-drivers + 11-phase6-memory + 12-phase7-filesystem + 13-phase8-process + 14-phase9-syscall (Phase 9 report)
+docs/              00-phase1-summary + 01..06 analysis + 07-phase2-boot + 08-phase3-register-conversion + 09-phase4-addressing + 10-phase5-bios-drivers + 11-phase6-memory + 12-phase7-filesystem + 13-phase8-process + 14-phase9-syscall + 15-phase10-command (Phase 10 report)
 bochsrc.txt        Bochs 3.0 ryzen, 256MiB, ata0 10MiB flat, VBE, serial.log
 linker.ld          flat link at 0x100000 (*.text.start first)
-build/             mbr.bin, stage2.bin (≈1K), kernel.bin (36K, 71 sec), kernel.elf (118K), dos64.img (10M)
+build/             mbr.bin, stage2.bin (≈1K), kernel.bin (46K, 89 sec), kernel.elf (147K), dos64.img (10M)
 ```
 
 ## Source License
@@ -150,4 +151,14 @@ See `docs/13-phase8-process.md` for the full report.
 - **Bugs fixed** 5 defects: `RAX/RBX/R8` clobber in dispatch/int (used `R10/R11` + `mov r11,ss`), `conout AL` stale (`mov al,dl`), timer `IRQ0→INT8` stack corruption (PIC mask, was layout-dependent `check_cs(0x0246)`), `FLUSHKB` flush-before-redispatch test expectation, test `AL`-before-`cmp` marker clobber.
 
 See `docs/14-phase9-syscall.md` for the full report.
+
+## Phase 10 Status — Command Interpreter (COMMAND64) Complete
+
+- **Scope** DOS 1.25 `COMMAND.ASM` resident/transient + `COMTAB`/`SWITCH`/`DELIM`/`SCANOFF` + `CATALOG/ERASE/RENAME/TYPEFIL/COPY/PAUSE/DATE/TIME/EXELOAD` + batch `%1..%9` → flat 64-bit `COMMAND64`: `SCANOFF/DELIM/SWITCH` parser (drive `X:` strip, upper, `/W/P/V/A/B`), `COMTAB64` lookup (DIR/REN/RENAME/ERASE/DEL/TYPE/REM/COPY/PAUSE/DATE/TIME/CLS/VER/PROMPT/PATH/ECHO), builtins (DIR normal+`/W` via `fs_dir_get_size64`, TYPE `^Z`, COPY ascii/binary, DEL `0xE5`, REN dup-check, CLS via VGA, VER, PROMPT/PATH via ENV, DATE leap+`MM-DD-YY`/`MM/DD/YYYY`, TIME `HH:MM[:SS]`, PAUSE/REM/ECHO no-op), external EXEC via `proc_spawn64`, batch open/next/expand (`%N` shifted, `%%` escape, CRLF).
+- **Kernel modules** `cmd64.asm` 47 exports (`init/strlen/toupper/delim/skip/switches/parse/lookup/dispatch`, `cls/ver/prompt/path/rem/pause/echo`, `date/time get/set/parse`, `dir/type/copy/del/ren`, `exec/batch open/next/close/expand` + 8 `test_*`); `main` 50 tests (`[43]` parser, `[44]` DIR/TYPE, `[45]` COPY/DEL/REN, `[46]` shellcfg, `[47]` datetime, `[48]` exec, `[49]` batch, `[50]` dispatch/stress).
+- **Build** 14 `elf64` objects (+`cmd64.o`), kernel `45932B` (89 sectors, ≤128). `make` → `build/kernel.bin` (46K) + `dos64.img` (10M).
+- **Test** Both emulators show **`[1]...PASS` through `[50]...PASS / Summary: 50 passed, 0 failed`** plus all eight `ALL TESTS PASS` banners (serial.log + VGA). No `#UD/#GP/#PF/check_cs`.
+- **Bugs fixed** 7 defects: `rep movsb` RSI/RDI swap in dir/fileops tests (corrupted `t44_name*`), `BL/RBX` + `CL/RCX` clobbers in type/copy (`R8/R9` temps), `ECX` loop-index clobber in DIR wide (`R9` index + `cmd_dir_flags` mem), `u32` value/out mixup (`ESI` value), `AL` clobber in batch param offset (`R11B` save), `AH+REX` illegal with `R12` in date-get (`DL` temps + legacy `RBX` out), `AL/month` + `AX/year` overlap in days-in-month (`RDI=year/RSI=month` ABI) + early-`ret` stack leak in date-set (validate before push), batch `%N` off-by-one (`%1`→slot0, `-1` empty) + `len 64` padding NULs (`strlen` exact), ATA scratch `LBA100` overlap once kernel grew past 84 sectors (moved to `LBA200`; stale-image corruption of `dummy_dpb`/`t47`/`t49` caused Bochs `[4]/[47]/[49]/[50]` FAIL until `make clean`).
+
+See `docs/15-phase10-command.md` for the full report.
 

@@ -1,5 +1,5 @@
-; MS-DOS64 64-bit kernel — Phase 9: System Call Interface (INT 21h IDT gate)
-; Phase 2 long-mode entry at 0x100000 plus Phase 3 + Phase 4 + Phase 5 + Phase 6 + Phase 7 + Phase 8 + Phase 9 tests
+; MS-DOS64 64-bit kernel — Phase 10: Command Interpreter (COMMAND64)
+; Phase 2 long-mode entry at 0x100000 plus Phase 3 + Phase 4 + Phase 5 + Phase 6 + Phase 7 + Phase 8 + Phase 9 + Phase 10 tests
 ; Phase 3: RAX/RBX/RCX/RDX/RSI/RDI/RBP/RSP 64-bit, R8-R15, REP with RCX,
 ;          AAM/AAD->DIV/MUL, XLAT->MOV, LES/LDS->flat, PUSH seg elimination
 ; Phase 4: seg:off->linear (seg<<4+off), OFFSET DOSGROUP->rel, RIP-relative,
@@ -184,6 +184,16 @@ extern handler_exec
 extern handler_exit_process
 extern handler_abort
 
+; Phase 10 command interpreter (COMMAND64)
+extern cmd_test_parser
+extern cmd_test_dir_type
+extern cmd_test_fileops
+extern cmd_test_shellcfg
+extern cmd_test_datetime
+extern cmd_test_exec
+extern cmd_test_batch
+extern cmd_test_dispatch
+
 _start:
     mov rsp, 0x90000
     and rsp, -16
@@ -216,8 +226,11 @@ _start:
     mov rsi, hello_phase9
     call vga_print
     call serial_print64
+    mov rsi, hello_phase10
+    call vga_print
+    call serial_print64
 
-    ; Run Phase 3+4+5+6+7+8+9 tests, count passes
+    ; Run Phase 3+4+5+6+7+8+9+10 tests, count passes
     xor r12, r12          ; passed count in R12 (callee-saved, demonstrates R8-R15)
     xor r13, r13          ; failed count in R13
     mov r14, 0            ; test index
@@ -936,6 +949,142 @@ _start:
     call vga_print
     call serial_print64
 
+    ; ---- Test 43: Parser SCANOFF/DELIM/SWITCH/drive/upper (Phase10) ----
+    mov rsi, msg_test43
+    call vga_print
+    call serial_print64
+    call cmd_test_parser
+    test rax, rax
+    jz .t43_pass
+    inc r13
+    mov rsi, msg_fail
+    jmp .t43_done
+.t43_pass:
+    inc r12
+    mov rsi, msg_pass
+.t43_done:
+    call vga_print
+    call serial_print64
+
+    ; ---- Test 44: DIR format + TYPE ^Z (Phase10) ----
+    mov rsi, msg_test44
+    call vga_print
+    call serial_print64
+    call cmd_test_dir_type
+    test rax, rax
+    jz .t44_pass
+    inc r13
+    mov rsi, msg_fail
+    jmp .t44_done
+.t44_pass:
+    inc r12
+    mov rsi, msg_pass
+.t44_done:
+    call vga_print
+    call serial_print64
+
+    ; ---- Test 45: COPY/DEL/REN fileops (Phase10) ----
+    mov rsi, msg_test45
+    call vga_print
+    call serial_print64
+    call cmd_test_fileops
+    test rax, rax
+    jz .t45_pass
+    inc r13
+    mov rsi, msg_fail
+    jmp .t45_done
+.t45_pass:
+    inc r12
+    mov rsi, msg_pass
+.t45_done:
+    call vga_print
+    call serial_print64
+
+    ; ---- Test 46: CLS/VER/PROMPT/PATH/REM/PAUSE (Phase10) ----
+    mov rsi, msg_test46
+    call vga_print
+    call serial_print64
+    call cmd_test_shellcfg
+    test rax, rax
+    jz .t46_pass
+    inc r13
+    mov rsi, msg_fail
+    jmp .t46_done
+.t46_pass:
+    inc r12
+    mov rsi, msg_pass
+.t46_done:
+    call vga_print
+    call serial_print64
+
+    ; ---- Test 47: DATE/TIME get/set/parse (Phase10) ----
+    mov rsi, msg_test47
+    call vga_print
+    call serial_print64
+    call cmd_test_datetime
+    test rax, rax
+    jz .t47_pass
+    inc r13
+    mov rsi, msg_fail
+    jmp .t47_done
+.t47_pass:
+    inc r12
+    mov rsi, msg_pass
+.t47_done:
+    call vga_print
+    call serial_print64
+
+    ; ---- Test 48: External EXEC via spawn (Phase10) ----
+    mov rsi, msg_test48
+    call vga_print
+    call serial_print64
+    call cmd_test_exec
+    test rax, rax
+    jz .t48_pass
+    inc r13
+    mov rsi, msg_fail
+    jmp .t48_done
+.t48_pass:
+    inc r12
+    mov rsi, msg_pass
+.t48_done:
+    call vga_print
+    call serial_print64
+
+    ; ---- Test 49: Batch open/next/expand (Phase10) ----
+    mov rsi, msg_test49
+    call vga_print
+    call serial_print64
+    call cmd_test_batch
+    test rax, rax
+    jz .t49_pass
+    inc r13
+    mov rsi, msg_fail
+    jmp .t49_done
+.t49_pass:
+    inc r12
+    mov rsi, msg_pass
+.t49_done:
+    call vga_print
+    call serial_print64
+
+    ; ---- Test 50: Dispatch + stress (Phase10) ----
+    mov rsi, msg_test50
+    call vga_print
+    call serial_print64
+    call cmd_test_dispatch
+    test rax, rax
+    jz .t50_pass
+    inc r13
+    mov rsi, msg_fail
+    jmp .t50_done
+.t50_pass:
+    inc r12
+    mov rsi, msg_pass
+.t50_done:
+    call vga_print
+    call serial_print64
+
     ; ---- Summary ----
     mov rsi, msg_summary
     call vga_print
@@ -974,6 +1123,9 @@ _start:
     mov rsi, msg_phase9_fail
     call vga_print
     call serial_print64
+    mov rsi, msg_phase10_fail
+    call vga_print
+    call serial_print64
     jmp .hlt
 .all_pass:
     mov rsi, msg_phase3_ok
@@ -995,6 +1147,9 @@ _start:
     call vga_print
     call serial_print64
     mov rsi, msg_phase9_ok
+    call vga_print
+    call serial_print64
+    mov rsi, msg_phase10_ok
     call vga_print
     call serial_print64
 
@@ -3889,6 +4044,7 @@ hello_phase6 db "Phase6: Memory Management Overhaul — MCB64, para/page, coales
 hello_phase7 db "Phase7: File System Adaptation — FAT12 on LBA, DPB/DIR/FCB64",13,10,0
 hello_phase8 db "Phase8: Process Management — PSP64, ENV, Loader, EXEC/EXIT",13,10,0
 hello_phase9 db "Phase9: System Call Interface — INT 21h IDT gate + AH handlers",13,10,0
+hello_phase10 db "Phase10: Command Interpreter — COMMAND64 parser/builtins/exec/batch",13,10,0
 msg_test1 db " [1] Register mapping (AX->RAX, R8-R15)... ",0
 msg_test2 db " [2] String ops (REP MOVSB, SCASB, LOOP->DEC)... ",0
 msg_test3 db " [3] BCD (AAM/AAD -> DIV/MUL, CBW, MUL/DIV)... ",0
@@ -3931,6 +4087,14 @@ msg_test39 db " [39] Vectors 25/35 via IDT... ",0
 msg_test40 db " [40] Read 3F stdin handle 0... ",0
 msg_test41 db " [41] Write 40 stdout handles 1/2... ",0
 msg_test42 db " [42] INT 0x21 round-trip via CPU INT... ",0
+msg_test43 db " [43] Parser SCANOFF/DELIM/SWITCH/drive... ",0
+msg_test44 db " [44] DIR format + TYPE ^Z... ",0
+msg_test45 db " [45] COPY/DEL/REN fileops... ",0
+msg_test46 db " [46] CLS/VER/PROMPT/PATH/REM/PAUSE... ",0
+msg_test47 db " [47] DATE/TIME get/set/parse... ",0
+msg_test48 db " [48] External EXEC via spawn... ",0
+msg_test49 db " [49] Batch open/next/expand... ",0
+msg_test50 db " [50] Dispatch + stress... ",0
 msg_pass db "PASS",13,10,0
 msg_fail db "FAIL",13,10,0
 msg_summary db 13,10,"Summary: ",0
@@ -3950,6 +4114,8 @@ msg_phase8_ok db "Phase8 process management (PSP64): ALL TESTS PASS",13,10,0
 msg_phase8_fail db "Phase8: SOME TESTS FAILED",13,10,0
 msg_phase9_ok db "Phase9 syscall interface (INT 21h): ALL TESTS PASS",13,10,0
 msg_phase9_fail db "Phase9: SOME TESTS FAILED",13,10,0
+msg_phase10_ok db "Phase10 command interpreter (COMMAND64): ALL TESTS PASS",13,10,0
+msg_phase10_fail db "Phase10: SOME TESTS FAILED",13,10,0
 p9_dollar db "P9$INT21$ via INT$",0
 p9_hello3 db "Hi!",0
 
