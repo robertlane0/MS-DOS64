@@ -52,6 +52,14 @@ start:
     jmp 0x0000:0x7E00
 
 ; ------------------------------------------------------------
+; Design note (KBC timeout policy): Fast-A20 via port 0x92 is the PRIMARY path
+; and is always attempted first. The 8042 KBC D1/DF sequence is a FALLBACK for
+; boards where 0x92 is unimplemented. kbc_wait_timeout bounds the IBF poll with
+; a decrementing CX counter (KBC_TIMEOUT iterations) and returns CF=1 on
+; timeout. A timeout is a FALLBACK condition, NOT boot-fatal: enable_a20 skips
+; the remaining KBC outs, re-asserts fast A20, prints msg_kbc_timeout, and
+; returns with CF=0 so boot continues deterministically (never spins forever).
+KBC_TIMEOUT equ 0xFFFF        ; generous: ample for slow real HW, still bounded
 enable_a20:
     push ax
     ; Fast A20 via port 0x92: set bit1 (A20), clear bit0 (reset)
@@ -59,26 +67,49 @@ enable_a20:
     or al, 2
     and al, 0xFE
     out 0x92, al
-    ; KBC fallback (8042)
-    call kbc_wait
+    ; KBC fallback (8042) — bounded; skip remainder on timeout
+    call kbc_wait_timeout
+    jc .kbc_skip
     mov al, 0xD1
     out 0x64, al
-    call kbc_wait
+    call kbc_wait_timeout
+    jc .kbc_skip
     mov al, 0xDF
     out 0x60, al
-    call kbc_wait
+    call kbc_wait_timeout
+    jc .kbc_skip
+    jmp .reaffirm
+.kbc_skip:
+    ; KBC missing/disabled: diagnose, fall back to fast A20 only
+    push si
+    mov si, msg_kbc_timeout
+    call print
+    pop si
+.reaffirm:
     ; Re-assert fast A20, ensure reset bit cleared
     in al, 0x92
     or al, 2
     and al, 0xFE
     out 0x92, al
     pop ax
+    clc                     ; enable_a20 itself never fails (KBC is fallback)
     ret
 
-kbc_wait:
+kbc_wait_timeout:
+    push cx
+    mov cx, KBC_TIMEOUT
+.wait:
     in al, 0x64
     test al, 2
-    jnz kbc_wait
+    jz .ok
+    dec cx
+    jnz .wait
+    pop cx
+    stc                     ; timeout: CF=1
+    ret
+.ok:
+    pop cx
+    clc                     ; ready: CF=0
     ret
 
 ; ------------------------------------------------------------
@@ -192,6 +223,7 @@ msg_lba:        db "Loading stage2 via LBA...",13,10,0
 msg_chs:        db "Loading stage2 via CHS...",13,10,0
 msg_ok:         db "Stage2 loaded -> 0x7E00",13,10,0
 msg_disk_err:   db "Disk read error! halt",13,10,0
+msg_kbc_timeout: db "KBC timeout, A20 via 0x92",13,10,0
 
 ; ------------------------------------------------------------
 STAGE2_SECTORS equ 15

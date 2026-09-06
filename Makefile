@@ -147,7 +147,7 @@ $(BUILD)/kernel.bin: $(BUILD)/kernel.elf | $(BUILD)
 	@echo "Kernel binary: $$(stat -c %s $@) bytes ($$(expr $$(stat -c %s $@) / 512) sectors)"
 	@test $$(stat -c %s $@) -le $$(expr $(KERNEL_SECTORS) \* $(IMG_SECTOR_SIZE)) || (echo "Kernel too large for $(KERNEL_SECTORS) sectors! Increase KERNEL_SECTORS in the Makefile disk-layout block"; exit 1)
 
-$(BUILD)/dos64.img: $(BUILD)/mbr.bin $(BUILD)/stage2.bin $(BUILD)/kernel.bin check-layout | $(BUILD)
+$(BUILD)/dos64.img: $(BUILD)/mbr.bin $(BUILD)/stage2.bin $(BUILD)/kernel.bin check-layout check-kbc | $(BUILD)
 	dd if=/dev/zero of=$@ bs=1M count=$(IMG_MB) status=none
 	dd if=$(BUILD)/mbr.bin of=$@ conv=notrunc status=none
 	dd if=$(BUILD)/stage2.bin of=$@ bs=$(IMG_SECTOR_SIZE) seek=1 conv=notrunc status=none
@@ -164,7 +164,7 @@ $(LEAN_BUILD)/kernel.bin: $(LEAN_BUILD)/kernel.elf | $(BUILD)
 	@echo "Lean kernel binary: $$(stat -c %s $@) bytes ($$(expr $$(stat -c %s $@) / 512) sectors)"
 	@test $$(stat -c %s $@) -le $$(expr $(KERNEL_SECTORS) \* $(IMG_SECTOR_SIZE)) || (echo "Lean kernel too large for $(KERNEL_SECTORS) sectors! Increase KERNEL_SECTORS in the Makefile disk-layout block"; exit 1)
 
-$(BUILD)/dos64-lean.img: $(BUILD)/mbr.bin $(BUILD)/stage2.bin $(LEAN_BUILD)/kernel.bin check-layout | $(BUILD)
+$(BUILD)/dos64-lean.img: $(BUILD)/mbr.bin $(BUILD)/stage2.bin $(LEAN_BUILD)/kernel.bin check-layout check-kbc | $(BUILD)
 	dd if=/dev/zero of=$@ bs=1M count=$(IMG_MB) status=none
 	dd if=$(BUILD)/mbr.bin of=$@ conv=notrunc status=none
 	dd if=$(BUILD)/stage2.bin of=$@ bs=$(IMG_SECTOR_SIZE) seek=1 conv=notrunc status=none
@@ -231,6 +231,36 @@ check-layout-neg: $(BUILD)/mbr.bin
 	@rm -f $(BUILD)/.layout-neg.img
 	@echo "Layout negative checks OK"
 
+# Bounded-KBC regression check — source-level assertion that the boot
+# keyboard-controller waits cannot spin forever. Deterministic, host-side,
+# no emulator: greps the same NASM sources `make all` assembles.
+# For each of mbr.asm / stage2.asm it verifies:
+#   1. a `kbc_wait_timeout:` helper exists (the bounded helper);
+#   2. the helper loads a finite counter from a KBC_TIMEOUT* bound
+#      (`mov cx, KBC_TIMEOUT...`) and decrements it (`dec cx`);
+#   3. the helper has an explicit failure branch returning CF=1 (`stc`)
+#      alongside the success branch (`clc`);
+#   4. every KBC command/status wait checks the return (`jc ...` after
+#      each `call kbc_wait_timeout` — 3 sites per stage);
+#   5. no unbounded wait remains (`jnz` directly to a kbc_wait* label).
+# A timeout is a FALLBACK condition (fast-A20 via port 0x92 is primary),
+# not boot-fatal: callers skip the remaining KBC outs, re-assert fast A20,
+# print a diagnostic, and continue boot. Prerequisite of both disk images,
+# so every `make all` runs this with no separate invocation.
+check-kbc:
+	@for f in $(SRC_BOOT)/mbr.asm $(SRC_BOOT)/stage2.asm; do \
+		grep -q 'kbc_wait_timeout:' $$f || (echo "kbc FAIL: $$f missing kbc_wait_timeout helper"; exit 1); \
+		grep -q 'KBC_TIMEOUT' $$f || (echo "kbc FAIL: $$f missing KBC_TIMEOUT bound"; exit 1); \
+		grep -Eq 'mov[[:space:]]+cx,[[:space:]]*KBC_TIMEOUT' $$f || (echo "kbc FAIL: $$f helper does not load finite CX counter"; exit 1); \
+		grep -Eq 'dec[[:space:]]+cx' $$f || (echo "kbc FAIL: $$f helper has no decrementing counter"; exit 1); \
+		grep -q '[[:space:]]stc' $$f || (echo "kbc FAIL: $$f helper has no explicit failure branch (stc/CF=1)"; exit 1); \
+		grep -q '[[:space:]]clc' $$f || (echo "kbc FAIL: $$f helper has no success branch (clc/CF=0)"; exit 1); \
+		test $$(grep -c 'call kbc_wait_timeout' $$f) -eq 3 || (echo "kbc FAIL: $$f must check 3 KBC waits (found $$(grep -c 'call kbc_wait_timeout' $$f))"; exit 1); \
+		test $$(grep -c 'jc .kbc_skip' $$f) -eq 3 || (echo "kbc FAIL: $$f must branch on timeout after each wait (found $$(grep -c 'jc .kbc_skip' $$f) jc)"; exit 1); \
+		! grep -Eq 'jnz[[:space:]]+kbc_wait' $$f || (echo "kbc FAIL: $$f still contains unbounded jnz to kbc_wait*"; exit 1); \
+	done
+	@echo "KBC wait OK: bounded kbc_wait_timeout (CX counter + CF=1 timeout) with fallback in mbr + stage2"
+
 run-bochs: $(BUILD)/dos64.img
 	rm -f $(BUILD)/dos64.img.lock bochs.log serial.log
 	bochs -f bochsrc.txt -q
@@ -245,4 +275,4 @@ clean:
 	rm -rf $(BUILD)/*.bin $(BUILD)/*.o $(BUILD)/*.img $(BUILD)/*.elf $(BUILD)/*.map $(BUILD)/*.lock
 	rm -rf $(BUILD)/src $(BUILD)/lean $(BUILD)/include
 
-.PHONY: all lean clean run-bochs run-qemu run-qemu-lean check-layout check-layout-neg
+.PHONY: all lean clean run-bochs run-qemu run-qemu-lean check-layout check-layout-neg check-kbc

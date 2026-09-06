@@ -40,6 +40,7 @@ jmp 0x0000:0x7E00
 - Size: `stat -c %s build/mbr.bin == 512`, `tail -c2 | od -An -tx1 == 55 aa` — enforced by `Makefile:19-20`.
 - Prints via BIOS `INT 10h AH=0x0E` and COM1 `0x3F8` (polled LSR 0x3FD bit 5) for Bochs `com1: file` and QEMU `-serial stdio`.
 - A20 bugfix: earlier `or al,1` caused `out 0x92` reset (Bochs log `iowrite to port0x92 : reset requested`); fixed to `and al,0xFE` (clear reset bit).
+- KBC timeout policy (bounded wait): `kbc_wait_timeout` (`KBC_TIMEOUT equ 0xFFFF`, same bound as `KBC_TIMEOUT2` in stage2) polls `0x64` bit 1 with a decrementing CX counter and returns CF=1 on timeout. Fast-A20 via port 0x92 is the primary path; the 8042 D1/DF sequence is a fallback only. A timeout is therefore a **fallback condition, not boot-fatal**: `enable_a20`/`enable_a20_stage2` skip the remaining KBC outs, re-assert fast A20, print `KBC timeout, A20 via 0x92`, and continue boot with CF=0 (never spins forever). Locked by `make check-kbc` (finite counter + `stc`/`clc` + 3× `jc` checks, no `jnz kbc_wait*`); normal boot serial output is unchanged (diagnostic prints only on timeout).
 
 ### 2. `src/boot/gdt.asm:1` — GDT32 + GDT64
 
@@ -60,7 +61,7 @@ gdt64_ptr: dw 23; dq gdt64_start
 0x7E00: jmp stage2_start        ; skip GDT bytes
 0x7E02: GDT32+GDT64 (≈64 B)
 0x7E44: stage2_start (real)
-0x7Exx: print16, enable_a20_stage2, load_kernel, kbc_wait, data, pmode, vga_print32, long_entry
+0x7Exx: print16, enable_a20_stage2, load_kernel, kbc_wait_timeout, data, pmode, vga_print32, long_entry
 ```
 
 **Real-mode (bits 16):**

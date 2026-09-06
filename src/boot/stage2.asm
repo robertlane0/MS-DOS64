@@ -111,30 +111,61 @@ print16:
     pop ax
     ret
 
+; Design note (KBC timeout policy): Fast-A20 via port 0x92 is the PRIMARY path
+; and is always attempted first. The 8042 KBC D1/DF sequence is a FALLBACK for
+; boards where 0x92 is unimplemented. kbc_wait_timeout bounds the IBF poll with
+; a decrementing CX counter (KBC_TIMEOUT2 iterations) and returns CF=1 on
+; timeout. A timeout is a FALLBACK condition, NOT boot-fatal: enable_a20_stage2
+; skips the remaining KBC outs, re-asserts fast A20, prints msg_kbc_timeout2,
+; and returns with CF=0 so boot continues deterministically.
+KBC_TIMEOUT2 equ 0xFFFF       ; generous: ample for slow real HW, still bounded
 enable_a20_stage2:
     push ax
     in al, 0x92
     or al, 2
     and al, 0xFE
     out 0x92, al
-    call kbc_wait2
+    call kbc_wait_timeout
+    jc .kbc_skip
     mov al, 0xD1
     out 0x64, al
-    call kbc_wait2
+    call kbc_wait_timeout
+    jc .kbc_skip
     mov al, 0xDF
     out 0x60, al
-    call kbc_wait2
+    call kbc_wait_timeout
+    jc .kbc_skip
+    jmp .reaffirm
+.kbc_skip:
+    ; KBC missing/disabled: diagnose, fall back to fast A20 only
+    push si
+    mov si, msg_kbc_timeout2
+    call print16
+    pop si
+.reaffirm:
     in al, 0x92
     or al, 2
     and al, 0xFE
     out 0x92, al
     pop ax
+    clc                     ; never fails: KBC is fallback, fast A20 already set
     ret
 
-kbc_wait2:
+kbc_wait_timeout:
+    push cx
+    mov cx, KBC_TIMEOUT2
+.wait:
     in al, 0x64
     test al, 2
-    jnz kbc_wait2
+    jz .ok
+    dec cx
+    jnz .wait
+    pop cx
+    stc                     ; timeout: CF=1
+    ret
+.ok:
+    pop cx
+    clc                     ; ready: CF=0
     ret
 
 ; Load kernel via LBA extended read; fallback to CHS 1-sector loop
@@ -283,6 +314,7 @@ dap_lba_hi:
 
 msg_stage2:        db 13,10,"Stage2 @0x7E00 entered (real)",13,10,0
 msg_a20_ok2:       db "A20 stage2 OK",13,10,0
+msg_kbc_timeout2:  db "KBC timeout, A20 via 0x92",13,10,0
 msg_load_kernel:   db "Loading kernel LBA16 -> 0x100000 ...",13,10,0
 msg_kernel_ok:     db "Kernel loaded",13,10,0
 msg_lba_fail:      db "LBA kernel read failed, trying CHS",13,10,0
