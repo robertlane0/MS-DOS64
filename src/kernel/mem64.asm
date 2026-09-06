@@ -252,10 +252,13 @@ mem_alloc64:
     jz .fail_a
     mov rax, rdi
     add rax, 15
+    jc .fail_a             ; size+15 overflowed -> reject before rounding
     and rax, -16
     mov r8, rax           ; r8 = aligned size
     test r8, r8
     jz .fail_a            ; overflow after align?
+    cmp r8, MEM_SIZE
+    ja .fail_a            ; larger than entire heap -> cannot fit, reject early
     mov rsi, MEM_START
 .walk_a:
     mov al, [rsi + MCB64.type]
@@ -273,7 +276,9 @@ mem_alloc64:
     ; found
     mov r9, r8
     add r9, MCBSIZ64
+    jc .use_whole_a       ; true need overflowed 64 bits -> no split possible
     add r9, 16
+    jc .use_whole_a
     cmp rcx, r9
     jbe .use_whole_a
     ; split
@@ -354,12 +359,17 @@ mem_alloc_aligned64:
     jb .fail_al2
     mov r12, rsi          ; r12 = align
     mov r13, rdi          ; r13 = original size
+    test rdi, rdi
+    jz .fail_al2          ; zero size -> fail (avoids 0 -> 0 round artifact)
     mov rax, rdi
     add rax, 15
+    jc .fail_al2          ; size+15 overflowed -> reject before rounding
     and rax, -16
     mov r8, rax           ; r8 = aligned size
     test r8, r8
     jz .fail_al2
+    cmp r8, MEM_SIZE
+    ja .fail_al2          ; larger than entire heap -> cannot fit, reject early
     mov r14, r12
     dec r14               ; r14 = align-1 (added before masking up)
     mov r15, r14
@@ -379,11 +389,13 @@ mem_alloc_aligned64:
     ; candidate = rsi+MCBSIZ64
     mov r10, rsi
     add r10, MCBSIZ64
+    jc .next_al2          ; address wrap -> cannot satisfy here
     mov rax, r10
     add rax, r14
+    jc .next_al2          ; base+(align-1) overflowed -> no representable aligned addr
     and rax, r15          ; rax = aligned user address
     mov r11, rax
-    sub r11, r10          ; r11 = padding
+    sub r11, r10          ; r11 = padding (safe: no overflow above => rax>=r10)
     ; compute need and handling
     cmp r11, 0
     je .al_no_pad
@@ -392,6 +404,7 @@ mem_alloc_aligned64:
     ; small padding (<48) -> need = r8 + r11, cannot split prefix
     mov r9, r8
     add r9, r11           ; need
+    jc .next_al2          ; size+padding overflowed -> cannot fit this block
     cmp rcx, r9
     jb .next_al2
     ; have space, check suffix
@@ -435,6 +448,7 @@ mem_alloc_aligned64:
     ; need = r8 + r11
     mov r9, r8
     add r9, r11
+    jc .next_al2          ; size+padding overflowed -> cannot fit this block
     cmp rcx, r9
     jb .next_al2
     mov rax, rcx
@@ -504,7 +518,9 @@ mem_alloc_aligned64:
     jb .next_al2
     mov r9, r8
     add r9, MCBSIZ64
+    jc .al_use_whole     ; true split threshold overflowed -> whole block only
     add r9, 16
+    jc .al_use_whole
     cmp rcx, r9
     jbe .al_use_whole
     ; split
@@ -561,12 +577,25 @@ mem_alloc_pages64:
     push rbx
     push rsi
     push rdi
-    ; pages to bytes
+    ; pages to bytes with overflow check: pages*4096 must fit in 64 bits.
+    ; SHL by 12 drops the top 12 bits; CF only reflects bit 52, so check
+    ; explicitly that the top 12 bits are zero before shifting.
+    mov rax, rdi
+    shr rax, 52
+    test rax, rax
+    jnz .fail_pg
     mov rax, rdi
     shl rax, PAGE_SHIFT
+    jc .fail_pg           ; defense in depth (unreachable after shr check)
     mov rdi, rax
     mov rsi, PAGE_SIZE
     call mem_alloc_aligned64
+    pop rdi
+    pop rsi
+    pop rbx
+    ret
+.fail_pg:
+    xor rax, rax
     pop rdi
     pop rsi
     pop rbx
@@ -717,9 +746,12 @@ mem_resize64:
     mov r12, rdi          ; save ptr
     mov r8, rsi
     add r8, 15
+    jc .fail_r2           ; size+15 overflowed -> reject before rounding
     and r8, -16           ; r8 = new aligned
     test r8, r8
     jz .fail_r2
+    cmp r8, MEM_SIZE
+    ja .fail_r2           ; larger than entire heap -> cannot fit, reject early
     mov rsi, r12
     sub rsi, MCBSIZ64
     cmp rsi, MEM_START

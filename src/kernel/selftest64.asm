@@ -2497,6 +2497,38 @@ test_resize:
     call mem_resize64
     test rax, rax
     jz .fail19           ; should fail
+    call mem_validate64
+    test rax, rax
+    jnz .fail19
+    ; Near-overflow resizes must fail with CF and leave chain intact
+    ; NOTE: check CF immediately — TEST clears CF.
+    mov rdi, rbx
+    mov rsi, -1             ; UINT64_MAX
+    call mem_resize64
+    jnc .fail19             ; CF must be set on failure
+    test rax, rax
+    jz .fail19
+    call mem_validate64
+    test rax, rax
+    jnz .fail19
+    mov rdi, rbx
+    mov rsi, -15            ; UINT64_MAX-14 (wraps size+15 to 0)
+    call mem_resize64
+    jnc .fail19
+    test rax, rax
+    jz .fail19
+    call mem_validate64
+    test rax, rax
+    jnz .fail19
+    mov rdi, rbx
+    mov rsi, -16            ; UINT64_MAX-15 (rounds to huge, exceeds heap)
+    call mem_resize64
+    jnc .fail19
+    test rax, rax
+    jz .fail19
+    call mem_validate64
+    test rax, rax
+    jnz .fail19
     ; Also test resize via direct call
     mov rdi, rbx
     mov rsi, 256
@@ -2667,6 +2699,137 @@ test_stress:
     call mem_alloc64
     test rax, rax
     jnz .fail21          ; must fail
+    call mem_validate64
+    test rax, rax
+    jnz .fail21
+    ; Overflow hardening: near-UINT64_MAX sizes must fail without MCB change
+    mov rdi, -1             ; UINT64_MAX
+    call mem_alloc64
+    test rax, rax
+    jnz .fail21
+    call mem_validate64
+    test rax, rax
+    jnz .fail21
+    mov rdi, -15            ; UINT64_MAX-14 (size+15 wraps to 0)
+    call mem_alloc64
+    test rax, rax
+    jnz .fail21
+    call mem_validate64
+    test rax, rax
+    jnz .fail21
+    mov rdi, -16            ; UINT64_MAX-15 (rounds to huge > heap)
+    call mem_alloc64
+    test rax, rax
+    jnz .fail21
+    call mem_validate64
+    test rax, rax
+    jnz .fail21
+    ; Aligned near-overflow: large valid alignment + huge size must fail
+    mov rdi, -16
+    mov rsi, 4096
+    call mem_alloc_aligned64
+    test rax, rax
+    jnz .fail21
+    call mem_validate64
+    test rax, rax
+    jnz .fail21
+    mov rdi, -4096          ; UINT64_MAX-4095, 4096-aligned huge
+    mov rsi, 4096
+    call mem_alloc_aligned64
+    test rax, rax
+    jnz .fail21
+    call mem_validate64
+    test rax, rax
+    jnz .fail21
+    mov rdi, 16
+    mov rsi, 1
+    shl rsi, 32             ; align = 2^32, valid power of two
+    call mem_alloc_aligned64
+    test rax, rax
+    jnz .fail21             ; 4 GiB alignment cannot fit 6 MiB heap
+    call mem_validate64
+    test rax, rax
+    jnz .fail21
+    mov rdi, -16
+    mov rsi, 1
+    shl rsi, 32
+    call mem_alloc_aligned64
+    test rax, rax
+    jnz .fail21
+    call mem_validate64
+    test rax, rax
+    jnz .fail21
+    ; Pages overflow: page count whose byte size wraps must fail
+    mov rdi, -1             ; UINT64_MAX pages
+    call mem_alloc_pages64
+    test rax, rax
+    jnz .fail21
+    call mem_validate64
+    test rax, rax
+    jnz .fail21
+    mov rdi, 1
+    shl rdi, 52             ; 2^52 pages * 4096 = 2^64 -> wraps to 0
+    call mem_alloc_pages64
+    test rax, rax
+    jnz .fail21
+    call mem_validate64
+    test rax, rax
+    jnz .fail21
+    ; Resize near-overflow must fail with CF, chain intact
+    ; NOTE: check CF immediately — TEST clears CF.
+    mov rdi, 256
+    call mem_alloc64
+    test rax, rax
+    jz .fail21
+    mov rbx, rax
+    mov rdi, rax
+    mov rsi, -1
+    call mem_resize64
+    jnc .fail21
+    test rax, rax
+    jz .fail21
+    call mem_validate64
+    test rax, rax
+    jnz .fail21
+    mov rdi, rbx
+    mov rsi, -16
+    call mem_resize64
+    jnc .fail21
+    test rax, rax
+    jz .fail21
+    call mem_validate64
+    test rax, rax
+    jnz .fail21
+    mov rdi, rbx
+    call mem_free64
+    jc .fail21
+    call mem_validate64
+    test rax, rax
+    jnz .fail21
+    ; Normal max-heap alloc still governed by capacity, not wrap:
+    ; Largest 16-aligned request fitting the empty heap succeeds.
+    mov rdi, 6*1024*1024 - 48
+    call mem_alloc64
+    test rax, rax
+    jz .fail21
+    mov rbx, rax
+    call mem_validate64
+    test rax, rax
+    jnz .fail21
+    mov rdi, rbx
+    call mem_free64
+    jc .fail21
+    call mem_validate64
+    test rax, rax
+    jnz .fail21
+    ; MEM_SIZE (header + data exceeds heap) must fail via capacity.
+    mov rdi, 6*1024*1024
+    call mem_alloc64
+    test rax, rax
+    jnz .fail21
+    call mem_validate64
+    test rax, rax
+    jnz .fail21
     ; Test page-aligned alloc (4096) returns 4096-aligned
     mov rdi, 4096
     mov rsi, 4096
