@@ -57,6 +57,8 @@ global fs_fcb_rename64
 global fs_fcb_search64
 global fs_make_fcb64
 global fs_fcb_io64
+global fs_vol_validate64
+global fs_test_geom
 global fs_test_bpb
 global fs_test_chain
 global fs_test_dir
@@ -186,7 +188,7 @@ fs_bpb_parse64:
     inc eax
     cmp eax, 2
     jb .bad
-    cmp eax, 8192
+    cmp eax, FAT12_MAXCLUS
     ja .bad
     mov [rbp + DPB64.maxclus], eax
 
@@ -208,6 +210,261 @@ fs_bpb_parse64:
     pop rcx
     pop rdx
     pop rsi
+    pop rbx
+    ret
+
+; ------------------------------------------------------------
+; fs_vol_validate64 — mounted-volume geometry policy (mount boundary)
+;   In: RSI = boot sector base (512B BPB), RBP = DPB64 ptr (parsed)
+;   Out: RAX 0 ok (FS_MOUNT_OK), 2 unsupported geometry (FS_MOUNT_GEOM_ERR)
+;   Clobbers: RAX,RCX,RDX,R8,R9,R10,R11. Preserves RBX,RSI,RBP,R12-R15.
+;   Proves BEFORE any multi-sector ATA read that the parsed BPB fits the
+;   fixed cache: secsiz==512, spc*secsiz<=IOBUF, root*32<=ROOT
+;   (and dirsec*secsiz<=ROOT), fatsiz*secsiz<=FAT, maxclus<=FAT12_MAXCLUS
+;   with FAT offset fitting, firfat/firdir/firrec/data-end within TotSec
+;   (overflow-safe 64-bit), and absolutized LBAs (FS_VOL_LBA+...) < 2^28
+;   without wrap. Never writes to cache buffers; safe on synthetic BPBs.
+; ------------------------------------------------------------
+fs_vol_validate64:
+    push rbx
+    push rcx
+    push rdx
+    push rsi
+    push rdi
+    push rbp
+    push r8
+    push r9
+    push r10
+    push r11
+    test rsi, rsi
+    jz .geom_fail
+    test rbp, rbp
+    jz .geom_fail
+    ; ---- 1. secsiz == 512 (fixed cache contract) ----
+    mov eax, [rbp + DPB64.secsiz]
+    cmp eax, FS_VOL_SECSIZ
+    jne .geom_fail
+    movzx eax, word [rsi + BPB_BytsPerSec]
+    cmp eax, FS_VOL_SECSIZ
+    jne .geom_fail
+    ; ---- 2. spc 1..64 pow2, matches boot+shft, spc*secsiz <= IOBUF ----
+    movzx ebx, byte [rbp + DPB64.clusmsk]
+    inc ebx
+    cmp ebx, 1
+    jb .geom_fail
+    cmp ebx, 64
+    ja .geom_fail
+    mov eax, ebx
+    dec eax
+    test ebx, eax
+    jnz .geom_fail
+    movzx ecx, byte [rbp + DPB64.clusshft]
+    cmp ecx, 6
+    ja .geom_fail
+    mov eax, 1
+    shl eax, cl
+    cmp eax, ebx
+    jne .geom_fail
+    movzx eax, byte [rsi + BPB_SecPerClus]
+    cmp eax, ebx
+    jne .geom_fail
+    mov r8d, [rbp + DPB64.secsiz]
+    imul r8, rbx
+    jo .geom_fail
+    cmp r8, FS_VOL_IOBUF_BYTES
+    ja .geom_fail
+    test r8, r8
+    jz .geom_fail
+    ; RBX = spc (kept for data-end), R8 free from here
+    ; ---- 3. TotSec reload + volume-end proof ----
+    movzx eax, word [rsi + BPB_TotSec16]
+    test eax, eax
+    jnz .v_have_tot
+    mov eax, [rsi + BPB_TotSec32]
+    test eax, eax
+    jz .geom_fail
+.v_have_tot:
+    mov r10d, eax                  ; R10 = tot
+    mov rax, r10
+    add rax, FS_VOL_LBA
+    jc .geom_fail
+    cmp rax, 0x10000000
+    jae .geom_fail
+    mov r8, rax                    ; R8 = vol_end (FS_VOL_LBA+tot)
+    ; ---- 4. root entries -> dirsec, firrec proof ----
+    mov eax, [rbp + DPB64.maxent]
+    test eax, eax
+    jz .geom_fail
+    movzx ecx, word [rsi + BPB_RootEntCnt]
+    cmp ecx, eax
+    jne .geom_fail
+    mov r9d, eax
+    shl r9, 5                      ; R9 = root_bytes
+    mov rax, r9
+    shr rax, 5
+    mov ecx, [rbp + DPB64.maxent]
+    cmp eax, ecx
+    jne .geom_fail                 ; shl wrapped
+    cmp r9, FS_VOL_ROOT_BYTES
+    ja .geom_fail
+    mov ecx, [rbp + DPB64.secsiz]  ; RCX = secsiz
+    mov rax, r9
+    add rax, rcx
+    jc .geom_fail
+    dec rax                        ; root+secsiz-1
+    xor edx, edx
+    div rcx                        ; RAX = dirsec
+    test rax, rax
+    jz .geom_fail
+    mov rdi, rax                   ; RDI = dirsec (kept)
+    imul rax, rcx                  ; dirsec*secsiz
+    jo .geom_fail
+    cmp rax, FS_VOL_ROOT_BYTES
+    ja .geom_fail
+    ; ---- 5. FAT size + firdir/firrec proof ----
+    mov eax, [rbp + DPB64.fatsiz]
+    test eax, eax
+    jz .geom_fail
+    movzx ecx, word [rsi + BPB_FATSz16]
+    cmp ecx, eax
+    jne .geom_fail
+    mov ecx, [rbp + DPB64.secsiz]
+    mov r11d, eax                  ; R11 = fatsiz sectors
+    imul r11, rcx                  ; R11 = fatsiz_bytes
+    jo .geom_fail
+    test r11, r11
+    jz .geom_fail
+    cmp r11, FS_VOL_FAT_BYTES
+    ja .geom_fail
+    movzx eax, byte [rbp + DPB64.fatcnt]
+    cmp eax, 1
+    jb .geom_fail
+    cmp eax, 4
+    ja .geom_fail
+    movzx ecx, byte [rsi + BPB_NumFATs]
+    cmp ecx, eax
+    jne .geom_fail
+    mov ecx, eax                   ; ECX = fatcnt
+    mov eax, [rbp + DPB64.fatsiz]
+    mov r9d, eax
+    imul r9, rcx                   ; R9 = fat_total sectors
+    jo .geom_fail
+    mov eax, [rbp + DPB64.firfat]
+    movzx ecx, word [rsi + BPB_RsvdSecCnt]
+    cmp ecx, eax
+    jne .geom_fail
+    test eax, eax
+    jz .geom_fail
+    ; R9 = fat_total sectors, EDX/EAX = firfat_rel
+    mov edx, eax                   ; EDX = firfat_rel (zero-extends to RDX)
+    mov rax, rdx
+    add rax, r9                    ; firfat + fat_total = firdir_calc
+    jc .geom_fail
+    mov edx, [rbp + DPB64.firdir]
+    cmp rax, rdx
+    jne .geom_fail                 ; DPB inconsistent (32-bit wrap in parser)
+    mov r9, rax                    ; R9 = firdir_rel
+    cmp rdx, r10                   ; firdir < tot
+    jae .geom_fail
+    ; firfat < tot
+    mov edx, [rbp + DPB64.firfat]
+    cmp rdx, r10
+    jae .geom_fail
+    ; firrec = firdir + dirsec
+    mov rax, r9
+    add rax, rdi
+    jc .geom_fail
+    mov edx, [rbp + DPB64.firrec]
+    cmp rax, rdx
+    jne .geom_fail
+    cmp rax, r10
+    jae .geom_fail                 ; firrec must be < tot
+    mov r9, rax                    ; R9 = firrec_rel (kept for data-end)
+    ; ---- 6. maxclus <= FAT12_MAXCLUS and FAT offset fits ----
+    mov eax, [rbp + DPB64.maxclus]
+    cmp eax, 2
+    jb .geom_fail
+    cmp eax, FAT12_MAXCLUS
+    ja .geom_fail
+    mov ecx, eax                   ; ECX = maxclus (kept for data-end)
+    ; offset = maxclus + maxclus/2
+    mov edx, eax
+    shr edx, 1
+    add edx, eax
+    jc .geom_fail
+    add edx, 2                     ; +2 for word access
+    jc .geom_fail
+    mov rax, rdx                   ; RAX = offset+2
+    cmp rax, r11
+    ja .geom_fail
+    cmp rax, FS_VOL_FAT_BYTES
+    ja .geom_fail
+    ; ---- 7. data end = firrec + (maxclus-1)*spc <= tot ----
+    mov rax, rcx
+    dec rax                        ; maxclus-1
+    imul rax, rbx                  ; *spc (RBX)
+    jo .geom_fail
+    add rax, r9                    ; +firrec
+    jc .geom_fail
+    cmp rax, r10
+    ja .geom_fail
+    ; ---- 8. absolutized LBAs < 2^28 without wrap ----
+    mov edx, [rbp + DPB64.firfat]
+    mov rax, rdx
+    add rax, FS_VOL_LBA
+    jc .geom_fail
+    cmp rax, 0x10000000
+    jae .geom_fail
+    mov edx, [rbp + DPB64.fatsiz]
+    add rax, rdx                   ; firfat_abs + fatsiz (= firdir_abs) <= vol_end?
+    jc .geom_fail
+    cmp rax, r8
+    ja .geom_fail
+    mov edx, [rbp + DPB64.firdir]
+    mov rax, rdx
+    add rax, FS_VOL_LBA
+    jc .geom_fail
+    cmp rax, 0x10000000
+    jae .geom_fail
+    add rax, rdi                   ; +dirsec (= firrec_abs) <= vol_end?
+    jc .geom_fail
+    cmp rax, r8
+    ja .geom_fail
+    mov edx, [rbp + DPB64.firrec]
+    mov rax, rdx
+    add rax, FS_VOL_LBA
+    jc .geom_fail
+    cmp rax, 0x10000000
+    jae .geom_fail
+    ; data end abs = firrec_abs + (maxclus-1)*spc <= vol_end
+    mov rax, rcx
+    dec rax
+    imul rax, rbx
+    jo .geom_fail
+    mov edx, [rbp + DPB64.firrec]
+    add rdx, FS_VOL_LBA
+    jc .geom_fail
+    add rax, rdx
+    jc .geom_fail
+    cmp rax, r8
+    ja .geom_fail
+    cmp rax, 0x10000000
+    jae .geom_fail
+    ; ---- ok ----
+    xor eax, eax
+    jmp .geom_done
+.geom_fail:
+    mov rax, FS_MOUNT_GEOM_ERR
+.geom_done:
+    pop r11
+    pop r10
+    pop r9
+    pop r8
+    pop rbp
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rcx
     pop rbx
     ret
 
@@ -1473,6 +1730,208 @@ fs_test_fcb:
     pop rbx
     ret
 
+; ------------------------------------------------------------
+; fs_test_geom — mounted-volume geometry negative paths (no disk I/O)
+;   Out: RAX 0 pass, 1 fail. Synthetic BPBs in fs_geom_boot/dpb only;
+;   never touches FS_VOL_LBA or the mounted volume. Proves the mount
+;   boundary rejects before any FAT/root ATA read:
+;     FATSz16=10, RootEntCnt=225, SecPerClus=128, 1024B sectors,
+;     data-end beyond TotSec, maxclus beyond FAT bytes, valid still ok.
+;   Also proves the validator is read-only: guard bytes around the
+;   scratch boot/DPB and samples of fs_vol_fat/root/iobuf are unchanged.
+; ------------------------------------------------------------
+fs_test_geom:
+    push rbx
+    push rcx
+    push rdx
+    push rsi
+    push rdi
+    push rbp
+    push r8
+    push r9
+    push r10
+    push r11
+    sub rsp, 64
+    ; Snapshot fixed-buffer samples + scratch guards (read-only proof).
+    mov rax, [rel fs_vol_fat]
+    mov [rsp+0], rax
+    mov rax, [rel fs_vol_fat+FS_VOL_FAT_BYTES-8]
+    mov [rsp+8], rax
+    mov rax, [rel fs_vol_root]
+    mov [rsp+16], rax
+    mov rax, [rel fs_vol_root+FS_VOL_ROOT_BYTES-8]
+    mov [rsp+24], rax
+    mov rax, [rel fs_vol_iobuf]
+    mov [rsp+32], rax
+    mov rax, [rel fs_vol_iobuf+FS_VOL_IOBUF_BYTES-8]
+    mov [rsp+40], rax
+    mov dword [rel fs_geom_pre], 0xA5A5A5A5
+    mov dword [rel fs_geom_pre+4], 0xA5A5A5A5
+    mov dword [rel fs_geom_pre+8], 0xA5A5A5A5
+    mov dword [rel fs_geom_pre+12], 0xA5A5A5A5
+    mov dword [rel fs_geom_post], 0x5A5A5A5A
+    mov dword [rel fs_geom_post+4], 0x5A5A5A5A
+    mov dword [rel fs_geom_post+8], 0x5A5A5A5A
+    mov dword [rel fs_geom_post+12], 0x5A5A5A5A
+    mov dword [rel fs_geom_dpb_post], 0xA55A5AA5
+    mov dword [rel fs_geom_dpb_post+4], 0xA55A5AA5
+    mov dword [rel fs_geom_dpb_post+8], 0xA55A5AA5
+    mov dword [rel fs_geom_dpb_post+12], 0xA55A5AA5
+    ; ---- valid 1.44M must parse+validate ok ----
+    call .geom_copy
+    lea rsi, [rel fs_geom_boot]
+    lea rbp, [rel fs_geom_dpb]
+    call fs_bpb_parse64
+    test rax, rax
+    jnz .g_fail
+    call fs_vol_validate64
+    test rax, rax
+    jnz .g_fail
+    cmp dword [rbp + DPB64.maxclus], 2848
+    jne .g_fail
+    ; ---- FATSz16=10 must fail with GEOM_ERR (parse ok) ----
+    call .geom_copy
+    mov word [rel fs_geom_boot + BPB_FATSz16], 10
+    lea rsi, [rel fs_geom_boot]
+    lea rbp, [rel fs_geom_dpb]
+    call fs_bpb_parse64
+    test rax, rax
+    jnz .g_fail                  ; parse must succeed; validator must reject
+    call fs_vol_validate64
+    cmp rax, FS_MOUNT_GEOM_ERR
+    jne .g_fail
+    ; ---- RootEntCnt=225 must fail with GEOM_ERR (parse ok) ----
+    call .geom_copy
+    mov word [rel fs_geom_boot + BPB_RootEntCnt], 225
+    lea rsi, [rel fs_geom_boot]
+    lea rbp, [rel fs_geom_dpb]
+    call fs_bpb_parse64
+    test rax, rax
+    jnz .g_fail
+    call fs_vol_validate64
+    cmp rax, FS_MOUNT_GEOM_ERR
+    jne .g_fail
+    ; ---- SecPerClus=128 must fail before FAT read (parse rejects) ----
+    call .geom_copy
+    mov byte [rel fs_geom_boot + BPB_SecPerClus], 128
+    lea rsi, [rel fs_geom_boot]
+    lea rbp, [rel fs_geom_dpb]
+    call fs_bpb_parse64
+    test rax, rax
+    jz .g_spc128_parsed
+    jmp .g_spc128_ok             ; parse failed as expected
+.g_spc128_parsed:
+    call fs_vol_validate64       ; if parser ever allows it, validator must reject
+    cmp rax, FS_MOUNT_GEOM_ERR
+    jne .g_fail
+.g_spc128_ok:
+    ; ---- 1024B sectors must fail GEOM_ERR under 512B cache (parse ok) ----
+    call .geom_copy
+    mov word [rel fs_geom_boot + BPB_BytsPerSec], 1024
+    lea rsi, [rel fs_geom_boot]
+    lea rbp, [rel fs_geom_dpb]
+    call fs_bpb_parse64
+    test rax, rax
+    jnz .g_fail
+    call fs_vol_validate64
+    cmp rax, FS_MOUNT_GEOM_ERR
+    jne .g_fail
+    ; ---- data end beyond TotSec must fail (valid DPB, shrunk TotSec) ----
+    call .geom_copy
+    lea rsi, [rel fs_geom_boot]
+    lea rbp, [rel fs_geom_dpb]
+    call fs_bpb_parse64
+    test rax, rax
+    jnz .g_fail
+    mov word [rel fs_geom_boot + BPB_TotSec16], 100
+    call fs_vol_validate64
+    cmp rax, FS_MOUNT_GEOM_ERR
+    jne .g_fail
+    ; ---- maxclus beyond FAT bytes must fail (Tot=4112 -> maxclus 4080) ----
+    call .geom_copy
+    mov word [rel fs_geom_boot + BPB_TotSec16], 4112
+    lea rsi, [rel fs_geom_boot]
+    lea rbp, [rel fs_geom_dpb]
+    call fs_bpb_parse64
+    test rax, rax
+    jnz .g_fail                  ; must parse (4080 <= FAT12_MAXCLUS)
+    cmp dword [rbp + DPB64.maxclus], FAT12_MAXCLUS
+    jne .g_fail
+    call fs_vol_validate64       ; offset 4080+2040+2=6122 > 4608
+    cmp rax, FS_MOUNT_GEOM_ERR
+    jne .g_fail
+    ; ---- valid again after negatives (no sticky state) ----
+    call .geom_copy
+    lea rsi, [rel fs_geom_boot]
+    lea rbp, [rel fs_geom_dpb]
+    call fs_bpb_parse64
+    test rax, rax
+    jnz .g_fail
+    call fs_vol_validate64
+    test rax, rax
+    jnz .g_fail
+    ; ---- read-only proof: guards + fixed buffers unchanged ----
+    cmp dword [rel fs_geom_pre], 0xA5A5A5A5
+    jne .g_fail
+    cmp dword [rel fs_geom_pre+4], 0xA5A5A5A5
+    jne .g_fail
+    cmp dword [rel fs_geom_pre+8], 0xA5A5A5A5
+    jne .g_fail
+    cmp dword [rel fs_geom_pre+12], 0xA5A5A5A5
+    jne .g_fail
+    cmp dword [rel fs_geom_post], 0x5A5A5A5A
+    jne .g_fail
+    cmp dword [rel fs_geom_post+4], 0x5A5A5A5A
+    jne .g_fail
+    cmp dword [rel fs_geom_post+8], 0x5A5A5A5A
+    jne .g_fail
+    cmp dword [rel fs_geom_post+12], 0x5A5A5A5A
+    jne .g_fail
+    cmp dword [rel fs_geom_dpb_post], 0xA55A5AA5
+    jne .g_fail
+    mov rax, [rel fs_vol_fat]
+    cmp rax, [rsp+0]
+    jne .g_fail
+    mov rax, [rel fs_vol_fat+FS_VOL_FAT_BYTES-8]
+    cmp rax, [rsp+8]
+    jne .g_fail
+    mov rax, [rel fs_vol_root]
+    cmp rax, [rsp+16]
+    jne .g_fail
+    mov rax, [rel fs_vol_root+FS_VOL_ROOT_BYTES-8]
+    cmp rax, [rsp+24]
+    jne .g_fail
+    mov rax, [rel fs_vol_iobuf]
+    cmp rax, [rsp+32]
+    jne .g_fail
+    mov rax, [rel fs_vol_iobuf+FS_VOL_IOBUF_BYTES-8]
+    cmp rax, [rsp+40]
+    jne .g_fail
+    xor eax, eax
+    jmp .g_done
+.geom_copy:
+    lea rsi, [rel fs_boot144]
+    lea rdi, [rel fs_geom_boot]
+    mov ecx, 512
+    cld
+    rep movsb
+    ret
+.g_fail:
+    mov rax, 1
+.g_done:
+    add rsp, 64
+    pop r11
+    pop r10
+    pop r9
+    pop r8
+    pop rbp
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rcx
+    pop rbx
+    ret
+
 ; ============================================================
 ; Mounted real volume (G2) — tools/mkfat12.py stamps a 1.44M FAT12
 ; at LBA FS_VOL_LBA; the kernel mounts it into fs_vol_dpb/fat/root.
@@ -1481,7 +1940,12 @@ fs_test_fcb:
 
 ; ------------------------------------------------------------
 ; fs_mount_volume64 — mount the on-image FAT12 volume
-;   Out: RAX 0 ok (mounted), 1 fail (ATA/BPB error). Idempotent.
+;   Out: RAX 0 ok (mounted), 1 ATA/boot-sig/parse error (FS_MOUNT_IO_ERR),
+;        2 unsupported geometry (FS_MOUNT_GEOM_ERR). Idempotent.
+;   Geometry is proven by fs_vol_validate64 BEFORE absolutizing LBAs and
+;   BEFORE any multi-sector ATA read, so a malformed BPB fails without
+;   touching fs_vol_fat/root or issuing FAT/root reads. All LBA additions
+;   are range-checked (< 2^28, no wrap) before ATA access.
 ; ------------------------------------------------------------
 fs_mount_volume64:
     push rbx
@@ -1510,7 +1974,14 @@ fs_mount_volume64:
     call fs_bpb_parse64
     test rax, rax
     jnz .fail
-    ; Absolutize volume-relative LBAs.
+    ; Geometry boundary: prove the parsed BPB fits the fixed cache
+    ; before absolutizing or issuing any FAT/root ATA read.
+    lea rsi, [rel fs_vol_boot]
+    lea rbp, [rel fs_vol_dpb]
+    call fs_vol_validate64
+    test rax, rax
+    jnz .fail_geom
+    ; Absolutize volume-relative LBAs (proven wrap-free by validator).
     add dword [rbp + DPB64.firfat], FS_VOL_LBA
     add dword [rbp + DPB64.firdir], FS_VOL_LBA
     add dword [rbp + DPB64.firrec], FS_VOL_LBA
@@ -1524,6 +1995,51 @@ fs_mount_volume64:
     xor edx, edx
     div ecx
     mov [rel fs_vol_dirsec], rax
+    ; Range-check the cached FAT/root reads before ATA access
+    ; (defense-in-depth: validator already proved these).
+    mov eax, [rbp + DPB64.secsiz]
+    cmp eax, FS_VOL_SECSIZ
+    jne .fail_geom
+    mov edx, [rbp + DPB64.fatsiz]
+    test edx, edx
+    jz .fail_geom
+    cmp edx, 256
+    ja .fail_geom                  ; ATA count is 8-bit (0 means 256)
+    mov r8d, edx
+    mov r9d, eax
+    imul r8, r9                    ; R8 = fatsiz_bytes
+    jo .fail_geom
+    cmp r8, FS_VOL_FAT_BYTES
+    ja .fail_geom
+    mov edx, [rbp + DPB64.firfat]  ; absolutized LBA
+    mov rax, rdx
+    cmp rax, 0x10000000
+    jae .fail_geom
+    mov edx, [rbp + DPB64.fatsiz]
+    add rax, rdx                   ; firfat_abs + fatsiz, no wrap, < 2^28
+    jc .fail_geom
+    cmp rax, 0x10000000
+    jae .fail_geom
+    mov rdx, [rel fs_vol_dirsec]
+    test rdx, rdx
+    jz .fail_geom
+    cmp rdx, 256
+    ja .fail_geom
+    mov rax, rdx
+    mov r8d, [rbp + DPB64.secsiz]
+    imul rax, r8                   ; dirsec_bytes
+    jo .fail_geom
+    cmp rax, FS_VOL_ROOT_BYTES
+    ja .fail_geom
+    mov edx, [rbp + DPB64.firdir]  ; absolutized LBA
+    mov rax, rdx
+    cmp rax, 0x10000000
+    jae .fail_geom
+    mov rdx, [rel fs_vol_dirsec]
+    add rax, rdx                   ; firdir_abs + dirsec, no wrap, < 2^28
+    jc .fail_geom
+    cmp rax, 0x10000000
+    jae .fail_geom
     ; Load first FAT copy into RAM.
     lea rdi, [rel fs_vol_fat]
     mov eax, [rbp + DPB64.firfat]
@@ -1545,6 +2061,9 @@ fs_mount_volume64:
     mov byte [rel fs_vol_mounted], 1
 .already_ok:
     xor eax, eax
+    jmp .done
+.fail_geom:
+    mov rax, FS_MOUNT_GEOM_ERR
     jmp .done
 .fail:
     mov rax, 1
@@ -2868,12 +3387,20 @@ fs_scratch_buf: resb 1024
 fs_file_buf:    resb 1024
 fs_fcb_test:    resb 128
 fs_fcb_test2:   resb 128
+; --- Geometry validator test scratch (fs_test_geom, RAM-only, no ATA) ---
+fs_geom_pre:    resb 16        ; guard before boot (0xA5 pattern)
+fs_geom_boot:   resb 512       ; writable BPB copy for malformed cases
+fs_geom_post:   resb 16        ; guard after boot (0x5A pattern)
+fs_geom_dpb:    resb 64        ; scratch DPB for parse+validate
+fs_geom_dpb_post: resb 16      ; guard after DPB
 ; --- Mounted real volume (LBA FS_VOL_LBA, tools/mkfat12.py) ---
-fs_vol_boot:    resb 512
+; Sizes are the FS_VOL_*_BYTES policy constants (see include/fs.inc);
+; fs_vol_validate64 proves a BPB fits them before any FAT/root read.
+fs_vol_boot:    resb FS_VOL_BOOT_BYTES
 fs_vol_dpb:     resb 64
-fs_vol_fat:     resb 4608      ; 9 sectors, first FAT copy in RAM
-fs_vol_root:    resb 7168      ; 14 sectors, 224-entry root dir in RAM
-fs_vol_iobuf:   resb 32768     ; cluster staging (spc up to 64)
+fs_vol_fat:     resb FS_VOL_FAT_BYTES      ; 9 sectors, first FAT copy in RAM
+fs_vol_root:    resb FS_VOL_ROOT_BYTES     ; 14 sectors, 224-entry root dir in RAM
+fs_vol_iobuf:   resb FS_VOL_IOBUF_BYTES    ; cluster staging (spc up to 64)
 fs_vol_mounted: resb 1
 alignb 8
 fs_vol_dirsec:  resq 1         ; cached root size in sectors

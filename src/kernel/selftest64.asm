@@ -152,6 +152,7 @@ extern fs_test_dir
 extern fs_test_lba_io
 extern fs_test_file_read
 extern fs_test_fcb
+extern fs_test_geom
 extern fs_mount_volume64
 extern fs_vol_read_file64
 extern fs_bpb_parse64
@@ -3660,6 +3661,9 @@ test_syscall_bounds:
 ; ------------------------------------------------------------
 ; Test 76: FAT12/file negative paths — corrupt BPB rejected,
 ;   bad clusters rejected, NULL/missing reads fail, valid still ok.
+;   Geometry boundary (fs_test_geom): FATSz10/Root225/Spc128/1024B/
+;   data-end/maxclus rejected with GEOM_ERR before FAT/root reads,
+;   valid 1.44M still validates, validator read-only (sentinels intact).
 ;   All read-only: scratch DPB in p8_file_buf+512, never touches
 ;   the mounted volume's real DPB/FAT/root.
 ; ------------------------------------------------------------
@@ -3751,6 +3755,10 @@ test_fs_neg:
     mov rbx, 2
     call fs_get_cluster64
     jc .fail76
+    ; Geometry boundary: malformed BPBs rejected before FAT/root reads.
+    call fs_test_geom
+    test rax, rax
+    jnz .fail76
     xor eax, eax
     jmp .done76
 .fail76:

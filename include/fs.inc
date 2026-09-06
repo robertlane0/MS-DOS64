@@ -59,4 +59,21 @@ endstruc
 %define FS_VOL_LBA       512
 %define FS_VOL_TOTSEC    2880
 
+; --- Mounted-volume cache policy (fs_mount_volume64, fs_vol_validate64) ---
+; The mount path caches the volume in fixed BSS buffers (see fs64.asm).
+; A parsed BPB must prove it fits these buffers BEFORE any multi-sector
+; ATA read occurs; otherwise mount fails with FS_MOUNT_GEOM_ERR (2),
+; distinct from raw ATA I/O failure (1). Supported on-disk profile:
+; 512 B sectors, <=9 FAT sectors (4608 B), <=224 root entries (7168 B),
+; cluster (spc*secsiz) <= 32 KiB iobuf. Generic BPB parsing stays in
+; fs_bpb_parse64; this policy is the mount boundary.
+%define FS_VOL_BOOT_BYTES  512    ; fs_vol_boot: single boot sector
+%define FS_VOL_FAT_BYTES   4608   ; fs_vol_fat: 9 sectors, first FAT copy
+%define FS_VOL_ROOT_BYTES  7168   ; fs_vol_root: 14 sectors / 224 entries
+%define FS_VOL_IOBUF_BYTES 32768  ; fs_vol_iobuf: cluster staging (64*512 max)
+%define FS_VOL_SECSIZ      512    ; required bytes/sector for mount
+%define FS_MOUNT_OK        0
+%define FS_MOUNT_IO_ERR    1      ; ATA/boot-sig/parse failure
+%define FS_MOUNT_GEOM_ERR  2      ; unsupported geometry (buffer/volume proof)
+
 %endif
