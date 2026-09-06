@@ -81,4 +81,43 @@ endstruc
 %define FS_MOUNT_IO_ERR    1      ; ATA/boot-sig/parse failure
 %define FS_MOUNT_GEOM_ERR  2      ; unsupported geometry (buffer/volume proof)
 
+; --- Crash-consistency model (FAT12 has no journal; ordering is the fix) ---
+; Invariants on disk after every completed op and after recovery:
+;   I1 no-dangling: every cluster reachable from a live root entry is marked
+;      allocated (!=0) in FAT1 (and FAT2 once healed). DIR never points to free.
+;   I2 leaks-only: allocated-but-unreachable clusters are safe orphans,
+;      reclaimable via fs_vol_reclaim_orphans64 (never corruption).
+;   I3 chain: 2..maxclus, EOF-terminated (>=0xFF8), hop-bounded, no cycles;
+;      size <= clusters*spc_bytes; size>0 requires firstclus!=0.
+;   I4 mirrors: FAT1 == FAT2 byte-for-byte (healed at mount FAT1->FAT2).
+;   I5 entries: firstclus in range (0 iff empty), 0x00 end / 0xE5 deleted.
+; Orderings (crash between any two sector writes leaves only leaks):
+;   extend/overwrite: data -> FAT flush -> root flush (never root before FAT).
+;   truncate/shrink:  root flush (new smaller size) -> FAT flush (free tail).
+;   delete:           root flush (0xE5) -> FAT flush (free chain).
+;   create/rename:    single root flush (no FAT dependency).
+;   FAT mirrors:      FAT1 then FAT2; mount heals FAT2 from FAT1 on mismatch.
+; Failure rule: if the first metadata flush fails, the second is skipped
+;   (disk stays at the old consistent state); if the second fails, the
+;   caller returns CF=1 with an orphan leak on disk (safe, reclaimable).
+; Power-loss consistency here is crash-ordering + mount healing, NOT a
+; transactional filesystem: torn multi-sector writes within one FAT/root
+; copy cannot be rolled back, only made deterministic (FAT1 wins).
+
+; --- Fault-injection control (tests only; 0 in normal operation) ---
+; fs_fault_inject bits force the next flush to fail WITHOUT writing,
+; simulating a reset between metadata writes. FAT2 failure is special:
+; copy1 is already on disk when copy2 is skipped, leaving divergent
+; mirrors for the mount healer to reconcile. Sticky until cleared by test.
+%define FS_FAULT_NONE  0
+%define FS_FAULT_FAT1  1      ; fail first FAT copy write
+%define FS_FAULT_FAT2  2      ; fail second FAT copy write (after copy1)
+%define FS_FAULT_ROOT  4      ; fail root flush
+
+; --- Scrub status bits (fs_vol_scrub64 RAX bitmask; 0 = clean) ---
+%define FS_SCRUB_CLEAN    0
+%define FS_SCRUB_DANGLING 1   ; live entry reaches free/bad/oob/truncated chain
+%define FS_SCRUB_XLINK    2   ; one cluster reachable from two live entries
+%define FS_SCRUB_MIRROR   4   ; FAT1 != FAT2 on disk
+
 %endif

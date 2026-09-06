@@ -13,6 +13,16 @@
 ; DPB64 (include/dpb.inc) holds firfat/firdir/firrec/maxclus/fatsiz as 32-bit LBAs.
 ; DIRENT (include/fs.inc) is 32B on-disk dir entry. FCB64 (include/fcb.inc)
 ; holds 64-bit filsiz/rr (was 32-bit FILSIZ, DX:AX RR in MSDOS.ASM:1453).
+;
+; Crash-consistency (no journal; ordering + mount healing — see include/fs.inc):
+;   extend: data -> FAT flush -> root flush; truncate: root -> FAT (free tail);
+;   delete: root (0xE5) -> FAT (free chain); create/rename: single root flush;
+;   FAT mirrors FAT1->FAT2, healed at mount (FAT1 wins). First-flush failure
+;   skips the second (old consistent state kept); second-flush failure
+;   returns CF=1 with an orphan leak (safe, via fs_vol_reclaim_orphans64).
+;   fs_fault_inject (FS_FAULT_*) simulates a reset between metadata writes;
+;   fs_vol_scrub64 validates entries/chains/mirrors, fs_vol_discard64 drops
+;   RAM caches so tests can remount from disk like a reboot.
 
 bits 64
 default rel
@@ -60,6 +70,12 @@ global fs_fcb_search64
 global fs_make_fcb64
 global fs_fcb_io64
 global fs_vol_validate64
+global fs_fault_inject
+global fs_vol_check_mirrors64
+global fs_vol_heal_mirrors64
+global fs_vol_scrub64
+global fs_vol_reclaim_orphans64
+global fs_vol_discard64
 global fs_test_geom
 global fs_test_bpb
 global fs_test_chain
@@ -2125,6 +2141,11 @@ fs_test_geom:
 ;   BEFORE any multi-sector ATA read, so a malformed BPB fails without
 ;   touching fs_vol_fat/root or issuing FAT/root reads. All LBA additions
 ;   are range-checked (< 2^28, no wrap) before ATA access.
+;   Crash healing: after FAT1+root are cached and mounted=1 is set, the
+;   second FAT mirror is reconciled best-effort (FAT1->FAT2) via
+;   fs_vol_heal_mirrors64; its status is ignored here so mount keeps its
+;   historical 0-on-loaded contract — use fs_vol_scrub64 to query
+;   DANGLING/XLINK/MIRROR bits explicitly after remount.
 ; ------------------------------------------------------------
 fs_mount_volume64:
     push rbx
@@ -2238,6 +2259,10 @@ fs_mount_volume64:
     test rax, rax
     jnz .fail
     mov byte [rel fs_vol_mounted], 1
+    ; Best-effort mirror heal (FAT1 wins); ignored for mount status.
+    push rax
+    call fs_vol_heal_mirrors64
+    pop rax
 .already_ok:
     xor eax, eax
     jmp .done
@@ -2259,7 +2284,13 @@ fs_mount_volume64:
 
 ; ------------------------------------------------------------
 ; fs_vol_flush_fat64 — write RAM FAT back to both on-disk copies
-;   Out: RAX 0 ok, 1 fail (or not mounted).
+;   Out: RAX 0 ok, 1 fail (or not mounted, or injected fault).
+;   Order FAT1 then FAT2; a fault/IO failure on copy1 skips copy2
+;   (disk keeps the old pair); a failure on copy2 leaves FAT1 new and
+;   FAT2 old (divergent mirrors, healed at mount FAT1->FAT2).
+;   Faults (fs_fault_inject, tests only): FS_FAULT_FAT1 fails before
+;   copy1 without writing; FS_FAULT_FAT2 writes copy1 then fails
+;   before copy2. Sticky until cleared by the test.
 ; ------------------------------------------------------------
 fs_vol_flush_fat64:
     push rbx
@@ -2270,6 +2301,9 @@ fs_vol_flush_fat64:
     push rbp
     cmp byte [rel fs_vol_mounted], 0
     je .fail_novol
+    mov eax, [rel fs_fault_inject]
+    test eax, FS_FAULT_FAT1
+    jnz .fail_io
     lea rbp, [rel fs_vol_dpb]
     lea rdi, [rel fs_vol_fat]
     mov eax, [rbp + DPB64.firfat]
@@ -2277,6 +2311,9 @@ fs_vol_flush_fat64:
     mov edx, [rbp + DPB64.fatsiz]
     call ata_write_lba28
     test rax, rax
+    jnz .fail_io
+    mov eax, [rel fs_fault_inject]
+    test eax, FS_FAULT_FAT2
     jnz .fail_io
     lea rdi, [rel fs_vol_fat]
     mov eax, [rbp + DPB64.firfat]
@@ -2302,7 +2339,8 @@ fs_vol_flush_fat64:
 
 ; ------------------------------------------------------------
 ; fs_vol_flush_root64 — write RAM root dir back to disk
-;   Out: RAX 0 ok, 1 fail (or not mounted).
+;   Out: RAX 0 ok, 1 fail (or not mounted, or injected fault).
+;   Fault (tests only): FS_FAULT_ROOT fails without writing.
 ; ------------------------------------------------------------
 fs_vol_flush_root64:
     push rbx
@@ -2313,6 +2351,9 @@ fs_vol_flush_root64:
     push rbp
     cmp byte [rel fs_vol_mounted], 0
     je .fail_novol2
+    mov eax, [rel fs_fault_inject]
+    test eax, FS_FAULT_ROOT
+    jnz .fail_io2
     lea rbp, [rel fs_vol_dpb]
     lea rdi, [rel fs_vol_root]
     mov eax, [rbp + DPB64.firdir]
@@ -2336,8 +2377,509 @@ fs_vol_flush_root64:
     ret
 
 ; ------------------------------------------------------------
+; fs_vol_discard64 — drop RAM caches to simulate a reboot/power loss
+;   Out: RAX 0. Clears mounted so the next fs_mount_volume64 reloads
+;   FAT1+root from disk (RAM-only unflushed state is lost, like DRAM).
+;   Fault mask is left untouched (tests clear it explicitly).
+;   Clobbers: RAX. Preserves all other registers.
+; ------------------------------------------------------------
+fs_vol_discard64:
+    mov byte [rel fs_vol_mounted], 0
+    xor eax, eax
+    ret
+
+; ------------------------------------------------------------
+; fs_vol_check_mirrors64 — compare RAM FAT1 vs on-disk FAT2
+;   Out: RAX 0 match CF=0; 1 mismatch CF=1; 2 error (not mounted/ATA) CF=1.
+;   Reads FAT2 (firfat+fatsiz, fatsiz sectors) into fs_vol_iobuf and
+;   compares fatsiz*512 bytes with fs_vol_fat. Clobbers iobuf.
+;   Preserves RBX,RBP,R12-R15; clobbers RAX,RCX,RDX,RSI,RDI,R8-R11.
+; ------------------------------------------------------------
+fs_vol_check_mirrors64:
+    push rbx
+    push rcx
+    push rdx
+    push rsi
+    push rdi
+    push rbp
+    push r8
+    push r9
+    push r10
+    push r11
+    cmp byte [rel fs_vol_mounted], 0
+    je .cm_err
+    lea rbp, [rel fs_vol_dpb]
+    mov edx, [rbp + DPB64.fatsiz]
+    test edx, edx
+    jz .cm_err
+    cmp edx, 64
+    ja .cm_err
+    mov r8d, edx
+    mov eax, [rbp + DPB64.secsiz]
+    cmp eax, FS_VOL_SECSIZ
+    jne .cm_err
+    mov r9, r8
+    imul r9, 512
+    jo .cm_err
+    cmp r9, FS_VOL_FAT_BYTES
+    ja .cm_err
+    mov eax, [rbp + DPB64.firfat]
+    add eax, [rbp + DPB64.fatsiz]
+    jc .cm_err
+    cmp rax, 0x10000000
+    jae .cm_err
+    mov rsi, rax
+    lea rdi, [rel fs_vol_iobuf]
+    mov rdx, r8
+    call ata_read_lba28
+    test rax, rax
+    jnz .cm_err
+    lea rsi, [rel fs_vol_fat]
+    lea rdi, [rel fs_vol_iobuf]
+    mov rcx, r9
+    cld
+.rep_cm:
+    test rcx, rcx
+    jz .cm_match
+    mov al, [rsi]
+    cmp al, [rdi]
+    jne .cm_mismatch
+    inc rsi
+    inc rdi
+    dec rcx
+    jmp .rep_cm
+.cm_match:
+    xor eax, eax
+    clc
+    jmp .cm_done
+.cm_mismatch:
+    mov rax, 1
+    stc
+    jmp .cm_done
+.cm_err:
+    mov rax, 2
+    stc
+.cm_done:
+    pop r11
+    pop r10
+    pop r9
+    pop r8
+    pop rbp
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rcx
+    pop rbx
+    ret
+
+; ------------------------------------------------------------
+; fs_vol_heal_mirrors64 — reconcile FAT2 from RAM FAT1 on mismatch
+;   Out: RAX 0 healed-or-match CF=0; 1 fail (not mounted/ATA) CF=1.
+;   Writes RAM FAT1 (fatsiz sectors) to FAT2 LBA (firfat+fatsiz).
+;   Recovery writes bypass fs_fault_inject (faults model the crash,
+;   not the repair; tests clear the mask before remount/heal).
+; ------------------------------------------------------------
+fs_vol_heal_mirrors64:
+    push rbx
+    push rcx
+    push rdx
+    push rsi
+    push rdi
+    push rbp
+    push r8
+    call fs_vol_check_mirrors64
+    cmp rax, 0
+    je .heal_ok
+    cmp rax, 1
+    jne .heal_fail
+    cmp byte [rel fs_vol_mounted], 0
+    je .heal_fail
+    lea rbp, [rel fs_vol_dpb]
+    lea rdi, [rel fs_vol_fat]
+    mov eax, [rbp + DPB64.firfat]
+    add eax, [rbp + DPB64.fatsiz]
+    mov rsi, rax
+    mov edx, [rbp + DPB64.fatsiz]
+    call ata_write_lba28
+    test rax, rax
+    jnz .heal_fail
+.heal_ok:
+    xor eax, eax
+    clc
+    jmp .heal_done
+.heal_fail:
+    mov rax, 1
+    stc
+.heal_done:
+    pop r8
+    pop rbp
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rcx
+    pop rbx
+    ret
+
+; ------------------------------------------------------------
+; fs_vol_build_marks — internal: fill fs_scrub_marks + detect bad chains
+;   In: none (uses mounted vol_dpb/fat/root).
+;   Out: RAX = DANGLING/XLINK bits (0 clean for chains), CF=0 ok;
+;        RAX = 0xFFFFFFFF CF=1 if not mounted.
+;   Marks every cluster reachable from a live root entry (0x00 stops,
+;   0xE5 skips, attr 0x08 vol-label and 0x0F LFN skip chain walk).
+;   A referenced free(0)/reserved(1)/oob/bad(0xFF7)/truncated chain sets
+;   DANGLING; a cluster reached twice sets XLINK. Bitmap covers 0..4095.
+;   Preserves RBX,RBP,R12-R15; uses iobuf? No — RAM FAT only, no disk I/O.
+; ------------------------------------------------------------
+fs_vol_build_marks:
+    push rbx
+    push rcx
+    push rdx
+    push rsi
+    push rdi
+    push rbp
+    push r8
+    push r9
+    push r10
+    push r11
+    push r12
+    push r13
+    push r14
+    push r15
+    cmp byte [rel fs_vol_mounted], 0
+    je .bm_nomnt
+    lea rbp, [rel fs_vol_dpb]
+    mov r12d, [rbp + DPB64.maxclus]
+    cmp r12d, 2
+    jb .bm_nomnt
+    mov r13d, [rbp + DPB64.maxent]
+    test r13d, r13d
+    jz .bm_nomnt
+    lea r14, [rel fs_vol_fat]
+    lea r15, [rel fs_vol_root]
+    ; clear 512B bitmap
+    lea rdi, [rel fs_scrub_marks]
+    mov rcx, 512
+    xor eax, eax
+    cld
+    rep stosb
+    xor r10d, r10d                  ; R10D = status bits
+    xor r11d, r11d                  ; R11D = slot index
+.slot_bm:
+    cmp r11d, r13d
+    jae .bm_done_ok
+    mov eax, r11d
+    shl eax, 5
+    lea rsi, [r15 + rax]            ; entry ptr
+    mov al, [rsi]
+    test al, al
+    jz .bm_done_ok                  ; 0x00 end
+    cmp al, 0xE5
+    je .bm_next
+    mov al, [rsi + DIRENT.attr]
+    cmp al, 0x0F
+    je .bm_next                     ; LFN (not used, skip)
+    test al, 0x08
+    jnz .bm_next                     ; volume label: no chain
+    movzx ebx, word [rsi + DIRENT.firstclus]
+    mov ecx, [rsi + DIRENT.size]
+    test ecx, ecx
+    jnz .nonempty_bm
+    test ebx, ebx
+    jz .bm_next                      ; empty file, no chain
+    ; size==0 but firstclus!=0: still walk to mark (avoid orphan false+)
+    jmp .walk_bm
+.nonempty_bm:
+    cmp ebx, 2
+    jb .dangling_bm                 ; size>0 needs cluster
+    cmp ebx, r12d
+    ja .dangling_bm
+.walk_bm:
+    cmp ebx, 2
+    jb .bm_next                      ; empty-cluster case already handled
+    mov r8d, ebx                     ; c
+    xor r9d, r9d                     ; hops
+.chain_bm:
+    cmp r8d, 2
+    jb .dangling_bm
+    cmp r8d, r12d
+    ja .dangling_bm
+    inc r9d
+    cmp r9d, r12d
+    jae .dangling_bm                 ; hops >= maxclus: cycle/overlong
+    ; xlink test+set: CF=1 means already visited.
+    mov eax, r8d
+    lea rdi, [rel fs_scrub_marks]
+    bts dword [rdi], eax
+    jc .xlink_bm
+    ; next = FAT[c] (RAM)
+    mov rbx, r8
+    push rsi
+    push r9
+    push r10
+    push r11
+    mov rsi, r14
+    call fs_get_cluster64            ; RSI=FAT RBX=c RBP=DPB -> RDI=next
+    mov r8d, edi
+    mov edx, eax                     ; save get status
+    pop r11
+    pop r10
+    pop r9
+    pop rsi
+    test edx, edx
+    jnz .dangling_bm
+    cmp r8d, 0xFF8
+    jae .bm_next                     ; EOF: file walk done
+    cmp r8d, 2
+    jb .dangling_bm                  ; 0 free / 1 reserved: truncated
+    cmp r8d, 0xFF7
+    je .dangling_bm                  ; bad cluster in chain
+    cmp r8d, r12d
+    ja .dangling_bm                  ; oob link
+    jmp .chain_bm
+.dangling_bm:
+    or r10d, FS_SCRUB_DANGLING
+    jmp .bm_next
+.xlink_bm:
+    or r10d, FS_SCRUB_XLINK
+    jmp .bm_next
+.bm_next:
+    inc r11d
+    jmp .slot_bm
+.bm_done_ok:
+    mov rax, r10
+    clc
+    jmp .bm_done
+.bm_nomnt:
+    mov rax, -1
+    stc
+.bm_done:
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop r11
+    pop r10
+    pop r9
+    pop r8
+    pop rbp
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rcx
+    pop rbx
+    ret
+
+; ------------------------------------------------------------
+; fs_vol_scrub64 — validate entries/chains/mirrors + count orphans
+;   Out: RAX = bitmask (0 clean; DANGLING/XLINK/MIRROR), RCX = orphan
+;   count (allocated non-bad unvisited clusters), CF=0 iff clean,
+;   CF=1 on any bit or error. Error (not mounted/ATA): RAX=-1, RCX=0.
+;   Read-only except clobbering fs_vol_iobuf (mirror read) and the
+;   marks bitmap. Orphans alone are leaks (safe) and do NOT set bits;
+;   use fs_vol_reclaim_orphans64 to free them.
+; ------------------------------------------------------------
+fs_vol_scrub64:
+    push rbx
+    push rdx
+    push rsi
+    push rdi
+    push rbp
+    push r8
+    push r9
+    push r10
+    push r11
+    push r12
+    push r13
+    push r14
+    push r15
+    cmp byte [rel fs_vol_mounted], 0
+    je .sc_err
+    call fs_vol_build_marks
+    jc .sc_err
+    mov r15, rax                     ; chain bits
+    call fs_vol_check_mirrors64
+    cmp rax, 1
+    jne .sc_nomirror
+    or r15, FS_SCRUB_MIRROR
+    jmp .sc_count
+.sc_nomirror:
+    cmp rax, 0
+    jne .sc_err                      ; check error (2)
+.sc_count:
+    ; count orphans: allocated && !=0xFF7 && unvisited
+    lea rbp, [rel fs_vol_dpb]
+    mov r12d, [rbp + DPB64.maxclus]
+    lea r14, [rel fs_vol_fat]
+    xor ecx, ecx                     ; orphan count (RCX)
+    mov ebx, 2
+.orph_sc:
+    cmp ebx, r12d
+    ja .sc_ret
+    push rcx
+    push rbx
+    mov rsi, r14
+    call fs_get_cluster64            ; -> RDI
+    mov r8d, edi
+    mov r9d, eax
+    pop rbx
+    pop rcx
+    test r9d, r9d
+    jnz .next_sc                      ; get failed (oob?) -> not orphan
+    test r8d, r8d
+    jz .next_sc                       ; free
+    cmp r8d, 0xFF7
+    je .next_sc                       ; bad: reserved, not orphan
+    mov eax, ebx
+    lea rdi, [rel fs_scrub_marks]
+    bt dword [rdi], eax
+    jc .next_sc                       ; visited
+    inc rcx
+.next_sc:
+    inc ebx
+    jmp .orph_sc
+.sc_ret:
+    mov rax, r15
+    test rax, rax
+    jnz .sc_bad
+    clc
+    jmp .sc_done
+.sc_bad:
+    stc
+    jmp .sc_done
+.sc_err:
+    mov rax, -1
+    xor ecx, ecx
+    stc
+.sc_done:
+    ; Pops restore every pushed reg except RAX/RCX: RAX carries the
+    ; bitmask (POP never targets it), RCX carries the orphan count
+    ; (never pushed, so it survives directly).
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop r11
+    pop r10
+    pop r9
+    pop r8
+    pop rbp
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rbx
+    ret
+
+; ------------------------------------------------------------
+; fs_vol_reclaim_orphans64 — free orphan (allocated, unvisited) clusters
+;   Out: RAX = reclaimed count, CF=0 ok (flush ok or nothing to do);
+;        CF=1 fail (not mounted or FAT flush failed; RAM still updated
+;        best-effort, disk keeps old state until next successful flush).
+;   Bad clusters (0xFF7) are never reclaimed. Cross-linked clusters are
+;   visited and left alone. Call fs_vol_scrub64 first to diagnose.
+; ------------------------------------------------------------
+fs_vol_reclaim_orphans64:
+    push rbx
+    push rcx
+    push rdx
+    push rsi
+    push rdi
+    push rbp
+    push r8
+    push r9
+    push r10
+    push r11
+    push r12
+    push r13
+    push r14
+    push r15
+    cmp byte [rel fs_vol_mounted], 0
+    je .rc_fail
+    call fs_vol_build_marks
+    jc .rc_fail
+    lea rbp, [rel fs_vol_dpb]
+    mov r12d, [rbp + DPB64.maxclus]
+    lea rsi, [rel fs_vol_fat]
+    xor r15d, r15d                   ; reclaimed
+    mov ebx, 2
+.scan_rc:
+    cmp ebx, r12d
+    ja .flush_rc
+    push rsi
+    push rbx
+    push r15
+    call fs_get_cluster64
+    mov r8d, edi
+    mov r9d, eax
+    pop r15
+    pop rbx
+    pop rsi
+    test r9d, r9d
+    jnz .next_rc
+    test r8d, r8d
+    jz .next_rc
+    cmp r8d, 0xFF7
+    je .next_rc
+    mov eax, ebx
+    lea rdi, [rel fs_scrub_marks]
+    bt dword [rdi], eax
+    jc .next_rc
+    mov rdx, 0
+    push rsi
+    push rbx
+    push r15
+    call fs_set_cluster64
+    mov r10d, eax
+    pop r15
+    pop rbx
+    pop rsi
+    test r10d, r10d
+    jnz .next_rc
+    inc r15d
+.next_rc:
+    inc ebx
+    jmp .scan_rc
+.flush_rc:
+    test r15d, r15d
+    jz .rc_ok0
+    call fs_vol_flush_fat64
+    test rax, rax
+    jnz .rc_flushfail
+.rc_ok0:
+    mov eax, r15d
+    clc
+    jmp .rc_done
+.rc_flushfail:
+    mov eax, r15d
+    stc
+    jmp .rc_done
+.rc_fail:
+    xor eax, eax
+    stc
+.rc_done:
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop r11
+    pop r10
+    pop r9
+    pop r8
+    pop rbp
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rcx
+    pop rbx
+    ret
+
+; ------------------------------------------------------------
 ; fs_alloc_cluster64 — allocate one free cluster (marks EOF)
 ;   Out: RAX = cluster (0 = none/bad), CF 0/1. Flushes FAT on success.
+;   If the FAT flush fails (I/O or injected fault) the RAM entry is
+;   rolled back to free and failure is returned, so RAM and disk stay
+;   at the old consistent state and no dangling dir entry can be
+;   published for the cluster.
 ; ------------------------------------------------------------
 fs_alloc_cluster64:
     push rbx
@@ -2372,9 +2914,16 @@ fs_alloc_cluster64:
     test rax, rax
     jnz .none_ac
     call fs_vol_flush_fat64
+    test rax, rax
+    jnz .rollback_ac
     mov rax, rbx
     clc
     jmp .done_ac
+.rollback_ac:
+    ; Flush failed: roll RAM entry back to free so RAM==disk (old state).
+    mov rdx, 0
+    call fs_set_cluster64
+    jmp .none_ac
 .next_ac:
     inc ebx
     jmp .scan_ac
@@ -2760,10 +3309,16 @@ fs_fcb_close64:
     ret
 
 ; ------------------------------------------------------------
-; fs_fcb_delete64 — delete a root-dir file (free chain, mark 0xE5)
+; fs_fcb_delete64 — delete a root-dir file (mark 0xE5, then free chain)
 ;   In: RDI = FCB64 ptr (name/ext). Out: RAX 0 ok CF=0; 1/CF=1 not found,
 ;   FAT corruption (hop-bound exceeded, best-effort clears flushed), or
-;   root flush failure.
+;   flush failure.
+;   Crash order is root-first: the 0xE5 mark is flushed BEFORE the FAT
+;   chain is freed, so a reset between the two leaves an orphan leak
+;   (deleted entry + still-allocated clusters, reclaimable) and never a
+;   dangling live entry pointing at freed clusters. If the root flush
+;   fails the chain is NOT freed (disk keeps the old live+allocated
+;   state); if the FAT flush fails afterwards the leak is reported.
 ; ------------------------------------------------------------
 fs_fcb_delete64:
     push rbx
@@ -2784,16 +3339,15 @@ fs_fcb_delete64:
     call fs_dir_find64
     jc .fail_dl
     movzx ecx, word [rbx + DIRENT.firstclus]
+    mov r8d, ecx                   ; save chain (flush_root preserves R8)
     mov byte [rbx], 0xE5
-    mov rdi, rcx
-    call fs_vol_free_chain64       ; frees + flushes FAT (ok if 0)
-    mov r8, rax                    ; save free status (FCB no longer needed;
-                                   ; flush_root keeps R8)
-    call fs_vol_flush_root64
+    call fs_vol_flush_root64       ; publish deletion first
     test rax, rax
     jnz .fail_dl
-    test r8, r8                    ; propagate hop-bound corruption
-    jnz .fail_dl
+    mov edi, r8d
+    call fs_vol_free_chain64       ; frees + flushes FAT (ok if 0)
+    test rax, rax                  ; propagate hop-bound/flush failure
+    jnz .fail_dl                   ; (root already deleted: orphan leak)
     xor eax, eax
     jmp .done_dl
 .fail_dl:
@@ -2818,6 +3372,12 @@ fs_fcb_delete64:
 ;   Out: RAX 0 ok CF=0 (RBX=dir entry, FCB firclus/filsiz/lstclus set);
 ;        1/CF=1 dir full, not mounted, FAT corruption on truncate
 ;        (hop-bound exceeded, best-effort clears kept), or flush failure.
+;   Truncate order is root-first: the zeroed size/firstclus is flushed
+;   BEFORE the old chain is freed, so a reset between the two leaves an
+;   orphan leak (truncated entry + still-allocated tail, reclaimable)
+;   and never a dangling entry pointing at freed clusters. R10D carries
+;   the saved old chain (0 = create-new, nothing to free). If the root
+;   flush fails the old chain is NOT freed (disk keeps the old state).
 ; ------------------------------------------------------------
 fs_fcb_create64:
     push rcx
@@ -2838,18 +3398,16 @@ fs_fcb_create64:
     lea rdi, [r8 + FCB64.name]
     call fs_dir_find64
     jc .notfound_cr
-    ; Exists: truncate (free chain, zero size/cluster), keep name/attr/dates.
+    ; Exists: truncate — publish truncation BEFORE freeing (leak-only).
     movzx ecx, word [rbx + DIRENT.firstclus]
     mov r9, rbx
-    mov rdi, rcx
-    call fs_vol_free_chain64
-    mov r10, rax                   ; save free status (flush keeps R10)
+    mov r10d, ecx                ; save old chain (flush keeps R10)
     mov dword [r9 + DIRENT.firstclus], 0
     mov dword [r9 + DIRENT.size], 0
     mov rbx, r9
     jmp .fill_fcb_cr
 .notfound_cr:
-    xor r10d, r10d               ; no prior free status on create-new path
+    xor r10d, r10d               ; create-new: nothing to free afterwards
     call fs_vol_find_free64
     jc .fail_cr
     ; Zero the 32B entry, install name/attr.
@@ -2878,11 +3436,16 @@ fs_fcb_create64:
     jnz .have_rs_cr
     mov dword [r8 + FCB64.recsiz], 128
 .have_rs_cr:
-    call fs_vol_flush_root64
+    call fs_vol_flush_root64     ; publish create/truncate first
+    test rax, rax
+    jnz .fail_cr                 ; root failed: old chain kept on disk
+    cmp r10d, 2
+    jb .done_cr_ok               ; create-new or empty truncate: nothing to free
+    mov edi, r10d
+    call fs_vol_free_chain64     ; free old tail after commit (leak on fail)
     test rax, rax
     jnz .fail_cr
-    test r10, r10                ; propagate truncate hop-bound corruption
-    jnz .fail_cr
+.done_cr_ok:
     xor eax, eax
     jmp .done_cr
 .fail_cr:
@@ -3342,14 +3905,19 @@ fs_make_fcb64:
 ;   In: RDI = FCB64 ptr, RSI = record number (recsiz units, u64),
 ;       RDX = DMA buffer, ECX = record count, R8D = 0 read / 1 write.
 ;   Out: RAX = records transferred; CF 0 ok (read short at EOF is ok),
-;        CF 1 hard fail (ATA/range). Write-through: dir+FAT flushed.
+;        CF 1 hard fail (ATA/range/flush). Write-through FAT-first:
+;        dir entry updated in RAM, then FAT flushed, then root flushed
+;        (see crash model in include/fs.inc). FAT failure skips root.
 ;   Fixed allocation: R13=FCB R14D=recsiz R15=done R12=DMA R11=recno
 ;   R10D=spc_bytes R9=orig filsiz (all survive callees);
 ;   RAX/RCX/RDX/RSI/RDI/RBP/RBX reloaded per call (RBX is scratch:
 ;   the record count lives in a stack local because per-call RBX reuse
 ;   would otherwise destroy it across push/pop callees).
-;   Locals (56B): [rsp]=ci [rsp+8]=intra [rsp+16]=cluster [rsp+24]=fresh
-;   [rsp+32]=pos [rsp+40]=n [rsp+48]=count. Fresh clusters are zeroed.
+;   Locals (64B): [rsp]=ci [rsp+8]=intra [rsp+16]=cluster [rsp+24]=fresh
+;   [rsp+32]=pos [rsp+40]=n [rsp+48]=count [rsp+56]=rw. Fresh clusters
+;   are zeroed. Count AND rw live in stack locals (not RBX/R8D): RBX is
+;   per-call scratch and R8D is caller-saved (clobbered by FAT helpers
+;   across the record loop), so register copies would not survive.
 ; ------------------------------------------------------------
 fs_fcb_io64:
     push rbx
@@ -3366,7 +3934,7 @@ fs_fcb_io64:
     push r13
     push r14
     push r15
-    sub rsp, 56
+    sub rsp, 64
     test ecx, ecx
     jz .io_zero
     test rdx, rdx
@@ -3378,6 +3946,7 @@ fs_fcb_io64:
     mov r13, rdi
     mov r12, rdx
     mov [rsp+48], rcx             ; count (RBX is per-call scratch)
+    mov [rsp+56], r8d             ; rw flag (R8D is caller-saved)
     mov r11, rsi
     mov r15, 0
     call fs_mount_volume64
@@ -3405,8 +3974,8 @@ fs_fcb_io64:
     test rdx, rdx
     jnz .io_hard                  ; absurd position
     mov [rsp+32], rax             ; pos
-    test r8d, r8d
-    jnz .pos_ok
+    cmp dword [rsp+56], 0
+    jne .pos_ok
     cmp rax, [r13 + FCB64.filsiz]
     jae .io_ok                    ; read at/over EOF -> short, CF=0
 .pos_ok:
@@ -3423,8 +3992,8 @@ fs_fcb_io64:
     jbe .n1_io
     mov eax, r14d
 .n1_io:
-    test r8d, r8d
-    jnz .n2_io
+    cmp dword [rsp+56], 0
+    jne .n2_io
     mov rcx, [r13 + FCB64.filsiz]
     sub rcx, [rsp+32]
     cmp rax, rcx
@@ -3437,8 +4006,8 @@ fs_fcb_io64:
     mov [rsp+16], rax
     cmp rax, 2
     jae .walk_io
-    test r8d, r8d
-    jz .io_ok                     ; read, no head (pos<filsiz = corrupt) -> short
+    cmp dword [rsp+56], 0
+    je .io_ok                     ; read, no head (pos<filsiz = corrupt) -> short
     call fs_alloc_cluster64
     test rax, rax
     jz .io_hard
@@ -3466,8 +4035,8 @@ fs_fcb_io64:
     inc rcx
     jmp .walk_loop_io
 .walk_bad_io:
-    test r8d, r8d
-    jz .io_ok                     ; read: chain ends -> short
+    cmp dword [rsp+56], 0
+    je .io_ok                     ; read: chain ends -> short
     call fs_alloc_cluster64
     test rax, rax
     jz .io_hard
@@ -3490,8 +4059,8 @@ fs_fcb_io64:
     call fs_file_read_cluster64
     test rax, rax
     jnz .io_hard
-    test r8d, r8d
-    jnz .do_write_io
+    cmp dword [rsp+56], 0
+    jne .do_write_io
     ; read: iobuf+intra -> DMA + done*recsiz
     lea rsi, [rel fs_vol_iobuf]
     add rsi, [rsp+8]
@@ -3543,8 +4112,8 @@ fs_fcb_io64:
 .io_ok:
     cmp r15, 0
     je .io_ret_ok
-    test r8d, r8d
-    jz .io_ret_ok
+    cmp dword [rsp+56], 0
+    je .io_ret_ok
     lea rbp, [rel fs_vol_dpb]
     lea rsi, [rel fs_vol_root]
     lea rdi, [r13 + FCB64.name]
@@ -3554,10 +4123,17 @@ fs_fcb_io64:
     mov [rbx + DIRENT.firstclus], ax
     mov rax, [r13 + FCB64.filsiz]
     mov [rbx + DIRENT.size], eax
-    call fs_vol_flush_root64
+    ; Commit order is FAT-first: newly linked clusters reach stable
+    ; storage BEFORE the directory entry that points at them, so a
+    ; reset between the two leaves an orphan leak (reclaimable) and
+    ; never a dangling entry pointing at free clusters. If the FAT
+    ; flush fails the root flush is skipped (disk keeps the old
+    ; consistent size/chain); if the root flush fails afterwards the
+    ; leak is reported via CF=1.
+    call fs_vol_flush_fat64
     test rax, rax
     jnz .io_hard
-    call fs_vol_flush_fat64
+    call fs_vol_flush_root64
     test rax, rax
     jnz .io_hard
 .io_ret_ok:
@@ -3570,7 +4146,7 @@ fs_fcb_io64:
     mov rax, r15
     stc
 .io_epi:
-    add rsp, 56
+    add rsp, 64
     pop r15
     pop r14
     pop r13
@@ -3669,5 +4245,12 @@ fs_vol_iobuf:   resb FS_VOL_IOBUF_BYTES    ; cluster staging (spc up to 64)
 fs_vol_mounted: resb 1
 alignb 8
 fs_vol_dirsec:  resq 1         ; cached root size in sectors
+; --- Crash-consistency support (see include/fs.inc model) ---
+; fs_fault_inject: test-only fault mask (FS_FAULT_*), 0 = normal.
+; fs_scrub_marks: 512B visited bitmap (clusters 0..4095) for scrub/reclaim.
+global fs_fault_inject
+fs_fault_inject: resd 1
+alignb 16
+fs_scrub_marks: resb 512
 
 

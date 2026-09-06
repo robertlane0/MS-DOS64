@@ -1,7 +1,7 @@
 # Phase 1 – Boot & Testing Strategy for 64-bit Conversion
 
 > **As built (2026-09-06):** this strategy is implemented — MBR → stage2 →
-> kernel at `0x100000` boots 82/82 PASS + `COMMAND64` REPL on QEMU (primary)
+> kernel at `0x100000` boots 83/83 PASS + `COMMAND64` REPL on QEMU (primary)
 > and Bochs. Concrete sizes/layout below reflect the code; the step rationale
 > is unchanged. See `README.md` + `docs/19-closure-g1-g6.md` for the final
 > state (chunked loads, `KERNEL_SECTORS 176`, FAT12 volume at LBA 512+,
@@ -9,7 +9,9 @@
 > `build/dos64-lean.img` (`SKIP_SELFTEST`, §7.1); tests 73–76 (§7.2) lock in
 > negative-path handling, tests 77–82 (§7.3) lock in cross-layer
 > malformed-input invariants (BPB table + sentinels, pure ATA table,
-> FAT-chain bounds, allocator arithmetic, queue interleave, layout).
+> FAT-chain bounds, allocator arithmetic, queue interleave, layout), and
+> test 83 (§7.4) locks FAT12 crash-ordering (FAT-first commit, mirror
+> heal, scrub/reclaim with fault-injected remounts).
 
 ## 1. Why New Boot Chain Is Needed
 
@@ -162,9 +164,9 @@ wraps the test-calling block in `_start` with a build flag:
 `Makefile` exposes both (objects are kept separate so the images can coexist):
 
 ```bash
-make                    # full: build/dos64.img (RUN_SELFTEST, 82 tests + shell)
+make                    # full: build/dos64.img (RUN_SELFTEST, 83 tests + shell)
 make lean               # lean: build/dos64-lean.img (SKIP_SELFTEST, shell direct)
-make run-qemu           # boot full image, expect "Summary: 82 passed, 0"
+make run-qemu           # boot full image, expect "Summary: 83 passed, 0"
 make run-qemu-lean      # boot lean image, expect "Lean boot ... entering COMMAND64..."
 ```
 
@@ -256,6 +258,29 @@ read-only sampling. Each leaves its subsystem clean for the shell.
   (`191`, `500`-extents) and oversize volumes (`1M` image, `20000`
   sectors) are rejected. `make check-layout-neg` covers the same paths
   from the host side (override + stamper overlap/sector-size rejection).
+
+### 7.4 FAT12 crash-ordering (test 83)
+
+FAT12 has no journal, so consistency is write ordering + mount healing
+(see `include/fs.inc` for the model: extend `data → FAT → root`,
+truncate `root → FAT`, delete `root(0xE5) → FAT`, mirrors `FAT1 → FAT2`
+healed `FAT1`-wins; first-flush failure skips the second, second-flush
+failure reports `CF=1` with an orphan leak). `test_fs_crash` drives the
+real volume with a `CRASH.TXT` scratch file (idempotent pre-clean:
+delete + reclaim + heal, so an aborted run cannot poison the next boot)
+through: baseline create+write (scrub clean, mirrors match); a
+data-written/FAT-old window with injected `FAT1` failure (old size kept,
+scrub clean); a FAT-new/root-old window with FAT flushed and root
+skipped (reachable slack, no `DANGLING` — the fix for the old
+root-then-FAT window); a `FAT2` copy1-new/copy2-old divergence (check
+reports mismatch, remount heals, exactly 1 orphan, reclaim frees it); a
+data-only write to a free cluster (harmless, orphans 0); and a delete
+with `FAT` failure (name gone, 1 orphan, reclaim frees it). Final state
+is clean (gone, orphans 0, mirrors match) for the shell. Faults use the
+sticky `fs_fault_inject` mask (`FS_FAULT_FAT1/FAT2/ROOT`); `fs_vol_discard64`
+drops RAM caches so each remount behaves like a reboot. Power-loss
+consistency here is ordering + healing, NOT transactional (torn
+multi-sector writes stay deterministic via `FAT1`-wins).
 
 ## 8. Bochs Config (AGENTS.md template)
 

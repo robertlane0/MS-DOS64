@@ -1,6 +1,6 @@
 # AGENTS.md: Converting MS-DOS v1.25 ASM to 64-bit BIOS Bootable System
 
-> **Status (2026-09-06): implementation complete — 82/82 self-tests PASS on QEMU
+> **Status (2026-09-06): implementation complete — 83/83 self-tests PASS on QEMU
 > and Bochs, then the interactive `COMMAND64` shell (`src/kernel/shell64.asm`).
 > The phase plan below is kept as the build record; every checklist item is done.
 > Current entry points: `README.md` (what works / memory / disk / shell),
@@ -8,7 +8,8 @@
 > the G1–G6 correctness pass: 77-entry `INT 21h`, real FAT12 volume at LBA 512+,
 > REPL, PIC master `0x28`/slave `0x30`) plus the cross-layer suite 77–82
 > (malformed-BPB table + sentinels, pure ATA table, FAT-chain bounds,
-> allocator arithmetic, queue interleave, layout invariants).
+> allocator arithmetic, queue interleave, layout invariants) and test 83
+> (FAT12 crash-ordering: FAT-first commit, mirror heal, scrub/reclaim).
 
 ## Mission
 You are tasked with converting the MIT-licensed MS-DOS v1.25 assembly code to create a fully 64-bit compatible operating system that boots via BIOS on x86-64 hardware. The target platform is Bochs emulator for testing, with the end goal being a working 64-bit OS that preserves the fundamental architecture and behavior of DOS while operating in long mode.
@@ -555,7 +556,7 @@ make
 make run-qemu
 make run-bochs
 ```
-Expected: 82/82 self-tests PASS on serial, then the `COMMAND64` shell prompt
+Expected: 83/83 self-tests PASS on serial, then the `COMMAND64` shell prompt
 
 **Stage 2: Video Output**
 - Test character output to screen using VGA driver

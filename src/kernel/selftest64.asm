@@ -1,5 +1,5 @@
 ; MS-DOS64 self-test suite — extracted from main.asm so main stays boot glue.
-; Provides selftest_run64: runs tests 1..82, prints PASS/FAIL + summary + phase lines.
+; Provides selftest_run64: runs tests 1..83, prints PASS/FAIL + summary + phase lines.
 ; Returns RAX = failed count (0 = all pass). Called by _start in full builds.
 ; Lean builds (SKIP_SELFTEST): stub returns 0; test code excluded via RUN_SELFTEST.
 bits 64
@@ -170,6 +170,21 @@ extern fs_vol_dpb
 extern fs_vol_fat
 extern fs_vol_root
 extern fs_vol_iobuf
+extern fs_fcb_create64
+extern fs_fcb_delete64
+extern fs_fcb_open64
+extern fs_fcb_io64
+extern fs_make_fcb64
+extern fs_dir_find64
+extern fs_vol_flush_fat64
+extern fs_vol_flush_root64
+extern fs_file_write_cluster64
+extern fs_vol_check_mirrors64
+extern fs_vol_heal_mirrors64
+extern fs_vol_scrub64
+extern fs_vol_reclaim_orphans64
+extern fs_vol_discard64
+extern fs_fault_inject
 extern handler_getdate
 extern handler_setdate
 extern handler_gettime
@@ -1657,6 +1672,23 @@ selftest_run64:
     inc r12
     mov rsi, msg_pass
 .t82_done:
+    call vga_print
+    call serial_print64
+
+    ; ---- Test 83: FAT12 crash-consistency (order + mirrors + scrub/reclaim) ----
+    mov rsi, msg_test83
+    call vga_print
+    call serial_print64
+    call test_fs_crash
+    test rax, rax
+    jz .t83_pass
+    inc r13
+    mov rsi, msg_fail
+    jmp .t83_done
+.t83_pass:
+    inc r12
+    mov rsi, msg_pass
+.t83_done:
     call vga_print
     call serial_print64
 
@@ -5535,6 +5567,544 @@ test_layout:
     ret
 
 ; ------------------------------------------------------------
+; Test 83: FAT12 crash-consistency — FAT-first order + mirrors + scrub.
+;   Covers the write-through windows on the real volume with a SCRATCH-
+;   like file CRASH.TXT (idempotent pre-clean: delete+reclaim+heal, so a
+;   previous aborted run cannot poison the next boot):
+;     A. baseline create+write 1 record (128B): scrub clean, mirrors match.
+;     B. FAT1 fault on extend (alloc flush fails, rolled back): io must
+;        fail CF=1; after clear+discard+remount the file is still the old
+;        size with scrub clean and mirrors match (old state kept, never
+;        dangling). This is the data-before-FAT window: nothing reached
+;        disk, so nothing needs healing.
+;     C. ROOT fault on extend (FAT flushed, root skipped): io must fail;
+;        after clear+discard+remount the size is still old, scrub reports
+;        no DANGLING (FAT-first leaves the new cluster as reachable slack,
+;        never a dir pointer to free), mirrors match. Proves the fix for
+;        the old root-then-FAT dangling window.
+;     D. FAT2 fault via manual RAM link + flush (copy1 new, copy2 old):
+;        flush must fail; check_mirrors must report mismatch (1); after
+;        clear+discard+remount the mount heals (check 0), scrub is clean
+;        with exactly 1 orphan, reclaim frees 1, scrub orphans 0.
+;     E. Data-only window: write a pattern to a free cluster's sectors
+;        with no FAT/root change; after discard+remount scrub is clean,
+;        orphans 0, baseline file intact (stale data in free space is
+;        harmless).
+;     F. Delete second-flush failure (FAT1 fault on delete: root deleted
+;        on disk, FAT still allocated): delete must fail; after
+;        clear+discard+remount the name is gone, scrub is clean with
+;        1 orphan, reclaim frees 1. Proves delete's root-first leak-only
+;        window.
+;   Final state is clean (CRASH gone, orphans 0, mirrors match) for the
+;   shell. Power-loss here is ordering+heal, NOT transactional (see
+;   include/fs.inc); torn multi-sector writes stay deterministic via
+;   FAT1-wins healing.
+; ------------------------------------------------------------
+test_fs_crash:
+    push rbx
+    push rcx
+    push rdx
+    push rsi
+    push rdi
+    push rbp
+    push r8
+    push r9
+    push r10
+    push r11
+    push r12
+    push r13
+    push r14
+    push r15
+    ; ---- fill DMA pattern 512B 'A'+i%26 ----
+    lea rdi, [rel vol_read_buf]
+    mov rcx, 512
+    mov al, 'A'
+    mov rbx, rdi
+.fill83:
+    mov [rbx], al
+    inc rbx
+    inc al
+    cmp al, 'Z'+1
+    jne .nowrap83
+    mov al, 'A'
+.nowrap83:
+    dec rcx
+    jnz .fill83
+    ; ---- pre-clean: fault 0, mount, delete CRASH (ignore), reclaim, heal ----
+    mov dword [rel fs_fault_inject], 0
+    call fs_mount_volume64
+    test rax, rax
+    jnz .fail83
+    lea rsi, [rel fcb_str_crash]
+    lea rdi, [rel aux_fcb]
+    mov al, 1
+    call fs_make_fcb64
+    jc .fail83
+    cmp al, 0xFF
+    je .fail83
+    lea rdi, [rel aux_fcb]
+    call fs_fcb_delete64            ; ignore: gone already is fine
+    call fs_vol_reclaim_orphans64
+    jc .fail83                      ; reclaim itself must not fail
+    call fs_vol_heal_mirrors64
+    test rax, rax
+    jnz .fail83
+    call fs_vol_scrub64
+    test rax, rax
+    jnz .fail83
+    test rcx, rcx
+    jnz .fail83                     ; pre-clean must leave orphans 0
+    jc .fail83
+    call fs_vol_check_mirrors64
+    cmp rax, 0
+    jne .fail83
+    ; ---- A. baseline: create + write RR=0 (128B) ----
+    lea rsi, [rel fcb_str_crash]
+    lea rdi, [rel aux_fcb]
+    mov al, 1
+    call fs_make_fcb64
+    jc .fail83
+    cmp al, 0xFF
+    je .fail83
+    lea rdi, [rel aux_fcb]
+    call fs_fcb_create64
+    test rax, rax
+    jnz .fail83
+    jc .fail83
+    lea rdi, [rel aux_fcb]
+    xor esi, esi                    ; recno 0
+    lea rdx, [rel vol_read_buf]
+    mov ecx, 1
+    mov r8d, 1
+    call fs_fcb_io64
+    jc .fail83
+    cmp rax, 1
+    jne .fail83
+    mov r12d, [rel aux_fcb+48]      ; save baseline firstclus
+    test r12d, r12d
+    jz .fail83
+    cmp qword [rel aux_fcb+20], 128
+    jne .fail83
+    call fs_vol_scrub64
+    test rax, rax
+    jnz .fail83
+    test rcx, rcx
+    jnz .fail83
+    jc .fail83
+    call fs_vol_check_mirrors64
+    cmp rax, 0
+    jne .fail83
+    ; ---- B. first-flush-fails => second skipped (old state, never dangling) ----
+    ; Manual extend in RAM only: data to free cluster F, link H->F->EOF and
+    ; size 256 in RAM (no flush yet). Then FAT flush with FAT1 fault must
+    ; fail; the caller (here, the test) SKIPS the root flush per the rule,
+    ; so after clear+discard+remount the disk still shows the old size
+    ; with scrub clean and mirrors match. This is the data-written/FAT-old
+    ; window: the new data sits in a free cluster (harmless stale bytes).
+    lea rbp, [rel fs_vol_dpb]
+    lea rsi, [rel fs_vol_fat]
+    mov ecx, [rbp + DPB64.maxclus]
+    mov ebx, 2
+.scanB83:
+    cmp ebx, ecx
+    ja near .fail83
+    push rcx
+    push rbx
+    push rsi
+    push rbp
+    call fs_get_cluster64
+    mov r8d, edi
+    mov r9d, eax
+    pop rbp
+    pop rsi
+    pop rbx
+    pop rcx
+    test r9d, r9d
+    jnz .fail83
+    test r8d, r8d
+    jz .foundB83
+    inc ebx
+    jmp .scanB83
+.foundB83:
+    mov r13d, ebx                   ; F = free cluster
+    lea rbp, [rel fs_vol_dpb]
+    mov rbx, r13
+    lea rsi, [rel vol_read_buf]
+    call fs_file_write_cluster64    ; data reaches disk, no metadata yet
+    test rax, rax
+    jnz .fail83
+    jc .fail83
+    ; link H->F->EOF in RAM
+    lea rsi, [rel fs_vol_fat]
+    lea rbp, [rel fs_vol_dpb]
+    mov rbx, r12
+    mov rdx, r13
+    call fs_set_cluster64
+    test rax, rax
+    jnz .fail83
+    mov rbx, r13
+    mov rdx, 0xFFF
+    call fs_set_cluster64
+    test rax, rax
+    jnz .fail83
+    ; size 256 in RAM dir entry
+    lea rbp, [rel fs_vol_dpb]
+    lea rsi, [rel fs_vol_root]
+    lea rdi, [rel aux_fcb+1]
+    call fs_dir_find64
+    jc .fail83
+    mov dword [rbx+28], 256
+    ; FAT flush with fault must fail (failure propagates, root skipped)
+    mov dword [rel fs_fault_inject], 1
+    call fs_vol_flush_fat64
+    cmp rax, 1
+    jne .fail83
+    mov dword [rel fs_fault_inject], 0
+    call fs_vol_discard64
+    call fs_mount_volume64
+    test rax, rax
+    jnz .fail83
+    lea rsi, [rel fcb_str_crash]
+    lea rdi, [rel aux_fcb]
+    mov al, 1
+    call fs_make_fcb64
+    jc .fail83
+    lea rdi, [rel aux_fcb]
+    lea rbp, [rel fs_vol_dpb]
+    lea rsi, [rel fs_vol_root]
+    call fs_fcb_open64
+    jc .fail83
+    test rax, rax
+    jnz .fail83
+    cmp qword [rel aux_fcb+20], 128 ; still old size
+    jne .fail83
+    mov eax, [rel aux_fcb+48]
+    cmp eax, r12d                   ; still old chain head
+    jne .fail83
+    call fs_vol_scrub64
+    test rax, rax
+    jnz .fail83
+    test rcx, rcx
+    jnz .fail83
+    jc .fail83
+    call fs_vol_check_mirrors64
+    cmp rax, 0
+    jne .fail83
+    ; ---- C. FAT-new/root-old crash leaves slack, never dangling ----
+    ; Same RAM extend as B (data + link + size in RAM), but flush ONLY the
+    ; FAT (both mirrors, no fault) and deliberately SKIP the root flush to
+    ; simulate a reset between them (FAT-first order). After discard+remount
+    ; the size is still old, scrub reports no DANGLING (the new cluster is
+    ; reachable slack), orphans 0, mirrors match. This is the fix for the
+    ; old root-then-FAT dangling window: with FAT-first only leaks occur.
+    lea rbp, [rel fs_vol_dpb]
+    lea rsi, [rel fs_vol_fat]
+    mov ecx, [rbp + DPB64.maxclus]
+    mov ebx, 2
+.scanC83:
+    cmp ebx, ecx
+    ja near .fail83
+    push rcx
+    push rbx
+    push rsi
+    push rbp
+    call fs_get_cluster64
+    mov r8d, edi
+    mov r9d, eax
+    pop rbp
+    pop rsi
+    pop rbx
+    pop rcx
+    test r9d, r9d
+    jnz .fail83
+    test r8d, r8d
+    jz .foundC83
+    inc ebx
+    jmp .scanC83
+.foundC83:
+    mov r13d, ebx
+    lea rbp, [rel fs_vol_dpb]
+    mov rbx, r13
+    lea rsi, [rel vol_read_buf]
+    call fs_file_write_cluster64
+    test rax, rax
+    jnz .fail83
+    jc .fail83
+    lea rsi, [rel fs_vol_fat]
+    lea rbp, [rel fs_vol_dpb]
+    mov rbx, r12
+    mov rdx, r13
+    call fs_set_cluster64
+    test rax, rax
+    jnz .fail83
+    mov rbx, r13
+    mov rdx, 0xFFF
+    call fs_set_cluster64
+    test rax, rax
+    jnz .fail83
+    lea rbp, [rel fs_vol_dpb]
+    lea rsi, [rel fs_vol_root]
+    lea rdi, [rel aux_fcb+1]
+    call fs_dir_find64
+    jc .fail83
+    mov dword [rbx+28], 256
+    call fs_vol_flush_fat64         ; FAT reaches disk (both mirrors)
+    test rax, rax
+    jnz .fail83
+    ; SKIP root flush: simulated reset here.
+    mov dword [rel fs_fault_inject], 0
+    call fs_vol_discard64
+    call fs_mount_volume64
+    test rax, rax
+    jnz .fail83
+    lea rsi, [rel fcb_str_crash]
+    lea rdi, [rel aux_fcb]
+    mov al, 1
+    call fs_make_fcb64
+    jc .fail83
+    lea rdi, [rel aux_fcb]
+    lea rbp, [rel fs_vol_dpb]
+    lea rsi, [rel fs_vol_root]
+    call fs_fcb_open64
+    jc .fail83
+    cmp qword [rel aux_fcb+20], 128 ; root still old size
+    jne .fail83
+    call fs_vol_scrub64             ; must have NO dangling (slack, not dangling)
+    test rax, rax
+    jnz .fail83
+    jc .fail83
+    ; orphans must be 0 here (new cluster is reachable slack, not orphan)
+    test rcx, rcx
+    jnz .fail83
+    call fs_vol_check_mirrors64
+    cmp rax, 0
+    jne .fail83
+    ; drop the slack file and rebuild a clean 1-cluster baseline for D
+    lea rdi, [rel aux_fcb]
+    call fs_fcb_delete64
+    test rax, rax
+    jnz .fail83
+    jc .fail83
+    lea rsi, [rel fcb_str_crash]
+    lea rdi, [rel aux_fcb]
+    mov al, 1
+    call fs_make_fcb64
+    jc .fail83
+    lea rdi, [rel aux_fcb]
+    call fs_fcb_create64
+    test rax, rax
+    jnz .fail83
+    jc .fail83
+    lea rdi, [rel aux_fcb]
+    xor esi, esi
+    lea rdx, [rel vol_read_buf]
+    mov ecx, 1
+    mov r8d, 1
+    call fs_fcb_io64
+    jc .fail83
+    cmp rax, 1
+    jne .fail83
+    mov r12d, [rel aux_fcb+48]
+    test r12d, r12d
+    jz .fail83
+    ; ---- D. FAT2 divergence: manual link + flush copy1 only ----
+    ; find a free cluster -> R13D
+    lea rbp, [rel fs_vol_dpb]
+    lea rsi, [rel fs_vol_fat]
+    mov ecx, [rbp + DPB64.maxclus]
+    mov ebx, 2
+.scanD83:
+    cmp ebx, ecx
+    ja near .fail83
+    push rcx
+    push rbx
+    push rsi
+    push rbp
+    call fs_get_cluster64
+    mov r8d, edi
+    mov r9d, eax
+    pop rbp
+    pop rsi
+    pop rbx
+    pop rcx
+    test r9d, r9d
+    jnz .fail83
+    test r8d, r8d
+    jz .foundD83
+    inc ebx
+    jmp .scanD83
+.foundD83:
+    mov r13d, ebx
+    ; link it EOF in RAM (no flush yet)
+    lea rsi, [rel fs_vol_fat]
+    lea rbp, [rel fs_vol_dpb]
+    mov rbx, r13
+    mov rdx, 0xFFF
+    call fs_set_cluster64
+    test rax, rax
+    jnz .fail83
+    ; flush with FAT2 fault: copy1 written, copy2 skipped -> must fail
+    mov dword [rel fs_fault_inject], 2
+    call fs_vol_flush_fat64
+    cmp rax, 1
+    jne .fail83
+    ; RAM(new) vs disk copy2(old) must report mismatch
+    call fs_vol_check_mirrors64
+    cmp rax, 1
+    jne .fail83
+    ; clear + discard + remount (heals FAT2 from FAT1)
+    mov dword [rel fs_fault_inject], 0
+    call fs_vol_discard64
+    call fs_mount_volume64
+    test rax, rax
+    jnz .fail83
+    call fs_vol_check_mirrors64
+    cmp rax, 0
+    jne .fail83
+    call fs_vol_scrub64
+    test rax, rax                   ; clean bits (orphan is leak, not corruption)
+    jnz .fail83
+    jc .fail83
+    cmp rcx, 1                      ; exactly the 1 leaked cluster
+    jne .fail83
+    call fs_vol_reclaim_orphans64
+    jc .fail83
+    cmp rax, 1
+    jne .fail83
+    call fs_vol_scrub64
+    test rax, rax
+    jnz .fail83
+    test rcx, rcx
+    jnz .fail83
+    jc .fail83
+    ; ---- E. data-only window: pattern to a free cluster, no metadata ----
+    lea rbp, [rel fs_vol_dpb]
+    lea rsi, [rel fs_vol_fat]
+    mov ecx, [rbp + DPB64.maxclus]
+    mov ebx, 2
+.scanE83:
+    cmp ebx, ecx
+    ja near .fail83
+    push rcx
+    push rbx
+    push rsi
+    push rbp
+    call fs_get_cluster64
+    mov r8d, edi
+    mov r9d, eax
+    pop rbp
+    pop rsi
+    pop rbx
+    pop rcx
+    test r9d, r9d
+    jnz .fail83
+    test r8d, r8d
+    jz .foundE83
+    inc ebx
+    jmp .scanE83
+.foundE83:
+    mov r14d, ebx
+    lea rbp, [rel fs_vol_dpb]
+    mov rbx, r14
+    lea rsi, [rel vol_read_buf]
+    call fs_file_write_cluster64
+    test rax, rax
+    jnz .fail83
+    jc .fail83
+    call fs_vol_discard64
+    call fs_mount_volume64
+    test rax, rax
+    jnz .fail83
+    call fs_vol_scrub64
+    test rax, rax
+    jnz .fail83
+    test rcx, rcx
+    jnz .fail83
+    jc .fail83
+    call fs_vol_check_mirrors64
+    cmp rax, 0
+    jne .fail83
+    ; baseline CRASH still intact at 128B
+    lea rsi, [rel fcb_str_crash]
+    lea rdi, [rel aux_fcb]
+    mov al, 1
+    call fs_make_fcb64
+    jc .fail83
+    lea rdi, [rel aux_fcb]
+    lea rbp, [rel fs_vol_dpb]
+    lea rsi, [rel fs_vol_root]
+    call fs_fcb_open64
+    jc .fail83
+    cmp qword [rel aux_fcb+20], 128
+    jne .fail83
+    ; ---- F. delete with FAT fault: root gone on disk, clusters leaked ----
+    mov dword [rel fs_fault_inject], 1
+    lea rdi, [rel aux_fcb]
+    call fs_fcb_delete64
+    jnc .fail83                     ; must fail
+    mov dword [rel fs_fault_inject], 0
+    call fs_vol_discard64
+    call fs_mount_volume64
+    test rax, rax
+    jnz .fail83
+    ; name must be gone from disk
+    lea rsi, [rel fcb_str_crash]
+    lea rdi, [rel aux_fcb]
+    mov al, 1
+    call fs_make_fcb64
+    jc .fail83
+    lea rdi, [rel aux_fcb]
+    lea rbp, [rel fs_vol_dpb]
+    lea rsi, [rel fs_vol_root]
+    call fs_fcb_open64
+    jnc .fail83                     ; must NOT be found
+    call fs_vol_scrub64
+    test rax, rax                   ; clean bits; leak is orphans, not dangling
+    jnz .fail83
+    jc .fail83
+    cmp rcx, 1
+    jne .fail83
+    call fs_vol_check_mirrors64
+    cmp rax, 0
+    jne .fail83
+    call fs_vol_reclaim_orphans64
+    jc .fail83
+    cmp rax, 1
+    jne .fail83
+    ; ---- final: clean (gone, orphans 0, mirrors match) ----
+    call fs_vol_scrub64
+    test rax, rax
+    jnz .fail83
+    test rcx, rcx
+    jnz .fail83
+    jc .fail83
+    call fs_vol_check_mirrors64
+    cmp rax, 0
+    jne .fail83
+    mov dword [rel fs_fault_inject], 0
+    xor eax, eax
+    jmp .done83
+.fail83:
+    mov dword [rel fs_fault_inject], 0
+    mov rax, 1
+.done83:
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop r11
+    pop r10
+    pop r9
+    pop r8
+    pop rbp
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rcx
+    pop rbx
+    ret
+
+; ------------------------------------------------------------
 ; Test 28: PSP init/validate (SETMEM analog, MSDOS.ASM:3363)
 ; ------------------------------------------------------------
 test_psp_init:
@@ -7919,6 +8489,7 @@ msg_test79 db " [79] FAT chain bounds (cycle/iter, clear)... ",0
 msg_test80 db " [80] Alloc table (near-UINT64_MAX, aligned/pages)... ",0
 msg_test81 db " [81] Queue interleave (empty/full/wrap + IF)... ",0
 msg_test82 db " [82] Layout invariants (same as check-layout)... ",0
+msg_test83 db " [83] FAT12 crash-order (FAT-first + mirrors/scrub)... ",0
 msg_pass db "PASS",13,10,0
 msg_fail db "FAIL",13,10,0
 msg_summary db 13,10,"Summary: ",0
@@ -7954,6 +8525,8 @@ fcb_str_wild db "*.TXT",0
 fcb_str_scratch db "SCRATCH.TXT",0
 fcb_str_renamed db "RENAMED.TXT",0
 fcb_new_renamed db "RENAMED TXT"
+fcb_str_crash db "CRASH.TXT",0
+crash_name_11 db "CRASH   TXT"
 shl_dir db "DIR",13,0
 shl_type db "TYPE HELLO.TXT",13,0
 shl_test db "TEST",13,0

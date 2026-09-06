@@ -66,7 +66,7 @@ NASM := nasm
 NASM_BIN := $(NASM) -f bin -Wall -Werror -Wno-reloc-abs-word -Wno-reloc-abs-dword -Wno-reloc-abs-qword
 NASM_ELF := $(NASM) -f elf64 -g -F dwarf -Wall -Werror -Wno-reloc-abs-word -Wno-reloc-rel-dword -Wno-reloc-abs-qword -I.
 # Self-test control (docs/05 §7): default full build runs the suite.
-#   Full: -DRUN_SELFTEST (default) -> _start runs tests 1..82 then shell.
+#   Full: -DRUN_SELFTEST (default) -> _start runs tests 1..83 then shell.
 #   Lean: -DSKIP_SELFTEST -> _start skips suite, minimal init, shell direct.
 # Override with `make NASM_DEFS=-DSKIP_SELFTEST` or `make lean`.
 NASM_DEFS ?= -DRUN_SELFTEST
