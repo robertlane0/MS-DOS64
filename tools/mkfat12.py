@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Stamp a real FAT12 volume into dos64.img at VOL_LBA (default 512).
+"""Stamp a real FAT12 volume into dos64.img at the canonical VOL_LBA.
 
 Layout (1.44M geometry, 2880 sectors):
   LBA+0        : boot sector with BPB + AA55 (data only; never executed)
@@ -14,31 +14,26 @@ Idempotent: rebuilds the region from scratch on every run so repeated
   README.TXT 2 clusters  volume notes (exercises FAT chaining)
   TEST.COM   1 cluster   single RET (minimal EXEC/loader target)
   DATA.BIN   1 cluster   0x00..0xFF pattern
+
+Single source of truth: the Makefile disk-layout block is canonical. It
+generates build/include/layout.inc for the bootloader/kernel and passes
+the same numbers here explicitly on every invocation, e.g.::
+
+  python3 tools/mkfat12.py --vol-lba 512 --vol-totsec 2880 \\
+      --sector-size 512 --kernel-lba 16 --kernel-sectors 176 build/dos64.img
+
+This script owns NO hardcoded layout defaults: every layout value must
+arrive via CLI flag or its DOS64_* env fallback (DOS64_VOL_LBA,
+DOS64_VOL_TOTSEC, DOS64_SECSIZ, DOS64_KERNEL_LBA, DOS64_KERNEL_SECTORS).
+A missing value is fatal, so a half-relocated image can never be stamped
+silently. The kernel/volume extents must not overlap, and the stamp is
+read back (BPB TotSec16 + AA55) before reporting success.
 """
+import argparse
 import os
 import struct
 import sys
 
-# Disk-layout numbers shared with the Makefile (single source of truth for
-# image creation) and include/fs.inc (FS_VOL_LBA/FS_VOL_TOTSEC, consumed by
-# the kernel) — see also README.md "Disk layout". The Makefile exports
-# DOS64_VOL_LBA / DOS64_VOL_TOTSEC / DOS64_SECSIZ when invoking this script
-# so `dd` and the stamp step cannot drift apart; the defaults below match
-# `Makefile: IMG_MB=10 VOL_LBA=512 VOL_SECTORS=2880` and are used for direct
-# invocations. `make check-layout` enforces that all three copies agree.
-def _env_int(name, default):
-    raw = os.environ.get(name)
-    if raw is None or raw == "":
-        return default
-    try:
-        return int(raw, 0)
-    except ValueError:
-        sys.exit(f"mkfat12: invalid {name}={raw!r}: expected integer")
-
-
-VOL_LBA = _env_int("DOS64_VOL_LBA", 512)
-SECSIZ = _env_int("DOS64_SECSIZ", 512)
-TOTSEC = _env_int("DOS64_VOL_TOTSEC", 2880)
 FATSZ = 9
 ROOTSEC = 14
 NROOT = 224
@@ -58,11 +53,95 @@ TESTCOM = b"\xc3"  # RET — minimal COM: loader copies it, entry = PSP+512
 DATA = bytes(range(256)) * 2  # 512B pattern
 
 
+def _env_int(name):
+    """Return int(os.environ[name]) or None when unset/empty.
+
+    Never supplies a layout default: callers must pass the value
+    explicitly (CLI flag preferred). Exits only on malformed integers.
+    """
+    raw = os.environ.get(name)
+    if raw is None or raw == "":
+        return None
+    try:
+        return int(raw, 0)
+    except ValueError:
+        sys.exit(f"mkfat12: invalid {name}={raw!r}: expected integer")
+
+
+def _resolve(cli_value, env_name, flag):
+    if cli_value is not None:
+        return cli_value
+    value = _env_int(env_name)
+    if value is not None:
+        return value
+    sys.exit(f"mkfat12: missing layout value: pass {flag} (or set {env_name}). "
+             f"Canonical values live in the Makefile disk-layout block.")
+
+
+def _int(s):
+    return int(s, 0)
+
+
+def parse_args(argv=None):
+    p = argparse.ArgumentParser(
+        description="Stamp the canonical FAT12 volume into a dos64 image. "
+                    "All layout values are required (no built-in defaults).")
+    p.add_argument("--vol-lba", type=_int, default=None,
+                   help="volume start LBA (or DOS64_VOL_LBA)")
+    p.add_argument("--vol-totsec", "--vol-sectors", dest="vol_totsec",
+                   type=_int, default=None,
+                   help="volume size in sectors (or DOS64_VOL_TOTSEC)")
+    p.add_argument("--sector-size", "--secsiz", dest="sector_size",
+                   type=_int, default=None,
+                   help="bytes/sector, must be 512 (or DOS64_SECSIZ)")
+    p.add_argument("--kernel-lba", type=_int, default=None,
+                   help="kernel start LBA, for overlap check (or DOS64_KERNEL_LBA)")
+    p.add_argument("--kernel-sectors", type=_int, default=None,
+                   help="kernel extent in sectors, for overlap check (or DOS64_KERNEL_SECTORS)")
+    p.add_argument("image", nargs="?", default="build/dos64.img",
+                   help="image file to stamp (default: build/dos64.img)")
+    return p.parse_args(argv)
+
+
 def chain_for(nclusters, start):
     return list(range(start, start + nclusters))
 
 
-def main(img_path):
+def main(img_path=None, argv=None):
+    """Entry point. CLI: main() parses sys.argv. Programmatic legacy
+    style main("path/to.img") still works (layout via DOS64_* env)."""
+    if argv is not None:
+        args = parse_args(argv)
+        if img_path is not None:
+            args.image = img_path
+    elif img_path is not None:
+        # Legacy programmatic call: do not touch sys.argv; layout comes
+        # from the DOS64_* environment.
+        args = parse_args([])
+        args.image = img_path
+    else:
+        args = parse_args(None)
+    img_path = args.image
+    VOL_LBA = _resolve(args.vol_lba, "DOS64_VOL_LBA", "--vol-lba")
+    TOTSEC = _resolve(args.vol_totsec, "DOS64_VOL_TOTSEC", "--vol-totsec")
+    SECSIZ = _resolve(args.sector_size, "DOS64_SECSIZ", "--sector-size")
+    KERNEL_LBA = _resolve(args.kernel_lba, "DOS64_KERNEL_LBA", "--kernel-lba")
+    KERNEL_SECTORS = _resolve(args.kernel_sectors, "DOS64_KERNEL_SECTORS",
+                              "--kernel-sectors")
+
+    if SECSIZ != 512:
+        sys.exit(f"mkfat12: unsupported sector size {SECSIZ}: "
+                 f"FAT12 geometry assumes 512 (canonical Makefile value)")
+    if VOL_LBA < 0 or TOTSEC <= 0:
+        sys.exit(f"mkfat12: bad volume extent LBA {VOL_LBA}+{TOTSEC}")
+    if KERNEL_LBA < 0 or KERNEL_SECTORS <= 0:
+        sys.exit(f"mkfat12: bad kernel extent LBA {KERNEL_LBA}+{KERNEL_SECTORS}")
+    k_end = KERNEL_LBA + KERNEL_SECTORS
+    v_end = VOL_LBA + TOTSEC
+    if KERNEL_LBA < v_end and VOL_LBA < k_end:
+        sys.exit(f"mkfat12: layout overlap: kernel [{KERNEL_LBA},{k_end}) "
+                 f"vs volume [{VOL_LBA},{v_end})")
+
     files = [
         ("HELLO   TXT", 0x20, HELLO),
         ("README  TXT", 0x20, README),
@@ -153,11 +232,20 @@ def main(img_path):
         with open(img_path, "r+b") as f:
             f.seek(VOL_LBA * SECSIZ)
             f.write(vol)
+            # Read-back verification: the stamped boot sector must carry
+            # the requested geometry before we declare success.
+            f.seek(VOL_LBA * SECSIZ)
+            back = f.read(SECSIZ)
     except OSError as e:
         sys.exit(f"mkfat12: cannot write {img_path}: {e}")
+    (tot_back,) = struct.unpack_from("<H", back, 19)
+    (sig_back,) = struct.unpack_from("<H", back, 510)
+    if tot_back != TOTSEC or sig_back != 0xAA55:
+        sys.exit(f"mkfat12: read-back mismatch at LBA {VOL_LBA}: "
+                 f"TotSec16={tot_back} (want {TOTSEC}) sig={sig_back:#x}")
     print(f"mkfat12: stamped {TOTSEC} sectors ({len(vol)}B) at LBA {VOL_LBA} "
           f"in {img_path}: " + ", ".join(n.strip() for n, _, _, _ in layout))
 
 
 if __name__ == "__main__":
-    main(sys.argv[1] if len(sys.argv) > 1 else "build/dos64.img")
+    main()

@@ -235,7 +235,7 @@ dd if=/dev/zero of=build/dos64.img bs=1M count=10
 dd if=build/mbr.bin of=build/dos64.img conv=notrunc
 dd if=build/stage2.bin of=build/dos64.img bs=512 seek=1 conv=notrunc
 dd if=build/kernel.bin of=build/dos64.img bs=512 seek=16 conv=notrunc  # or via stage2 LBA loader
-python3 tools/mkfat12.py build/dos64.img  # stamps FAT12 volume at LBA 512+
+python3 tools/mkfat12.py --vol-lba 512 --vol-totsec 2880 --sector-size 512 --kernel-lba 16 --kernel-sectors 176 build/dos64.img  # stamps FAT12 volume (canonical values: Makefile disk-layout block)
 make run-qemu   # or: bochs -f bochsrc.txt -q
 ```
 

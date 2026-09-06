@@ -67,6 +67,11 @@ are the audit trail for the last correctness pass.
 
 ## Disk layout (`build/dos64.img`, 10 MiB)
 
+Canonical values live in the Makefile disk-layout block, which generates
+`build/include/layout.inc` for the bootloader/kernel and passes the same
+numbers explicitly to `tools/mkfat12.py` (`make check-layout`, a
+prerequisite of every image build, enforces this).
+
 | LBA | Contents |
 |---|---|
 | 0 | MBR + boot signature `55 AA` |

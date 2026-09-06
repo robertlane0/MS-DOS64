@@ -46,18 +46,23 @@ endstruc
 %define FAT12_EOF    0xFFF
 %define FAT12_MAXCLUS 4080  ; clusters <4080 valid (MSDOS dir firstclus comment)
 
-; --- Phase 7 scratch LBAs on dos64.img (10M, ~20480 sectors) ---
-; Kernel occupies LBA 16..79 (64 sectors). ATA Phase-5 test uses LBA 100.
+; --- Phase 7 scratch LBAs on dos64.img (IMG_MB, see Makefile) ---
+; Kernel occupies [KERNEL_LBA, KERNEL_LBA+KERNEL_SECTORS).
+; ATA Phase-5 test uses LBA 100.
 ; Phase-7 FS tests use 500..511 (12 sectors) — safely beyond kernel, below end.
 %define FS_SCRATCH_LBA   500
 %define FS_SCRATCH_LBA2  501
 %define FS_FILE_LBA_BASE 510  ; file-data base when DPB firrec remapped for test [26]
 
 ; --- Real on-image FAT12 volume (tools/mkfat12.py, 1.44M geometry) ---
-; LBA 512..3391: boot+BPB, 2x9 FAT, 14-sec root, data clusters 2..2848.
-; Clear of kernel (16..~119), ATA scratch (200), FS scratch (500..511).
-%define FS_VOL_LBA       512
-%define FS_VOL_TOTSEC    2880
+; Extent [FS_VOL_LBA, FS_VOL_LBA+FS_VOL_TOTSEC): boot+BPB, 2x9 FAT,
+; 14-sec root, data clusters 2..2848. Must stay clear of the kernel
+; extent [KERNEL_LBA, KERNEL_LBA+KERNEL_SECTORS), ATA scratch (200),
+; and FS scratch (500..511).
+; Single source of truth: the Makefile disk-layout block generates
+; build/include/layout.inc, which defines FS_VOL_LBA / FS_VOL_TOTSEC
+; (aliases of VOL_LBA / VOL_SECTORS). Do not hardcode values here.
+%include "build/include/layout.inc"
 
 ; --- Mounted-volume cache policy (fs_mount_volume64, fs_vol_validate64) ---
 ; The mount path caches the volume in fixed BSS buffers (see fs64.asm).

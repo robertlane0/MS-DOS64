@@ -10,8 +10,10 @@ org 0x7E00
     ; if we include here again after the jump, we duplicate: so guard ensures only one copy.
     ; To avoid duplication, we rely on the jmpover: GDT sits between jump and entry, not executed.
 
-KERNEL_LBA       equ 16
-KERNEL_SECTORS   equ 176        ; 88 KiB — shell+tests headroom (was 160)
+; Disk layout (KERNEL_LBA / KERNEL_SECTORS) is single-sourced in the
+; Makefile disk-layout block and generated into build/include/layout.inc
+; (88 KiB = 176 sectors of shell+tests headroom). Do not hardcode here.
+%include "build/include/layout.inc"
 KERNEL_STAGING_SEG  equ 0x7000
 KERNEL_STAGING_OFF  equ 0x0000  ; linear 0x70000 - staging buffer in low memory
 KERNEL_DEST_LINEAR  equ 0x100000
