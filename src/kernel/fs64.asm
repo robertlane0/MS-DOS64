@@ -49,6 +49,7 @@ global fs_vol_boot
 global fs_vol_mounted
 global fs_file_write_cluster64
 global fs_vol_find_free64
+global fs_chain_free_mem64
 global fs_vol_free_chain64
 global fs_fcb_close64
 global fs_fcb_delete64
@@ -1140,6 +1141,182 @@ fs_test_chain:
     call fs_set_cluster64
     test rax, rax
     jz .fail
+    ; ---- free-chain hop bound (fs_chain_free_mem64, in-memory fixture) ----
+    ; Synthetic DPB in fs_dpb_scratch (parsed, then maxclus overridden for
+    ; small-bound tests); FAT in fs_fat_buf (re-zeroed per case). Proves:
+    ; empty/no-op, valid EOF ok + cleared, 2->3->2 corrupt, 2->2 corrupt,
+    ; long 2->3->4->2 corrupt, all bounded (return) with best-effort clears.
+    lea rsi, [rel fs_boot144]
+    lea rbp, [rel fs_dpb_scratch]
+    call fs_bpb_parse64
+    test rax, rax
+    jnz .fail
+    ; Empty/free is a no-op success (no FAT touch needed).
+    lea rsi, [rel fs_fat_buf]
+    lea rbp, [rel fs_dpb_scratch]
+    mov rdi, 0
+    call fs_chain_free_mem64
+    jc .fail
+    test rax, rax
+    jnz .fail
+    mov rdi, 1
+    call fs_chain_free_mem64
+    jc .fail
+    test rax, rax
+    jnz .fail
+    ; Valid EOF chain 2->3->EOF with maxclus=10 => ok, entries cleared.
+    mov dword [rbp + DPB64.maxclus], 10
+    lea rdi, [rel fs_fat_buf]
+    mov rcx, 64
+    xor eax, eax
+.zero_fc1:
+    mov [rdi], al
+    inc rdi
+    dec rcx
+    jnz .zero_fc1
+    lea rsi, [rel fs_fat_buf]
+    lea rbp, [rel fs_dpb_scratch]
+    mov rbx, 2
+    mov rdx, 3
+    call fs_set_cluster64
+    test rax, rax
+    jnz .fail
+    mov rbx, 3
+    mov rdx, 0xFFF
+    call fs_set_cluster64
+    test rax, rax
+    jnz .fail
+    mov rdi, 2
+    call fs_chain_free_mem64
+    jc .fail
+    test rax, rax
+    jnz .fail
+    mov rbx, 2
+    call fs_get_cluster64
+    test rax, rax
+    jnz .fail
+    test rdi, rdi
+    jnz .fail
+    mov rbx, 3
+    call fs_get_cluster64
+    test rax, rax
+    jnz .fail
+    test rdi, rdi
+    jnz .fail
+    ; Cycle 2->3->2 with maxclus=3 => corruption, best-effort cleared.
+    mov dword [rbp + DPB64.maxclus], 3
+    lea rdi, [rel fs_fat_buf]
+    mov rcx, 64
+    xor eax, eax
+.zero_fc2:
+    mov [rdi], al
+    inc rdi
+    dec rcx
+    jnz .zero_fc2
+    lea rsi, [rel fs_fat_buf]
+    mov rbx, 2
+    mov rdx, 3
+    call fs_set_cluster64
+    test rax, rax
+    jnz .fail
+    mov rbx, 3
+    mov rdx, 2
+    call fs_set_cluster64
+    test rax, rax
+    jnz .fail
+    mov rdi, 2
+    call fs_chain_free_mem64
+    jnc .fail
+    cmp rax, 1
+    jne .fail
+    mov rbx, 2
+    call fs_get_cluster64
+    test rax, rax
+    jnz .fail
+    test rdi, rdi
+    jnz .fail
+    mov rbx, 3
+    call fs_get_cluster64
+    test rax, rax
+    jnz .fail
+    test rdi, rdi
+    jnz .fail
+    ; Self-loop 2->2 with maxclus=2 => corruption, entry cleared.
+    mov dword [rbp + DPB64.maxclus], 2
+    lea rdi, [rel fs_fat_buf]
+    mov rcx, 64
+    xor eax, eax
+.zero_fc3:
+    mov [rdi], al
+    inc rdi
+    dec rcx
+    jnz .zero_fc3
+    lea rsi, [rel fs_fat_buf]
+    mov rbx, 2
+    mov rdx, 2
+    call fs_set_cluster64
+    test rax, rax
+    jnz .fail
+    mov rdi, 2
+    call fs_chain_free_mem64
+    jnc .fail
+    cmp rax, 1
+    jne .fail
+    mov rbx, 2
+    call fs_get_cluster64
+    test rax, rax
+    jnz .fail
+    test rdi, rdi
+    jnz .fail
+    ; Long cycle 2->3->4->2 with maxclus=4 => corruption, all cleared.
+    mov dword [rbp + DPB64.maxclus], 4
+    lea rdi, [rel fs_fat_buf]
+    mov rcx, 64
+    xor eax, eax
+.zero_fc4:
+    mov [rdi], al
+    inc rdi
+    dec rcx
+    jnz .zero_fc4
+    lea rsi, [rel fs_fat_buf]
+    mov rbx, 2
+    mov rdx, 3
+    call fs_set_cluster64
+    test rax, rax
+    jnz .fail
+    mov rbx, 3
+    mov rdx, 4
+    call fs_set_cluster64
+    test rax, rax
+    jnz .fail
+    mov rbx, 4
+    mov rdx, 2
+    call fs_set_cluster64
+    test rax, rax
+    jnz .fail
+    mov rdi, 2
+    call fs_chain_free_mem64
+    jnc .fail
+    cmp rax, 1
+    jne .fail
+    mov rbx, 2
+    call fs_get_cluster64
+    test rax, rax
+    jnz .fail
+    test rdi, rdi
+    jnz .fail
+    mov rbx, 3
+    call fs_get_cluster64
+    test rax, rax
+    jnz .fail
+    test rdi, rdi
+    jnz .fail
+    mov rbx, 4
+    call fs_get_cluster64
+    test rax, rax
+    jnz .fail
+    test rdi, rdi
+    jnz .fail
     xor eax, eax
     jmp .done
 .fail:
@@ -2404,9 +2581,86 @@ fs_vol_find_free64:
     ret
 
 ; ------------------------------------------------------------
+; fs_chain_free_mem64 — free chain in explicit FAT buffer with hop bound
+;   In: RDI = first cluster, RSI = FAT base linear, RBP = DPB ptr.
+;   Out: RAX 0 ok CF=0; 1 hop-bound exceeded (corruption) CF=1.
+;   Best-effort: visited entries cleared to 0 in both cases. Empty (<2)
+;   => 0 (no-op). Success terminators (preserved legacy):
+;   next <2, next >maxclus, next >=0xFF8 (EOF). Untrusted on-disk FAT is
+;   bounded: hops counts each visited cluster (2..maxclus); fails when
+;   hops >= maxclus, i.e. hops > max_data_clusters (maxclus-1), the
+;   maximum possible distinct data clusters. NULL RSI/RBP or maxclus<2
+;   with a non-empty chain => corruption (bound cannot be proven).
+; ------------------------------------------------------------
+fs_chain_free_mem64:
+    push rbx
+    push rcx
+    push rdx
+    push rsi
+    push rdi
+    push rbp
+    push r8
+    push r9
+    push r10
+    cmp rdi, 2
+    jb .done_ok_cm
+    test rsi, rsi
+    jz .corrupt_cm
+    test rbp, rbp
+    jz .corrupt_cm
+    mov ecx, [rbp + DPB64.maxclus]
+    cmp ecx, 2
+    jb .corrupt_cm
+    mov r10, rcx                  ; R10 = maxclus bound (get/set keep R10)
+    mov rbx, rdi
+    xor r9d, r9d                  ; R9 = hops (get keeps R9, set restores R9)
+.next_cm:
+    cmp rbx, 2
+    jb .done_ok_cm
+    mov ecx, [rbp + DPB64.maxclus]
+    cmp rbx, rcx
+    ja .done_ok_cm
+    inc r9
+    cmp r9, r10
+    jae .corrupt_cm               ; hops >= maxclus => exceeds max_data
+    call fs_get_cluster64            ; RSI,RBX,RBP -> RDI=next
+    mov r8, rdi                      ; next (R8 survives set below)
+    mov rdx, 0
+    call fs_set_cluster64            ; clear current (RBX restored by callee)
+    mov rdi, r8
+    cmp rdi, 0xFF8
+    jae .done_ok_cm
+    cmp rdi, 2
+    jb .done_ok_cm
+    mov rbx, rdi
+    jmp .next_cm
+.corrupt_cm:
+    mov rax, 1
+    stc
+    jmp .done_cm
+.done_ok_cm:
+    xor eax, eax
+    clc
+.done_cm:
+    pop r10
+    pop r9
+    pop r8
+    pop rbp
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rcx
+    pop rbx
+    ret
+
+; ------------------------------------------------------------
 ; fs_vol_free_chain64 — release a cluster chain (FAT entries -> 0)
 ;   In: RDI = first cluster (0/1 = nothing to do).
-;   Out: RAX 0 ok (flushes FAT unless empty), CF 0.
+;   Out: RAX 0 ok CF=0 (flushes FAT unless empty);
+;        RAX 1 CF=1 hop-bound corruption (best-effort clears flushed)
+;        or FAT flush failure.
+;   Hop bound is derived from the validated mounted geometry
+;   (DPB maxclus); see fs_chain_free_mem64.
 ; ------------------------------------------------------------
 fs_vol_free_chain64:
     push rbx
@@ -2416,35 +2670,31 @@ fs_vol_free_chain64:
     push rdi
     push rbp
     push r8
+    push r9
+    push r10
     cmp byte [rel fs_vol_mounted], 0
-    je .done_fc
+    je .done_fc_ok
     cmp rdi, 2
-    jb .done_fc
+    jb .done_fc_ok
     lea rbp, [rel fs_vol_dpb]
     lea rsi, [rel fs_vol_fat]
-    mov rbx, rdi
-.next_fc:
-    cmp rbx, 2
-    jb .flush_fc
-    mov ecx, [rbp + DPB64.maxclus]
-    cmp rbx, rcx
-    ja .flush_fc
-    call fs_get_cluster64            ; RSI,RBX,RBP -> RDI=next
-    mov r8, rdi                      ; next (R8 survives set below)
-    mov rdx, 0
-    call fs_set_cluster64            ; clear current (RBX restored by callee)
-    mov rdi, r8
-    cmp rdi, 0xFF8
-    jae .flush_fc
-    cmp rdi, 2
-    jb .flush_fc
-    mov rbx, rdi
-    jmp .next_fc
-.flush_fc:
-    call fs_vol_flush_fat64
-.done_fc:
+    call fs_chain_free_mem64       ; RDI/RSI/RBP -> RAX core status
+    mov r10, rax                   ; save core status (flush keeps R10)
+    call fs_vol_flush_fat64        ; best-effort write-back in both cases
+    test r10, r10
+    jnz .done_fc_corrupt           ; hop-bound corruption dominates
+    test rax, rax
+    jnz .done_fc_corrupt           ; flush I/O failure
+.done_fc_ok:
     xor eax, eax
     clc
+    jmp .done_fc
+.done_fc_corrupt:
+    mov rax, 1
+    stc
+.done_fc:
+    pop r10
+    pop r9
     pop r8
     pop rbp
     pop rdi
@@ -2510,7 +2760,9 @@ fs_fcb_close64:
 
 ; ------------------------------------------------------------
 ; fs_fcb_delete64 — delete a root-dir file (free chain, mark 0xE5)
-;   In: RDI = FCB64 ptr (name/ext). Out: RAX 0 ok CF=0; 1/CF=1 not found.
+;   In: RDI = FCB64 ptr (name/ext). Out: RAX 0 ok CF=0; 1/CF=1 not found,
+;   FAT corruption (hop-bound exceeded, best-effort clears flushed), or
+;   root flush failure.
 ; ------------------------------------------------------------
 fs_fcb_delete64:
     push rbx
@@ -2534,8 +2786,12 @@ fs_fcb_delete64:
     mov byte [rbx], 0xE5
     mov rdi, rcx
     call fs_vol_free_chain64       ; frees + flushes FAT (ok if 0)
+    mov r8, rax                    ; save free status (FCB no longer needed;
+                                   ; flush_root keeps R8)
     call fs_vol_flush_root64
     test rax, rax
+    jnz .fail_dl
+    test r8, r8                    ; propagate hop-bound corruption
     jnz .fail_dl
     xor eax, eax
     jmp .done_dl
@@ -2559,7 +2815,8 @@ fs_fcb_delete64:
 ; fs_fcb_create64 — create (or truncate) a root-dir file
 ;   In: RDI = FCB64 ptr (drive/name/ext; recsiz defaulted to 128).
 ;   Out: RAX 0 ok CF=0 (RBX=dir entry, FCB firclus/filsiz/lstclus set);
-;        1/CF=1 dir full (or not mounted).
+;        1/CF=1 dir full, not mounted, FAT corruption on truncate
+;        (hop-bound exceeded, best-effort clears kept), or flush failure.
 ; ------------------------------------------------------------
 fs_fcb_create64:
     push rcx
@@ -2569,6 +2826,7 @@ fs_fcb_create64:
     push rbp
     push r8
     push r9
+    push r10
     cmp byte [rel fs_vol_mounted], 0
     je .fail_cr
     test rdi, rdi
@@ -2584,11 +2842,13 @@ fs_fcb_create64:
     mov r9, rbx
     mov rdi, rcx
     call fs_vol_free_chain64
+    mov r10, rax                   ; save free status (flush keeps R10)
     mov dword [r9 + DIRENT.firstclus], 0
     mov dword [r9 + DIRENT.size], 0
     mov rbx, r9
     jmp .fill_fcb_cr
 .notfound_cr:
+    xor r10d, r10d               ; no prior free status on create-new path
     call fs_vol_find_free64
     jc .fail_cr
     ; Zero the 32B entry, install name/attr.
@@ -2620,6 +2880,8 @@ fs_fcb_create64:
     call fs_vol_flush_root64
     test rax, rax
     jnz .fail_cr
+    test r10, r10                ; propagate truncate hop-bound corruption
+    jnz .fail_cr
     xor eax, eax
     jmp .done_cr
 .fail_cr:
@@ -2630,6 +2892,7 @@ fs_fcb_create64:
 .done_cr:
     clc
 .done_cr2:
+    pop r10
     pop r9
     pop r8
     pop rbp
