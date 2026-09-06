@@ -252,6 +252,7 @@ extern stack_test_push
 extern stack_test_canary
 extern stack_test_stress
 extern serial_print64
+extern serial_try_putc64
 
 %ifdef RUN_SELFTEST
 
@@ -1755,16 +1756,9 @@ print_char_vga_serial:
     movzx edi, r8b
     mov al, r8b
     call vga_putc
-    ; serial: wait for THR empty then out
+    ; serial: bounded best-effort (drop on timeout, never hang the suite)
     mov al, r8b
-.wait:
-    mov dx, 0x3FD
-    in al, dx
-    test al, 0x20
-    jz .wait
-    mov al, r8b
-    mov dx, 0x3F8
-    out dx, al
+    call serial_try_putc64      ; CF ignored
     pop r8
     pop rdx
     pop rax
@@ -1790,14 +1784,7 @@ print_num_vga_serial:
     mov al, r8b
     call vga_putc
     mov al, r8b
-.wait1:
-    mov dx, 0x3FD
-    in al, dx
-    test al, 0x20
-    jz .wait1
-    mov al, r8b
-    mov dx, 0x3F8
-    out dx, al
+    call serial_try_putc64      ; CF ignored: drop and continue
     pop rdx
 .ones_only:
     mov al, dl
@@ -1807,14 +1794,7 @@ print_num_vga_serial:
     mov al, r8b
     call vga_putc
     mov al, r8b
-.wait2:
-    mov dx, 0x3FD
-    in al, dx
-    test al, 0x20
-    jz .wait2
-    mov al, r8b
-    mov dx, 0x3F8
-    out dx, al
+    call serial_try_putc64      ; CF ignored: drop and continue
     pop r8
     pop rdx
     pop rcx
@@ -1846,14 +1826,7 @@ print_hex8:
     call vga_putc
     pop rax
     mov al, r8b
-    mov dx, 0x3FD
-.hw1:
-    in al, dx
-    test al, 0x20
-    jz .hw1
-    mov al, r8b
-    mov dx, 0x3F8
-    out dx, al
+    call serial_try_putc64      ; CF ignored: drop and continue
     mov al, bl
     and al, 0x0F
     cmp al, 10
@@ -1870,14 +1843,7 @@ print_hex8:
     call vga_putc
     pop rax
     mov al, r8b
-    mov dx, 0x3FD
-.hw2:
-    in al, dx
-    test al, 0x20
-    jz .hw2
-    mov al, r8b
-    mov dx, 0x3F8
-    out dx, al
+    call serial_try_putc64      ; CF ignored: drop and continue
     pop r8
     pop rdx
     pop rcx

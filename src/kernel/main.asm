@@ -17,6 +17,7 @@ section .text.start
 global _start
 global init_serial64
 global serial_print64
+global serial_try_putc64
 
 extern vga_init
 extern vga_print
@@ -140,25 +141,65 @@ init_serial64:
     ret
 
 serial_print64:
-    push rdx
     push rax
+    push rdx
 .loop:
     lodsb
     test al, al
     jz .done
-    push rax
-.wait:
-    mov dx, 0x3FD
-    in al, dx
-    test al, 0x20
-    jz .wait
-    pop rax
-    mov dx, 0x3F8
-    out dx, al
+    ; Serial is best-effort diagnostic I/O: drop on timeout, never hang.
+    ; CF from serial_try_putc64 is intentionally ignored so a stuck UART
+    ; cannot stall boot, the self-test suite, or the shell.
+    call serial_try_putc64
     jmp .loop
 .done:
-    pop rax
     pop rdx
+    pop rax
+    ret
+
+; ------------------------------------------------------------
+; serial_try_putc64 — reusable bounded COM1 TX helper (best-effort).
+; Serial is optional diagnostic I/O: VGA remains authoritative, and all
+; console/shell/test paths must keep working when the UART is absent or
+; never reports THRE. A short timeout with character drop is preferable
+; to a machine-wide hang.
+; In: AL=char. Out: CF=0 sent, CF=1 dropped (timeout).
+; Preserves RAX/RBX/RCX/RDX/RSI/RDI (only flags/CF clobbered).
+; Timeout: SERIAL_TIMEOUT polls — ample for Bochs 16550 baud delay
+; (per-byte THRE clear ~1000s of polls) yet bounded (<1ms) when LSR is
+; stuck. QEMU (instant THRE) and missing UART (LSR=0xFF, THRE set) send
+; on the first poll, so normal output is unchanged.
+; ------------------------------------------------------------
+SERIAL_TIMEOUT equ 0xFFFF
+serial_try_putc64:
+    push rax
+    push rbx
+    push rcx
+    push rdx
+    mov bl, al                  ; stash char (AL clobbered by status IN)
+    mov ecx, SERIAL_TIMEOUT
+.wait_txb:
+    mov dx, 0x3FD
+    in al, dx
+    test al, 0x20               ; THR empty?
+    jnz .ready_txb
+    dec ecx
+    jnz .wait_txb
+    pop rdx                     ; timeout: drop char, report CF=1
+    pop rcx
+    pop rbx
+    pop rax
+    stc
+    ret
+.ready_txb:
+    mov al, bl
+    mov dx, 0x3F8
+    out dx, al
+    pop rdx
+    pop rcx
+    pop rbx
+    pop rax
+    clc
     ret
 
 

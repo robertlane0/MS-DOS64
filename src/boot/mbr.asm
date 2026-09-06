@@ -148,21 +148,43 @@ print:
     lodsb
     test al, al
     jz .done
+    push ax                     ; stash char across INT 10h (BIOS may clobber AL)
     int 0x10
-    push ax
-.wait_ser:
-    mov dx, 0x3FD
-    in al, dx
-    test al, 0x20
-    jz .wait_ser
-    pop ax
-    mov dx, 0x3F8
-    out dx, al
+    pop ax                      ; AL=char restored for serial diagnostic
+    ; Serial is best-effort diagnostic I/O: bounded TX, drop on timeout,
+    ; never hang boot waiting for UART readiness. CF ignored here.
+    call serial_try_putc
     jmp .loop
 .done:
     pop dx
     pop bx
     pop ax
+    ret
+
+; serial_try_putc — AL=char -> COM1 with bounded THRE wait.
+; Serial is optional diagnostic I/O (VGA INT 10h above is authoritative).
+; In: AL=char. Out: CF=0 sent, CF=1 dropped (timeout). Preserves BX
+; (print's page/attr); CX/DX/AX are scratch in the print loop.
+; Size-tuned for the 512 B MBR: char stashed on the stack (no BL/BX save).
+SERIAL_TIMEOUT equ 0xFFFF        ; ample for Bochs baud delay, still bounded
+serial_try_putc:
+    push ax                     ; stash char (AL clobbered by status IN)
+    mov cx, SERIAL_TIMEOUT
+.wait_ser:
+    mov dx, 0x3FD
+    in al, dx
+    test al, 0x20
+    jnz .ready_ser
+    dec cx
+    jnz .wait_ser
+    pop ax                      ; timeout: drop char, report CF=1
+    stc
+    ret
+.ready_ser:
+    pop ax                      ; AL=char restored
+    mov dx, 0x3F8
+    out dx, al
+    clc
     ret
 
 ; ------------------------------------------------------------

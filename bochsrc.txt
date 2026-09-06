@@ -17,8 +17,12 @@ magic_break: enabled=1
 # Serial is write-only capture (guest -> serial.log). The COMMAND64 shell
 # prints banner/prompt here; interactive input comes from PS/2 (GUI) —
 # for pipe-driven automation use QEMU -serial stdio instead.
-# NOTE: the shell must use blocking THR waits, not drop-if-busy: Bochs
-# emulates 16550 baud timing, so bursts (banner/prompt) lose bytes with
-# non-blocking emits while QEMU (instant THRE) never drops.
+# NOTE: all serial TX is bounded best-effort diagnostic I/O
+# (serial_try_putc in MBR/stage2, serial_try_putc64 in the kernel:
+# SERIAL_TIMEOUT polls, drop on timeout, never hang). The timeout budget
+# covers 16550 baud per-byte delay, so bursts (banner/prompt) are intact
+# on Bochs while QEMU (instant THRE) never drops; a stuck/absent UART
+# only drops diagnostics (VGA stays authoritative) instead of stalling
+# boot or the shell.
 com1: enabled=1, mode=file, dev=serial.log
 display_library: nogui

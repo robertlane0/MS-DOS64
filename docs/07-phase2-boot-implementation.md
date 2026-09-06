@@ -38,7 +38,8 @@ jmp 0x0000:0x7E00
 ```
 
 - Size: `stat -c %s build/mbr.bin == 512`, `tail -c2 | od -An -tx1 == 55 aa` — enforced by `Makefile:19-20`.
-- Prints via BIOS `INT 10h AH=0x0E` and COM1 `0x3F8` (polled LSR 0x3FD bit 5) for Bochs `com1: file` and QEMU `-serial stdio`.
+- Prints via BIOS `INT 10h AH=0x0E` and COM1 `0x3F8` (bounded LSR 0x3FD bit 5 poll) for Bochs `com1: file` and QEMU `-serial stdio`.
+- Serial TX timeout policy (bounded wait, like KBC below): `serial_try_putc` (MBR) / `serial_try_putc2` (stage2) / `serial_try_putc64` (kernel, `SERIAL_TIMEOUT equ 0xFFFF`) poll THRE with a decrementing counter and return CF=1 on timeout. Serial is optional best-effort diagnostic I/O (VGA is authoritative): boot/suite/shell print paths ignore CF (drop the character and continue), so a stuck/absent UART can only lose diagnostics, never hang the machine. Locked by `make check-serial`; normal QEMU/Bochs output is unchanged (timeout budget covers 16550 baud delay; missing UART reads LSR=0xFF so THRE is set on the first poll).
 - A20 bugfix: earlier `or al,1` caused `out 0x92` reset (Bochs log `iowrite to port0x92 : reset requested`); fixed to `and al,0xFE` (clear reset bit).
 - KBC timeout policy (bounded wait): `kbc_wait_timeout` (`KBC_TIMEOUT equ 0xFFFF`, same bound as `KBC_TIMEOUT2` in stage2) polls `0x64` bit 1 with a decrementing CX counter and returns CF=1 on timeout. Fast-A20 via port 0x92 is the primary path; the 8042 D1/DF sequence is a fallback only. A timeout is therefore a **fallback condition, not boot-fatal**: `enable_a20`/`enable_a20_stage2` skip the remaining KBC outs, re-assert fast A20, print `KBC timeout, A20 via 0x92`, and continue boot with CF=0 (never spins forever). Locked by `make check-kbc` (finite counter + `stc`/`clc` + 3× `jc` checks, no `jnz kbc_wait*`); normal boot serial output is unchanged (diagnostic prints only on timeout).
 

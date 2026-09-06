@@ -147,7 +147,7 @@ $(BUILD)/kernel.bin: $(BUILD)/kernel.elf | $(BUILD)
 	@echo "Kernel binary: $$(stat -c %s $@) bytes ($$(expr $$(stat -c %s $@) / 512) sectors)"
 	@test $$(stat -c %s $@) -le $$(expr $(KERNEL_SECTORS) \* $(IMG_SECTOR_SIZE)) || (echo "Kernel too large for $(KERNEL_SECTORS) sectors! Increase KERNEL_SECTORS in the Makefile disk-layout block"; exit 1)
 
-$(BUILD)/dos64.img: $(BUILD)/mbr.bin $(BUILD)/stage2.bin $(BUILD)/kernel.bin check-layout check-kbc | $(BUILD)
+$(BUILD)/dos64.img: $(BUILD)/mbr.bin $(BUILD)/stage2.bin $(BUILD)/kernel.bin check-layout check-kbc check-serial | $(BUILD)
 	dd if=/dev/zero of=$@ bs=1M count=$(IMG_MB) status=none
 	dd if=$(BUILD)/mbr.bin of=$@ conv=notrunc status=none
 	dd if=$(BUILD)/stage2.bin of=$@ bs=$(IMG_SECTOR_SIZE) seek=1 conv=notrunc status=none
@@ -164,7 +164,7 @@ $(LEAN_BUILD)/kernel.bin: $(LEAN_BUILD)/kernel.elf | $(BUILD)
 	@echo "Lean kernel binary: $$(stat -c %s $@) bytes ($$(expr $$(stat -c %s $@) / 512) sectors)"
 	@test $$(stat -c %s $@) -le $$(expr $(KERNEL_SECTORS) \* $(IMG_SECTOR_SIZE)) || (echo "Lean kernel too large for $(KERNEL_SECTORS) sectors! Increase KERNEL_SECTORS in the Makefile disk-layout block"; exit 1)
 
-$(BUILD)/dos64-lean.img: $(BUILD)/mbr.bin $(BUILD)/stage2.bin $(LEAN_BUILD)/kernel.bin check-layout check-kbc | $(BUILD)
+$(BUILD)/dos64-lean.img: $(BUILD)/mbr.bin $(BUILD)/stage2.bin $(LEAN_BUILD)/kernel.bin check-layout check-kbc check-serial | $(BUILD)
 	dd if=/dev/zero of=$@ bs=1M count=$(IMG_MB) status=none
 	dd if=$(BUILD)/mbr.bin of=$@ conv=notrunc status=none
 	dd if=$(BUILD)/stage2.bin of=$@ bs=$(IMG_SECTOR_SIZE) seek=1 conv=notrunc status=none
@@ -261,6 +261,52 @@ check-kbc:
 	done
 	@echo "KBC wait OK: bounded kbc_wait_timeout (CX counter + CF=1 timeout) with fallback in mbr + stage2"
 
+# Bounded-serial regression check — source-level assertion that no serial
+# transmit path can spin forever on UART readiness. Deterministic,
+# host-side, no emulator: greps the same NASM sources `make all` assembles.
+# Serial is optional best-effort diagnostic I/O (VGA is authoritative): every
+# TX site must use a bounded helper that drops the character on timeout
+# (CF=1) instead of hanging boot, the suite, or the shell.
+# Verifies:
+#   1. Boot (mbr/stage2): a `serial_try_putc*` helper exists with a finite
+#      `SERIAL_TIMEOUT*` counter (`mov cx, ...`, `dec cx`) and explicit
+#      drop (`stc`/CF=1) + success (`clc`/CF=0) branches; the print path
+#      calls it; the old unbounded `jz .wait_ser*` spin is gone.
+#   2. Kernel: `main.asm` provides the single reusable `serial_try_putc64`
+#      (finite `mov ecx, SERIAL_TIMEOUT` + `dec ecx`, `stc`/`clc`), and
+#      `serial_print64` calls it (CF ignored: drop and continue).
+#   3. All other kernel TX sites (shell/cmd/selftest/stack) call the shared
+#      helper and perform no direct `mov dx, 0x3FD` UART poll of their own.
+#   4. The AUX backend (`syscall64.asm com1_write_char`) stays bounded too
+#      (`dec rcx` budget + `stc` timeout); the RX poll (`com1_read_char`)
+#      is single-shot non-blocking by design.
+# Normal QEMU/Bochs output is unchanged: the timeout budget covers 16550
+# baud per-byte delay, and a missing UART reads LSR=0xFF (THRE set) so the
+# first poll succeeds. Prerequisite of both disk images, so every
+# `make all` runs this with no separate invocation.
+check-serial:
+	@for f in $(SRC_BOOT)/mbr.asm $(SRC_BOOT)/stage2.asm; do \
+		grep -q 'serial_try_putc' $$f || (echo "serial FAIL: $$f missing serial_try_putc helper"; exit 1); \
+		grep -q 'SERIAL_TIMEOUT' $$f || (echo "serial FAIL: $$f missing SERIAL_TIMEOUT bound"; exit 1); \
+		grep -Eq 'mov[[:space:]]+cx,[[:space:]]*SERIAL_TIMEOUT' $$f || (echo "serial FAIL: $$f helper does not load finite CX counter"; exit 1); \
+		grep -Eq 'dec[[:space:]]+cx' $$f || (echo "serial FAIL: $$f helper has no decrementing counter"; exit 1); \
+		grep -q '[[:space:]]stc' $$f || (echo "serial FAIL: $$f helper has no drop branch (stc/CF=1)"; exit 1); \
+		grep -q '[[:space:]]clc' $$f || (echo "serial FAIL: $$f helper has no success branch (clc/CF=0)"; exit 1); \
+		grep -q 'call serial_try_putc' $$f || (echo "serial FAIL: $$f print path does not use bounded helper"; exit 1); \
+		! grep -Eq 'jz[[:space:]]+\.wait_ser' $$f || (echo "serial FAIL: $$f still contains unbounded jz to .wait_ser*"; exit 1); \
+	done
+	@grep -q 'global serial_try_putc64' $(SRC_KERNEL)/main.asm || (echo "serial FAIL: main.asm missing shared serial_try_putc64"; exit 1)
+	@grep -q 'SERIAL_TIMEOUT equ' $(SRC_KERNEL)/main.asm || (echo "serial FAIL: main.asm missing SERIAL_TIMEOUT bound"; exit 1)
+	@grep -Eq 'mov[[:space:]]+ecx,[[:space:]]*SERIAL_TIMEOUT' $(SRC_KERNEL)/main.asm || (echo "serial FAIL: serial_try_putc64 does not load finite ECX counter"; exit 1)
+	@grep -Eq 'dec[[:space:]]+ecx' $(SRC_KERNEL)/main.asm || (echo "serial FAIL: serial_try_putc64 has no decrementing counter"; exit 1)
+	@grep -q 'call serial_try_putc64' $(SRC_KERNEL)/main.asm || (echo "serial FAIL: serial_print64 does not use bounded helper"; exit 1)
+	@for f in $(SRC_KERNEL)/shell64.asm $(SRC_KERNEL)/cmd64.asm $(SRC_KERNEL)/selftest64.asm $(SRC_KERNEL)/stack64.asm; do \
+		grep -q 'call serial_try_putc64' $$f || (echo "serial FAIL: $$f does not use shared serial_try_putc64"; exit 1); \
+		! grep -q 'mov dx, 0x3FD' $$f || (echo "serial FAIL: $$f still polls UART directly (must go through serial_try_putc64)"; exit 1); \
+	done
+	@grep -Eq 'dec[[:space:]]+rcx' $(SRC_KERNEL)/syscall64.asm || (echo "serial FAIL: syscall64.asm com1_write_char lost its bounded counter"; exit 1)
+	@echo "Serial TX OK: bounded serial_try_putc (boot) + serial_try_putc64 (kernel, drop on timeout) in mbr + stage2 + main/shell/cmd/selftest/stack"
+
 run-bochs: $(BUILD)/dos64.img
 	rm -f $(BUILD)/dos64.img.lock bochs.log serial.log
 	bochs -f bochsrc.txt -q
@@ -275,4 +321,4 @@ clean:
 	rm -rf $(BUILD)/*.bin $(BUILD)/*.o $(BUILD)/*.img $(BUILD)/*.elf $(BUILD)/*.map $(BUILD)/*.lock
 	rm -rf $(BUILD)/src $(BUILD)/lean $(BUILD)/include
 
-.PHONY: all lean clean run-bochs run-qemu run-qemu-lean check-layout check-layout-neg check-kbc
+.PHONY: all lean clean run-bochs run-qemu run-qemu-lean check-layout check-layout-neg check-kbc check-serial

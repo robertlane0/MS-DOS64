@@ -61,6 +61,7 @@ extern int21_entry
 extern irq0_timer_handler
 extern irq1_kbd_handler
 extern irq14_disk_handler
+extern serial_try_putc64
 
 section .bss
 alignb 16
@@ -568,23 +569,11 @@ stack_test_depth:
     pop rbx
     ret
 
-; stack_dbg_char — emit AL to COM1 (debug markers). Preserves all but RAX/RDX.
+; stack_dbg_char — emit AL to COM1 (debug markers). Bounded best-effort:
+; serial is optional diagnostic I/O, drop on timeout (CF ignored), never
+; hang the stack/ABI tests waiting for UART readiness.
 stack_dbg_char:
-    push rbx
-    push rcx
-    push rdx
-    mov bl, al
-.wait_dbg:
-    mov dx, 0x3FD
-    in al, dx
-    test al, 0x20
-    jz .wait_dbg
-    mov al, bl
-    mov dx, 0x3F8
-    out dx, al
-    pop rdx
-    pop rcx
-    pop rbx
+    call serial_try_putc64      ; CF ignored: drop and continue
     ret
 
 ; Test 63: IRQ/exc stacks — IST==0 reserved, tops aligned, timer preserves

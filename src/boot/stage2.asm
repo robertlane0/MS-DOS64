@@ -94,21 +94,52 @@ print16:
     lodsb
     test al, al
     jz .done
+    push ax                     ; stash char across INT 10h (BIOS may clobber AL)
     int 0x10
-    push ax
-.wait_ser2:
-    mov dx, 0x3FD
-    in al, dx
-    test al, 0x20
-    jz .wait_ser2
-    pop ax
-    mov dx, 0x3F8
-    out dx, al
+    pop ax                      ; AL=char restored for serial diagnostic
+    ; Serial is best-effort diagnostic I/O: bounded TX, drop on timeout,
+    ; never hang boot waiting for UART readiness. CF ignored here.
+    call serial_try_putc2
     jmp .loop
 .done:
     pop dx
     pop bx
     pop ax
+    ret
+
+; serial_try_putc2 — AL=char -> COM1 with bounded THRE wait.
+; Serial is optional diagnostic I/O (VGA INT 10h above is authoritative).
+; In: AL=char. Out: CF=0 sent, CF=1 dropped (timeout). Preserves AX/BX/CX/DX.
+SERIAL_TIMEOUT2 equ 0xFFFF       ; ample for Bochs baud delay, still bounded
+serial_try_putc2:
+    push ax
+    push bx
+    push cx
+    push dx
+    mov bl, al                  ; stash char (AL clobbered by status IN)
+    mov cx, SERIAL_TIMEOUT2
+.wait_ser2:
+    mov dx, 0x3FD
+    in al, dx
+    test al, 0x20
+    jnz .ready_ser2
+    dec cx
+    jnz .wait_ser2
+    pop dx                      ; timeout: drop char, report CF=1
+    pop cx
+    pop bx
+    pop ax
+    stc
+    ret
+.ready_ser2:
+    mov al, bl
+    mov dx, 0x3F8
+    out dx, al
+    pop dx
+    pop cx
+    pop bx
+    pop ax
+    clc
     ret
 
 ; Design note (KBC timeout policy): Fast-A20 via port 0x92 is the PRIMARY path

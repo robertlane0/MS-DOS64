@@ -20,6 +20,7 @@ global sh_exec_line
 extern vga_print
 extern vga_putc
 extern vga_clear
+extern serial_try_putc64
 extern kbd_getc
 extern handler_reader
 extern handler_punch
@@ -102,26 +103,13 @@ sh_ext_com: db "COM"
 
 section .text
 
-; sh_serial_putc — AL=char -> COM1 (blocking for THR empty).
-; Bochs emulates 16550 baud timing, so THRE clears briefly after each
-; byte; the old drop-if-busy lost banner/prompt bytes on Bochs while
-; QEMU (instant THRE) never dropped. Blocking is safe: a missing UART
-; reads 0xFF (THRE set), so this never hangs; it only waits out the
-; real per-byte delay. Preserves RAX/RDX shape (AH scratch).
+; sh_serial_putc — AL=char -> COM1, bounded best-effort (drop on timeout).
+; Serial is optional diagnostic I/O: VGA remains authoritative and shell
+; command execution never depends on UART readiness. Uses the shared
+; serial_try_putc64 helper (SERIAL_TIMEOUT polls, CF=1 dropped, ignored
+; here) so a stuck UART cannot hang the REPL. Preserves RAX/RDX shape.
 sh_serial_putc:
-    push rdx
-    push rax
-    mov ah, al
-.wait_sp:
-    mov dx, 0x3FD
-    in al, dx
-    test al, 0x20
-    jz .wait_sp
-    mov al, ah
-    mov dx, 0x3F8
-    out dx, al
-    pop rax
-    pop rdx
+    call serial_try_putc64      ; CF ignored: drop and continue
     ret
 
 ; sh_emit — AL=char -> VGA + serial.

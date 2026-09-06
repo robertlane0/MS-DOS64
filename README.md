@@ -22,6 +22,11 @@ are the audit trail for the last correctness pass.
   0–8 MiB identity map, `EFER.LME`, GDT64) → kernel at `0x100000`.
 - **Console:** native VGA text driver (`0xB8000`, 80×25, cursor, scroll) +
   COM1 serial (`0x3F8`) for logging and shell I/O. No `INT 10h` in long mode.
+  Serial is optional best-effort diagnostic I/O: every TX path uses a
+  bounded helper (`serial_try_putc` in MBR/stage2, `serial_try_putc64` in
+  the kernel, `SERIAL_TIMEOUT` polls) that drops the character on timeout
+  instead of hanging — VGA stays authoritative, so boot/suite/shell keep
+  working when the UART is absent or never reports THRE.
 - **Disk:** ATA PIO LBA28 driver (`0x1F0`, polling, CHS→LBA conversion).
   No `INT 13h` in long mode.
 - **Keyboard:** PS/2 controller (`0x60`/`0x64`) with 128-byte queue and
@@ -162,6 +167,8 @@ linker.ld      flat link at 0x100000 (.text.start first)   bochsrc.txt   Bochs c
 - FCB sequential math is exact at `recsiz=128`; other sizes address by `RR`.
 - Writes are record-granular (`COPY` truncates to exact length).
 - Serial RX is 1 byte deep (typing is fine; paste bursts can overrun).
+- Serial TX is bounded best-effort (drop on timeout, never hang); a
+  stuck UART only loses diagnostics, never stalls boot or the shell.
 - `TYPE` shows the first 4 KiB; printer output goes to the COM1 capture.
 - PIT runs at the BIOS rate.
 
