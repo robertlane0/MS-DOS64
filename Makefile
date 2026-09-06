@@ -7,6 +7,15 @@ SRC_KERNEL := src/kernel
 SRC_DRIVERS := src/drivers
 SRC_LIB := src/lib
 
+# Disk layout — single source of truth for image creation (see also
+# tools/mkfat12.py DOS64_* env defaults, include/fs.inc FS_VOL_LBA /
+# FS_VOL_TOTSEC consumed by the kernel, and README.md "Disk layout").
+# `make check-layout` enforces that all copies agree.
+IMG_MB ?= 10
+VOL_LBA ?= 512
+VOL_SECTORS ?= 2880
+KERNEL_LBA ?= 16
+
 NASM := nasm
 NASM_BIN := $(NASM) -f bin
 NASM_ELF := $(NASM) -f elf64 -g -F dwarf -I.
@@ -69,11 +78,11 @@ $(BUILD)/kernel.bin: $(BUILD)/kernel.elf | $(BUILD)
 	@test $$(stat -c %s $@) -le $$(expr 176 \* 512) || (echo "Kernel too large for 176 sectors! Increase KERNEL_SECTORS"; exit 1)
 
 $(BUILD)/dos64.img: $(BUILD)/mbr.bin $(BUILD)/stage2.bin $(BUILD)/kernel.bin | $(BUILD)
-	dd if=/dev/zero of=$@ bs=1M count=10 status=none
+	dd if=/dev/zero of=$@ bs=1M count=$(IMG_MB) status=none
 	dd if=$(BUILD)/mbr.bin of=$@ conv=notrunc status=none
 	dd if=$(BUILD)/stage2.bin of=$@ bs=512 seek=1 conv=notrunc status=none
-	dd if=$(BUILD)/kernel.bin of=$@ bs=512 seek=16 conv=notrunc status=none
-	python3 tools/mkfat12.py $@
+	dd if=$(BUILD)/kernel.bin of=$@ bs=512 seek=$(KERNEL_LBA) conv=notrunc status=none
+	DOS64_VOL_LBA=$(VOL_LBA) DOS64_VOL_TOTSEC=$(VOL_SECTORS) python3 tools/mkfat12.py $@
 	@echo "Created $@ ($$(stat -c %s $@) bytes)"
 
 $(LEAN_BUILD)/kernel.elf: $(LEAN_OBJS) linker.ld | $(BUILD)
@@ -86,12 +95,23 @@ $(LEAN_BUILD)/kernel.bin: $(LEAN_BUILD)/kernel.elf | $(BUILD)
 	@test $$(stat -c %s $@) -le $$(expr 176 \* 512) || (echo "Lean kernel too large for 176 sectors! Increase KERNEL_SECTORS"; exit 1)
 
 $(BUILD)/dos64-lean.img: $(BUILD)/mbr.bin $(BUILD)/stage2.bin $(LEAN_BUILD)/kernel.bin | $(BUILD)
-	dd if=/dev/zero of=$@ bs=1M count=10 status=none
+	dd if=/dev/zero of=$@ bs=1M count=$(IMG_MB) status=none
 	dd if=$(BUILD)/mbr.bin of=$@ conv=notrunc status=none
 	dd if=$(BUILD)/stage2.bin of=$@ bs=512 seek=1 conv=notrunc status=none
-	dd if=$(LEAN_BUILD)/kernel.bin of=$@ bs=512 seek=16 conv=notrunc status=none
-	python3 tools/mkfat12.py $@
+	dd if=$(LEAN_BUILD)/kernel.bin of=$@ bs=512 seek=$(KERNEL_LBA) conv=notrunc status=none
+	DOS64_VOL_LBA=$(VOL_LBA) DOS64_VOL_TOTSEC=$(VOL_SECTORS) python3 tools/mkfat12.py $@
 	@echo "Created $@ ($$(stat -c %s $@) bytes)"
+
+# Verify the layout constants stay consistent across Makefile, mkfat12.py
+# defaults, and include/fs.inc (kernel). Fails the build with a clear message
+# instead of producing a silently-corrupt image.
+check-layout:
+	@test "$(VOL_LBA)" = "$$(grep -E '^%define FS_VOL_LBA' include/fs.inc | awk '{print $$3}')" || (echo "layout drift: Makefile VOL_LBA=$(VOL_LBA) != include/fs.inc FS_VOL_LBA=$$(grep -E '^%define FS_VOL_LBA' include/fs.inc | awk '{print $$3}')"; exit 1)
+	@test "$(VOL_SECTORS)" = "$$(grep -E '^%define FS_VOL_TOTSEC' include/fs.inc | awk '{print $$3}')" || (echo "layout drift: Makefile VOL_SECTORS=$(VOL_SECTORS) != include/fs.inc FS_VOL_TOTSEC=$$(grep -E '^%define FS_VOL_TOTSEC' include/fs.inc | awk '{print $$3}')"; exit 1)
+	@test "$$(DOS64_VOL_LBA= DOS64_VOL_TOTSEC= python3 -c 'import sys; sys.path.insert(0, "tools"); import mkfat12; print(mkfat12.VOL_LBA)')" = "$(VOL_LBA)" || (echo "layout drift: Makefile VOL_LBA=$(VOL_LBA) != tools/mkfat12.py default"; exit 1)
+	@test "$$(DOS64_VOL_LBA= DOS64_VOL_TOTSEC= python3 -c 'import sys; sys.path.insert(0, "tools"); import mkfat12; print(mkfat12.TOTSEC)')" = "$(VOL_SECTORS)" || (echo "layout drift: Makefile VOL_SECTORS=$(VOL_SECTORS) != tools/mkfat12.py default"; exit 1)
+	@test $$(( ($(VOL_LBA) + $(VOL_SECTORS)) * 512 )) -le $$(( $(IMG_MB) * 1024 * 1024 )) || (echo "layout drift: volume end LBA $$(( $(VOL_LBA) + $(VOL_SECTORS) )) exceeds IMG_MB=$(IMG_MB) image"; exit 1)
+	@echo "Layout OK: img=$(IMG_MB)MiB vol_lba=$(VOL_LBA) vol_sectors=$(VOL_SECTORS) kernel_lba=$(KERNEL_LBA)"
 
 run-bochs: $(BUILD)/dos64.img
 	rm -f $(BUILD)/dos64.img.lock bochs.log serial.log
@@ -107,4 +127,4 @@ clean:
 	rm -rf $(BUILD)/*.bin $(BUILD)/*.o $(BUILD)/*.img $(BUILD)/*.elf $(BUILD)/*.map $(BUILD)/*.lock
 	rm -rf $(BUILD)/src $(BUILD)/lean
 
-.PHONY: all lean clean run-bochs run-qemu run-qemu-lean
+.PHONY: all lean clean run-bochs run-qemu run-qemu-lean check-layout

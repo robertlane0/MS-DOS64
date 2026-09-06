@@ -15,12 +15,30 @@ Idempotent: rebuilds the region from scratch on every run so repeated
   TEST.COM   1 cluster   single RET (minimal EXEC/loader target)
   DATA.BIN   1 cluster   0x00..0xFF pattern
 """
+import os
 import struct
 import sys
 
-VOL_LBA = 512
-SECSIZ = 512
-TOTSEC = 2880
+# Disk-layout numbers shared with the Makefile (single source of truth for
+# image creation) and include/fs.inc (FS_VOL_LBA/FS_VOL_TOTSEC, consumed by
+# the kernel) — see also README.md "Disk layout". The Makefile exports
+# DOS64_VOL_LBA / DOS64_VOL_TOTSEC / DOS64_SECSIZ when invoking this script
+# so `dd` and the stamp step cannot drift apart; the defaults below match
+# `Makefile: IMG_MB=10 VOL_LBA=512 VOL_SECTORS=2880` and are used for direct
+# invocations. `make check-layout` enforces that all three copies agree.
+def _env_int(name, default):
+    raw = os.environ.get(name)
+    if raw is None or raw == "":
+        return default
+    try:
+        return int(raw, 0)
+    except ValueError:
+        sys.exit(f"mkfat12: invalid {name}={raw!r}: expected integer")
+
+
+VOL_LBA = _env_int("DOS64_VOL_LBA", 512)
+SECSIZ = _env_int("DOS64_SECSIZ", 512)
+TOTSEC = _env_int("DOS64_VOL_TOTSEC", 2880)
 FATSZ = 9
 ROOTSEC = 14
 NROOT = 224
@@ -122,9 +140,21 @@ def main(img_path):
             sec = data_base + (c - 2)
             vol[sec * SECSIZ:sec * SECSIZ + len(chunk)] = chunk
 
-    with open(img_path, "r+b") as f:
-        f.seek(VOL_LBA * SECSIZ)
-        f.write(vol)
+    need = (VOL_LBA + TOTSEC) * SECSIZ
+    try:
+        have = os.path.getsize(img_path)
+    except OSError as e:
+        sys.exit(f"mkfat12: cannot write {img_path}: {e}")
+    if have < need:
+        sys.exit(f"mkfat12: image {img_path} too small ({have} bytes): "
+                 f"need >= {need} bytes for volume LBA {VOL_LBA}+{TOTSEC} "
+                 f"x {SECSIZ}B")
+    try:
+        with open(img_path, "r+b") as f:
+            f.seek(VOL_LBA * SECSIZ)
+            f.write(vol)
+    except OSError as e:
+        sys.exit(f"mkfat12: cannot write {img_path}: {e}")
     print(f"mkfat12: stamped {TOTSEC} sectors ({len(vol)}B) at LBA {VOL_LBA} "
           f"in {img_path}: " + ", ".join(n.strip() for n, _, _, _ in layout))
 
