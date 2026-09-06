@@ -11,6 +11,7 @@ extern mem_resize64
 extern mem_max_free64
 extern mem_bytes_to_para
 extern mem_para_to_bytes
+extern mem_para_to_bytes_checked64
 extern proc_spawn64
 extern proc_terminate64
 extern proc_exit_current64
@@ -2587,6 +2588,14 @@ STUB_HANDLER handler_usercode
 ;   For trap, RBX holds user BX (paragraphs or segment). For direct
 ;   call, RDI holds bytes/linear. We support both: if RDI !=0 use it,
 ;   else use RBX paragraphs*16. Return AL 0 success, AH error, RAX linear.
+;   Overflow safety: every legacy paragraph count (untrusted, full 64-bit
+;   RBX) goes through mem_para_to_bytes_checked64. On CF=1 the handler
+;   fails cleanly (AH=8/CF=1 for ALLOC, CF=1 for FREE/RESIZE) WITHOUT
+;   touching the MCB chain, so mem_validate64 still succeeds. Direct RDI/
+;   RSI byte sizes stay on the mem_alloc64/mem_resize64 path, which already
+;   rejects size+15 wrap and over-capacity. The fail-path max-free
+;   bytes->para uses the fast helper only because max-free is heap-bounded
+;   (<6 MiB, trusted); see the TRUSTED ONLY note in mem64.asm.
 ; ------------------------------------------------------------
 handler_alloc_mem:
     push rbx
@@ -2595,9 +2604,11 @@ handler_alloc_mem:
     ; Try direct RDI bytes first (Phase6 tests call with RDI)
     test rdi, rdi
     jnz .use_rdi
-    ; else use RBX paragraphs (from trap frame or caller RBX)
+    ; else use RBX paragraphs (from trap frame or caller RBX):
+    ; checked para->bytes, overflow -> clean insufficient-memory failure.
     mov rax, rbx
-    shl rax, 4              ; para->bytes
+    call mem_para_to_bytes_checked64
+    jc .fail_a
     mov rdi, rax
 .use_rdi:
     call mem_alloc64
@@ -2646,10 +2657,15 @@ handler_free_mem:
     ; RDI = linear if direct, else ES:BX paragraph segment? For trap, ES:BX linear is in RDI? Simplify direct.
     test rdi, rdi
     jnz .use_rdi_f
-    mov rdi, rbx
-    ; If BX was paragraphs segment, convert: linear = BX*16
-    shl rdi, 4
-    add rdi, 0x200000        ; heuristic? For direct we expect already linear
+    ; Compatibility path: RBX paragraphs -> linear = RBX*16 + 0x200000.
+    ; Both steps are checked: shift overflow or base-add wrap fails cleanly
+    ; (CF=1) without calling mem_free64, heap untouched.
+    mov rax, rbx
+    call mem_para_to_bytes_checked64
+    jc .fail_f
+    add rax, 0x200000
+    jc .fail_f
+    mov rdi, rax
 .use_rdi_f:
     call mem_free64
     jc .fail_f
@@ -2668,8 +2684,13 @@ handler_resize_mem:
     ; RDI = linear, RSI = new size bytes or RBX paragraphs + RCX?
     test rsi, rsi
     jnz .use_rsi
-    mov rsi, rbx
-    shl rsi, 4              ; para->bytes
+    ; Compatibility path: RBX paragraphs -> bytes via checked conversion
+    ; (preserves RDI=ptr: helper uses RAX in/out, saves RDI). Overflow
+    ; fails cleanly without calling mem_resize64, heap untouched.
+    mov rax, rbx
+    call mem_para_to_bytes_checked64
+    jc .fail_r
+    mov rsi, rax
 .use_rsi:
     call mem_resize64
     test rax, rax

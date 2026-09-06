@@ -66,6 +66,12 @@ extern mem_bytes_to_pages
 extern mem_pages_to_bytes
 extern mem_para_to_pages
 extern mem_pages_to_para
+extern mem_para_to_bytes_checked64
+extern mem_bytes_to_para_checked64
+extern mem_bytes_to_pages_checked64
+extern mem_pages_to_bytes_checked64
+extern mem_para_to_pages_checked64
+extern mem_pages_to_para_checked64
 extern mem_get_pd_entry64
 extern mem_set_rw64
 extern mem_set_nx64
@@ -2397,6 +2403,8 @@ test_kbd_translation:
 
 ; ------------------------------------------------------------
 ; Test 17: Paragraph/page conversions (Phase6 byte-based)
+;   Fast helpers on small values plus checked adapters on the
+;   UINT64_MAX>>4 / >>12 boundaries (just below/at/overflow-by-one/many).
 ; ------------------------------------------------------------
 test_para_page:
     push rbx
@@ -2459,6 +2467,97 @@ test_para_page:
     call mem_pages_to_para
     cmp rax, 256
     jne .fail17
+    ; ---- checked adapters: boundary just below/at UINT64_MAX>>4, overflow ----
+    ; para->bytes checked: 1->16 ok
+    mov rax, 1
+    call mem_para_to_bytes_checked64
+    jc .fail17
+    cmp rax, 16
+    jne .fail17
+    ; just below max convertible (MAX>>4 -1) -> 0xFFFFFFFFFFFFFFE0 ok
+    mov rax, 0x0FFFFFFFFFFFFFFE
+    call mem_para_to_bytes_checked64
+    jc .fail17
+    mov rbx, 0xFFFFFFFFFFFFFFE0
+    cmp rax, rbx
+    jne .fail17
+    ; at max convertible (MAX>>4) -> 0xFFFFFFFFFFFFFFF0 ok
+    mov rax, 0x0FFFFFFFFFFFFFFF
+    call mem_para_to_bytes_checked64
+    jc .fail17
+    mov rbx, 0xFFFFFFFFFFFFFFF0
+    cmp rax, rbx
+    jne .fail17
+    ; overflow by one bit (MAX>>4 +1) must fail with RAX=0
+    mov rax, 0x1000000000000000
+    call mem_para_to_bytes_checked64
+    jnc .fail17
+    test rax, rax
+    jnz .fail17
+    ; overflow by many bits (all ones) must fail
+    mov rax, -1
+    call mem_para_to_bytes_checked64
+    jnc .fail17
+    test rax, rax
+    jnz .fail17
+    ; bytes->para checked: max ok (MAX-15) converts, MAX-14 wraps->fail
+    mov rax, 0xFFFFFFFFFFFFFFF0
+    call mem_bytes_to_para_checked64
+    jc .fail17
+    mov rbx, 0x0FFFFFFFFFFFFFFF
+    cmp rax, rbx
+    jne .fail17
+    mov rax, 0xFFFFFFFFFFFFFFF1
+    call mem_bytes_to_para_checked64
+    jnc .fail17
+    test rax, rax
+    jnz .fail17
+    ; pages->bytes checked: max pages (MAX>>12) ok, 2^52 overflows by one
+    mov rax, 0xFFFFFFFFFFFFF
+    call mem_pages_to_bytes_checked64
+    jc .fail17
+    mov rbx, 0xFFFFFFFFFFFFF000
+    cmp rax, rbx
+    jne .fail17
+    mov rax, 0x10000000000000
+    call mem_pages_to_bytes_checked64
+    jnc .fail17
+    test rax, rax
+    jnz .fail17
+    ; bytes->pages checked: max ok (MAX-4095), MAX fails
+    mov rax, 0xFFFFFFFFFFFFF000
+    call mem_bytes_to_pages_checked64
+    jc .fail17
+    mov rbx, 0xFFFFFFFFFFFFF
+    cmp rax, rbx
+    jne .fail17
+    mov rax, -1
+    call mem_bytes_to_pages_checked64
+    jnc .fail17
+    test rax, rax
+    jnz .fail17
+    ; para->pages checked: 256->1 ok, max para fails second-stage (+4095 wraps)
+    mov rax, 256
+    call mem_para_to_pages_checked64
+    jc .fail17
+    cmp rax, 1
+    jne .fail17
+    mov rax, 0x0FFFFFFFFFFFFFFF
+    call mem_para_to_pages_checked64
+    jnc .fail17
+    test rax, rax
+    jnz .fail17
+    ; pages->para checked: 1->256 ok, 2^52 fails
+    mov rax, 1
+    call mem_pages_to_para_checked64
+    jc .fail17
+    cmp rax, 256
+    jne .fail17
+    mov rax, 0x10000000000000
+    call mem_pages_to_para_checked64
+    jnc .fail17
+    test rax, rax
+    jnz .fail17
     xor rax, rax
     jmp .done17
 .fail17:
@@ -4908,7 +5007,12 @@ test_chain_bounds:
 ;   (rounds huge) / 2^63-1 fail via overflow-or-capacity with the chain
 ;   intact (validate 0, single Z after fails). Then aligned (4096 ok +
 ;   aligned, huge/4G-align fail), pages (1 ok, MAX/2^52 fail), resize
-;   (512 ok, MAX/MAX-14/10M fail with CF, chain intact). No timing.
+;   (512 ok, MAX/MAX-14/10M fail with CF, chain intact). Then AH=48h/49h/
+;   4Ah compat overflow: checked para->bytes just below/at MAX>>4,
+;   overflow by one/many bits, valid large (1M para=16M, MAX>>4) rejected
+;   by heap capacity rather than wrap, plus FREE/RESIZE compat overflow
+;   (including FREE base-add wrap) — every rejection leaves validate 0
+;   and a single Z block where the heap was reset. No timing.
 ; ------------------------------------------------------------
 test_alloc_table:
     push rbx
@@ -5071,6 +5175,238 @@ test_alloc_table:
     test rax, rax
     jnz .fail80
     mov rdi, rbx
+    call mem_free64
+    jc .fail80
+    call mem_validate64
+    test rax, rax
+    jnz .fail80
+    ; ---- AH=48h/49h/4Ah compat overflow: checked para->bytes ----
+    ; All cases run from a known heap (mem_reset64) and every rejected
+    ; operation must leave mem_validate64 == 0 (heap untouched).
+    ; Valid large convertible values must fail via heap capacity, while
+    ; values above UINT64_MAX>>4 must fail via overflow rejection — in
+    ; both cases a clean CF=1 failure, never a wrapped small success.
+    call mem_reset64
+    call mem_validate64
+    test rax, rax
+    jnz .fail80
+    ; valid small compat ALLOC: 16 para -> 256B succeeds, then free
+    xor rdi, rdi
+    mov rbx, 16
+    call handler_alloc_mem
+    jc .fail80
+    test rax, rax
+    jz .fail80
+    cmp rax, 0x200000
+    jb .fail80
+    mov r10, rax
+    call mem_validate64
+    test rax, rax
+    jnz .fail80
+    mov rdi, r10
+    call mem_free64
+    jc .fail80
+    call mem_validate64
+    test rax, rax
+    jnz .fail80
+    ; valid large convertible but over-capacity: 1M para = 16M bytes
+    ; (0x100000<<4 = 0x1000000, no wrap) must fail via capacity
+    call mem_reset64
+    call mem_validate64
+    test rax, rax
+    jnz .fail80
+    xor rdi, rdi
+    mov rbx, 0x100000
+    call handler_alloc_mem
+    jnc .fail80
+    call mem_validate64
+    test rax, rax
+    jnz .fail80
+    call mem_count_blocks64
+    cmp rax, 1
+    jne .fail80
+    ; max convertible para (MAX>>4) -> bytes MAX-15: checked ok, alloc
+    ; must fail via capacity (heap 6M), never wrap to a small success
+    call mem_reset64
+    call mem_validate64
+    test rax, rax
+    jnz .fail80
+    xor rdi, rdi
+    mov rbx, 0x0FFFFFFFFFFFFFFF
+    call handler_alloc_mem
+    jnc .fail80
+    call mem_validate64
+    test rax, rax
+    jnz .fail80
+    call mem_count_blocks64
+    cmp rax, 1
+    jne .fail80
+    ; overflow by exactly one (MAX>>4 +1) must fail via overflow rejection
+    call mem_reset64
+    call mem_validate64
+    test rax, rax
+    jnz .fail80
+    xor rdi, rdi
+    mov rbx, 0x1000000000000000
+    call handler_alloc_mem
+    jnc .fail80
+    call mem_validate64
+    test rax, rax
+    jnz .fail80
+    call mem_count_blocks64
+    cmp rax, 1
+    jne .fail80
+    ; overflow by many bits (UINT64_MAX) must fail, heap intact
+    call mem_reset64
+    call mem_validate64
+    test rax, rax
+    jnz .fail80
+    xor rdi, rdi
+    mov rbx, -1
+    call handler_alloc_mem
+    jnc .fail80
+    call mem_validate64
+    test rax, rax
+    jnz .fail80
+    call mem_count_blocks64
+    cmp rax, 1
+    jne .fail80
+    ; wrap-to-small: huge para whose low bits survive must NOT become a
+    ; small success (old unchecked SHL 4 wrapped). 2^60+1 -> 0x10 (16B)
+    ; and 2^60+16 -> 0x100 (256B) would both succeed unchecked; checked
+    ; must reject with heap intact.
+    call mem_reset64
+    call mem_validate64
+    test rax, rax
+    jnz .fail80
+    xor rdi, rdi
+    mov rbx, 0x1000000000000001
+    call handler_alloc_mem
+    jnc .fail80
+    call mem_validate64
+    test rax, rax
+    jnz .fail80
+    call mem_count_blocks64
+    cmp rax, 1
+    jne .fail80
+    xor rdi, rdi
+    mov rbx, 0x1000000000000010
+    call handler_alloc_mem
+    jnc .fail80
+    call mem_validate64
+    test rax, rax
+    jnz .fail80
+    call mem_count_blocks64
+    cmp rax, 1
+    jne .fail80
+    ; FREE compat overflow: RDI=0 forces para path, huge RBX must fail
+    call mem_reset64
+    call mem_validate64
+    test rax, rax
+    jnz .fail80
+    xor rdi, rdi
+    mov rbx, 0x1000000000000000
+    call handler_free_mem
+    jnc .fail80
+    call mem_validate64
+    test rax, rax
+    jnz .fail80
+    xor rdi, rdi
+    mov rbx, -1
+    call handler_free_mem
+    jnc .fail80
+    call mem_validate64
+    test rax, rax
+    jnz .fail80
+    ; FREE second-stage: max para shifts ok but +0x200000 base wraps,
+    ; must still fail cleanly
+    xor rdi, rdi
+    mov rbx, 0x0FFFFFFFFFFFFFFF
+    call handler_free_mem
+    jnc .fail80
+    call mem_validate64
+    test rax, rax
+    jnz .fail80
+    ; FREE wrap-to-small: allocate first block (deterministic 0x200028
+    ; from empty heap: 0x200000 + 40B MCB64 header), then a huge RBX with
+    ; identical low 60 bits wraps to the same low bytes unchecked.
+    ; Checked must reject before computing linear and keep it live.
+    call mem_reset64
+    mov rdi, 256
+    call mem_alloc64
+    test rax, rax
+    jz .fail80
+    mov r10, rax
+    cmp r10, 0x200028
+    jne .fail80
+    xor rdi, rdi
+    mov rbx, 0x1000000000000002
+    call handler_free_mem
+    jnc .fail80
+    call mem_validate64
+    test rax, rax
+    jnz .fail80
+    ; block must still be live: direct free succeeds, then double-free fails
+    mov rdi, r10
+    call mem_free64
+    jc .fail80
+    call mem_validate64
+    test rax, rax
+    jnz .fail80
+    ; RESIZE compat: alloc 256B, then overflowing compat sizes must fail
+    call mem_reset64
+    mov rdi, 256
+    call mem_alloc64
+    test rax, rax
+    jz .fail80
+    mov r10, rax
+    mov rdi, r10
+    xor rsi, rsi
+    mov rbx, 0x1000000000000000
+    call handler_resize_mem
+    jnc .fail80
+    call mem_validate64
+    test rax, rax
+    jnz .fail80
+    mov rdi, r10
+    xor rsi, rsi
+    mov rbx, -1
+    call handler_resize_mem
+    jnc .fail80
+    call mem_validate64
+    test rax, rax
+    jnz .fail80
+    ; RESIZE wrap-to-small: 2^60+1 -> 16B would shrink unchecked; must fail
+    mov rdi, r10
+    xor rsi, rsi
+    mov rbx, 0x1000000000000001
+    call handler_resize_mem
+    jnc .fail80
+    call mem_validate64
+    test rax, rax
+    jnz .fail80
+    ; RESIZE compat large convertible but over-capacity (1M para=16M)
+    ; must fail via capacity, heap intact
+    mov rdi, r10
+    xor rsi, rsi
+    mov rbx, 0x100000
+    call handler_resize_mem
+    jnc .fail80
+    call mem_validate64
+    test rax, rax
+    jnz .fail80
+    ; RESIZE compat valid small: 32 para = 512B grows 256->512
+    mov rdi, r10
+    xor rsi, rsi
+    mov rbx, 32
+    call handler_resize_mem
+    jc .fail80
+    test rax, rax
+    jnz .fail80
+    call mem_validate64
+    test rax, rax
+    jnz .fail80
+    mov rdi, r10
     call mem_free64
     jc .fail80
     call mem_validate64

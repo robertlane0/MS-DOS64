@@ -40,6 +40,12 @@ global mem_bytes_to_pages
 global mem_pages_to_bytes
 global mem_para_to_pages
 global mem_pages_to_para
+global mem_para_to_bytes_checked64
+global mem_bytes_to_para_checked64
+global mem_bytes_to_pages_checked64
+global mem_pages_to_bytes_checked64
+global mem_para_to_pages_checked64
+global mem_pages_to_para_checked64
 global mem_get_pd_entry64
 global mem_set_rw64
 global mem_set_nx64
@@ -70,11 +76,22 @@ mem_initialized: resb 1
 section .text
 
 ; ------------------------------------------------------------
+; Fast (unchecked) arithmetic adapters — TRUSTED / INTERNAL VALUES ONLY.
+;   Precondition: caller must guarantee the arithmetic cannot overflow
+;   (small bounded sizes, e.g. heap-bounded max-free, internal MCB sizes).
+;   For any untrusted, public, or compatibility-path input (INT 21h AH=48h/
+;   49h/4Ah paragraph counts, user byte/page counts near UINT64_MAX), use
+;   the _checked64 variants below which return CF=1 + RAX=0 on overflow.
+;   A huge paragraph value whose low bits survive an unchecked SHL 4 can
+;   wrap to a small byte count (silent size corruption); the checked
+;   adapters reject it as a clean failure with the heap untouched.
+; ------------------------------------------------------------
 ; mem_para_to_bytes — paragraph (16) -> byte
 ;   Original: MOV CL,4 ; SHL AX,CL  (or SHL AX,1 x4)
 ;   64-bit: bytes = para <<4
 ;   In: RAX = paragraphs
 ;   Out: RAX = bytes
+;   TRUSTED ONLY: requires RAX <= (UINT64_MAX>>4); otherwise wraps.
 ; ------------------------------------------------------------
 mem_para_to_bytes:
     shl rax, PARA_SHIFT
@@ -83,6 +100,7 @@ mem_para_to_bytes:
 ; bytes to paragraphs (rounded up)
 ;   Original: SHR AX,CL with rounding via ADD 15
 ;   64-bit: (bytes+15)>>4
+;   TRUSTED ONLY: requires RAX <= UINT64_MAX-15; otherwise +15 wraps.
 mem_bytes_to_para:
     add rax, 15
     shr rax, PARA_SHIFT
@@ -90,17 +108,21 @@ mem_bytes_to_para:
 
 ; bytes to pages (4K) rounded up
 ;   64-bit: (bytes+4095)>>12  replaces SHL/SHR for paragraphs*256
+;   TRUSTED ONLY: requires RAX <= UINT64_MAX-4095; otherwise +4095 wraps.
 mem_bytes_to_pages:
     add rax, PAGE_SIZE-1
     shr rax, PAGE_SHIFT
     ret
 
 ; pages to bytes
+;   TRUSTED ONLY: requires RAX <= (UINT64_MAX>>12); otherwise wraps.
 mem_pages_to_bytes:
     shl rax, PAGE_SHIFT
     ret
 
 ; para to pages (para*16 -> bytes -> pages)
+;   TRUSTED ONLY: requires para <= (UINT64_MAX>>4) and
+;   para*16 <= UINT64_MAX-4095; otherwise wraps.
 mem_para_to_pages:
     shl rax, PARA_SHIFT
     add rax, PAGE_SIZE-1
@@ -108,10 +130,147 @@ mem_para_to_pages:
     ret
 
 ; pages to para (pages*4096/16)
+;   TRUSTED ONLY: requires pages <= (UINT64_MAX>>12) and
+;   pages*4096 <= UINT64_MAX-15; otherwise wraps.
 mem_pages_to_para:
     shl rax, PAGE_SHIFT
     add rax, 15
     shr rax, PARA_SHIFT
+    ret
+
+; ------------------------------------------------------------
+; Checked arithmetic adapters — REQUIRED for all public/compatibility
+; entry points (INT 21h AH=48h/49h/4Ah, any untrusted byte/page input).
+;   Convention (matches fast helpers for drop-in use):
+;     In: RAX = input value
+;     Out: RAX = converted value (0 on overflow), CF=0 ok / CF=1 overflow
+;   Preserves: RBX, RCX, RSI, RDI, RBP, R8-R15 (only RAX + flags clobbered
+;   apart from the pushed RDX temp, which is restored; POP preserves CF so
+;   the reported CF survives the restore).
+;   No heap access: safe to call before mem_validate64; on CF=1 the caller
+;   must fail cleanly without touching the MCB chain.
+;   Boundary: UINT64_MAX>>4 = 0x0FFFFFFFFFFFFFFF (max convertible paras),
+;   UINT64_MAX>>12 = 0xFFFFFFFFFFFFF (max convertible pages, 2^52-1).
+;   Implemented with SHR-test / ADD+JC so no 64-bit immediates are needed.
+; ------------------------------------------------------------
+
+; mem_para_to_bytes_checked64 — para*16 with overflow rejection
+;   Fail iff RAX > (UINT64_MAX>>4), i.e. top 4 bits non-zero (SHR 60 != 0).
+mem_para_to_bytes_checked64:
+    push rdx
+    mov rdx, rax
+    shr rdx, 60
+    test rdx, rdx
+    jnz .p2b_ovf
+    shl rax, PARA_SHIFT
+    clc
+    pop rdx
+    ret
+.p2b_ovf:
+    xor eax, eax
+    pop rdx
+    stc
+    ret
+
+; mem_bytes_to_para_checked64 — (bytes+15)>>4 with wrap rejection
+;   Fail iff bytes+15 wraps (RAX > UINT64_MAX-15). Max ok input
+;   UINT64_MAX-15 converts to 0x0FFFFFFFFFFFFFFF; anything larger wraps.
+mem_bytes_to_para_checked64:
+    push rdx
+    mov rdx, rax
+    add rdx, 15
+    jc .b2p_ovf
+    shr rdx, PARA_SHIFT
+    mov rax, rdx
+    clc
+    pop rdx
+    ret
+.b2p_ovf:
+    xor eax, eax
+    pop rdx
+    stc
+    ret
+
+; mem_bytes_to_pages_checked64 — (bytes+4095)>>12 with wrap rejection
+;   Fail iff bytes+4095 wraps (RAX > UINT64_MAX-4095).
+mem_bytes_to_pages_checked64:
+    push rdx
+    mov rdx, rax
+    add rdx, PAGE_SIZE-1
+    jc .b2pg_ovf
+    shr rdx, PAGE_SHIFT
+    mov rax, rdx
+    clc
+    pop rdx
+    ret
+.b2pg_ovf:
+    xor eax, eax
+    pop rdx
+    stc
+    ret
+
+; mem_pages_to_bytes_checked64 — pages*4096 with overflow rejection
+;   Fail iff RAX > (UINT64_MAX>>12), i.e. top 12 bits non-zero (SHR 52 != 0).
+mem_pages_to_bytes_checked64:
+    push rdx
+    mov rdx, rax
+    shr rdx, 52
+    test rdx, rdx
+    jnz .pg2b_ovf
+    shl rax, PAGE_SHIFT
+    clc
+    pop rdx
+    ret
+.pg2b_ovf:
+    xor eax, eax
+    pop rdx
+    stc
+    ret
+
+; mem_para_to_pages_checked64 — (para*16+4095)>>12 with both checks
+;   Fail iff para*16 overflows OR the +4095 rounds wraps.
+mem_para_to_pages_checked64:
+    push rdx
+    mov rdx, rax
+    shr rdx, 60
+    test rdx, rdx
+    jnz .p2pg_ovf
+    mov rdx, rax
+    shl rdx, PARA_SHIFT
+    add rdx, PAGE_SIZE-1
+    jc .p2pg_ovf
+    shr rdx, PAGE_SHIFT
+    mov rax, rdx
+    clc
+    pop rdx
+    ret
+.p2pg_ovf:
+    xor eax, eax
+    pop rdx
+    stc
+    ret
+
+; mem_pages_to_para_checked64 — (pages*4096+15)>>4 with both checks
+;   Fail iff pages*4096 overflows OR the +15 round wraps.
+mem_pages_to_para_checked64:
+    push rdx
+    mov rdx, rax
+    shr rdx, 52
+    test rdx, rdx
+    jnz .pg2p_ovf
+    mov rdx, rax
+    shl rdx, PAGE_SHIFT
+    add rdx, 15
+    jc .pg2p_ovf
+    shr rdx, PARA_SHIFT
+    mov rax, rdx
+    clc
+    pop rdx
+    ret
+.pg2p_ovf:
+    xor eax, eax
+    pop rdx
+    stc
     ret
 
 ; ------------------------------------------------------------
@@ -577,16 +736,12 @@ mem_alloc_pages64:
     push rbx
     push rsi
     push rdi
-    ; pages to bytes with overflow check: pages*4096 must fit in 64 bits.
-    ; SHL by 12 drops the top 12 bits; CF only reflects bit 52, so check
-    ; explicitly that the top 12 bits are zero before shifting.
+    ; Centralized checked conversion: pages*4096 must fit in 64 bits.
+    ; Uses mem_pages_to_bytes_checked64 (SHR 52 test) instead of an inline
+    ; duplicate so every pages->bytes adapter shares one overflow predicate.
     mov rax, rdi
-    shr rax, 52
-    test rax, rax
-    jnz .fail_pg
-    mov rax, rdi
-    shl rax, PAGE_SHIFT
-    jc .fail_pg           ; defense in depth (unreachable after shr check)
+    call mem_pages_to_bytes_checked64
+    jc .fail_pg
     mov rdi, rax
     mov rsi, PAGE_SIZE
     call mem_alloc_aligned64
