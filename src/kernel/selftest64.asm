@@ -147,6 +147,8 @@ extern kbd_poll
 extern kbd_test_status
 extern kbd_test_translation
 extern kbd_test_queue
+extern kbd_test_queue_stress
+extern kbd_test_queue_if
 extern fs_test_bpb
 extern fs_test_chain
 extern fs_test_dir
@@ -2228,6 +2230,13 @@ test_kbd_status:
     test rax, rax
     jnz .fail15
     call kbd_test_queue
+    test rax, rax
+    jnz .fail15
+    ; IRQ-safe queue stress at empty/full boundaries (runs with caller IF;
+    ; safe before the IDT is loaded — no sti/cli, push/pop preserve IF).
+    ; Explicit IF=1/0 preservation (kbd_test_queue_if, uses sti) runs in
+    ; test 55 after the IDT is up.
+    call kbd_test_queue_stress
     test rax, rax
     jnz .fail15
     ; Also verify has_data doesn't fault and poll returns no data (CF)
@@ -5997,6 +6006,11 @@ test_kbd_irq:
     lea rbx, [rel int21_entry]
     cmp rax, rbx
     jne .fail55
+    ; IRQ-safe queue IF preservation + nested-cli (requires IDT up: uses
+    ; sti/cli; unsafe before idt_load, hence here in test 55, not test 15).
+    call kbd_test_queue_if
+    test rax, rax
+    jnz .fail55
     xor eax, eax
     jmp .done55
 .fail55:

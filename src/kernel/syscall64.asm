@@ -586,7 +586,11 @@ handler_constat:            ; AH=0B CONSTAT (MSDOS.ASM:3122: AL=0 none, FF avail
     je .has_data
     ; check queue by pop/push peek (single-char safe; multi-char rotates once
     ; but count preserved — documented Phase9 limitation, queue count exported
-    ; in future; for tests single-char so exact)
+    ; in future; for tests single-char so exact).
+    ; IRQ-safety: kbd_queue_pop/push are individually atomic (pushfq/cli/
+    ; popfq, caller IF preserved), so an IRQ1 producer cannot corrupt count
+    ; mid-update; at most the peek rotates once more under IRQ, which is
+    ; immaterial for an availability check (still FF iff any data).
     call kbd_queue_pop
     jc .no_data_cs
     ; got scancode in AL -> push back to preserve (rotate for multi)

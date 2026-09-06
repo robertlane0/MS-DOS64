@@ -510,6 +510,11 @@ irq0_timer_handler:
 ;   Checks OBF 0x64:0x01, reads 0x60, pushes queue (drop if full),
 ;   EOI master, IRETQ. Preserves all GPRs. Masked during tests
 ;   (deterministic polling); the shell unmasks IRQ0/IRQ1 on entry.
+;   Concurrency: this handler is the queue's interrupt-context producer.
+;   kbd_queue_push is IRQ-safe (pushfq/cli/popfq, caller IF preserved), so
+;   calling it here with IF=0 (interrupt gate) is safe and cannot corrupt
+;   a synchronous kbd_queue_pop/push in progress — the consumer runs its
+;   multi-step head/tail/count update with interrupts disabled.
 ; ------------------------------------------------------------
 irq1_kbd_handler:
     push r15

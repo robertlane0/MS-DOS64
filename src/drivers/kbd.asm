@@ -168,6 +168,10 @@ kbd_poll:
 
 ; ------------------------------------------------------------
 ; kbd_flush — drain pending scancodes (clear buffer)
+;   IRQ-safe: hardware drain runs with caller IF, then the shared
+;   head/tail/count/shift reset runs under cli with caller IF preserved
+;   (see queue concurrency contract below), so an IRQ1 push cannot land
+;   between the index stores.
 ; ------------------------------------------------------------
 kbd_flush:
     push rax
@@ -182,11 +186,14 @@ kbd_flush:
     mov dx, KBD_STATUS
     jmp .loop
 .done:
-    ; also clear queue indices
+    ; also clear queue indices (shared with IRQ1 producer: cli section)
+    pushfq
+    cli
     mov byte [rel kbd_head], 0
     mov byte [rel kbd_tail], 0
     mov byte [rel kbd_count], 0
     mov byte [rel kbd_shift], 0
+    popfq
     pop rdx
     pop rax
     ret
@@ -252,13 +259,42 @@ kbd_init:
     ret
 
 ; ------------------------------------------------------------
-; kbd_queue_push — push scancode to circular queue
-;   In: AL scancode
-;   Out: CF=0 success, CF=1 full
+; Keyboard queue concurrency contract (single-core DOS-style kernel):
+;   * Producer: irq1_kbd_handler (interrupt context, IF=0 on entry via the
+;     64-bit interrupt gate in src/kernel/idt64.asm) calls kbd_queue_push
+;     and drops the scancode if the queue is full (CF ignored).
+;   * Consumers (+ occasional synchronous producers): normal kernel code
+;     with IF=0 or IF=1 calls kbd_queue_push / kbd_queue_pop / kbd_flush /
+;     kbd_get_scancode (which pops). Examples: syscall64 handler_constat
+;     peek (pop+push), handler_kbd_read_ascii pop, self-tests.
+;   * Shared state: kbd_queue slots + kbd_head (producer index) +
+;     kbd_tail (consumer index) + kbd_count. Each update is multi-step
+;     (load count, load index, store slot, bump index, bump count), so an
+;     IRQ1 push preempting a pop (or vice versa) between those steps would
+;     lose updates or observe stale full/empty around the boundaries.
+;   * Protocol: every mutation below runs with interrupts disabled. push /
+;     pop / flush do pushfq/cli on entry and popfq before returning, so the
+;     caller IF is preserved (IRQ-context callers with IF=0 stay disabled;
+;     synchronous callers with IF=1 are re-enabled). The CF result is set
+;     with clc/stc AFTER popfq so the status does not clobber the restored
+;     IF. Critical sections are a handful of MOVs, so the added IRQ latency
+;     is negligible. Nested use is safe: an outer cli section (e.g. a
+;     pop+push peek) containing push/pop calls keeps IF=0 throughout because
+;     each inner pushfq saves IF=0 and restores IF=0.
+; ------------------------------------------------------------
+; kbd_queue_push — push scancode to circular queue (IRQ-safe)
+;   In: AL scancode (preserved, including on full)
+;   Out: CF=0 success, CF=1 full (queue unchanged)
+;   Callable from interrupt context (IF=0) or synchronous code (IF=0/1);
+;   caller interrupt state is preserved (see contract above).
 ; ------------------------------------------------------------
 kbd_queue_push:
     push rbx
+    push rcx
     push rdx
+    mov cl, al              ; stash scancode (RCX saved, caller-safe)
+    pushfq
+    cli
     mov bl, [rel kbd_count]
     cmp bl, KBD_QUEUE_SIZE
     jae .full
@@ -266,31 +302,43 @@ kbd_queue_push:
     movzx ebx, bl
     lea rdx, [rel kbd_queue]
     add rdx, rbx
+    mov al, cl
     mov [rdx], al
-    inc byte [rel kbd_head]
-    and byte [rel kbd_head], KBD_QUEUE_SIZE-1  ; 128 power of 2? 128==0x80, mask 0x7F
-    ; Actually 128 mask is 0x7F
-    ; Fix: we used and with 127, but head is byte overflow mod 128 works via &0x7F
-    mov al, [rel kbd_head]
-    and al, 0x7F
-    mov [rel kbd_head], al
-    inc byte [rel kbd_count]
-    clc
-    jmp .done
-.full:
-    stc
-.done:
+    mov bl, [rel kbd_head]
+    inc bl
+    and bl, 0x7F            ; 128-entry power-of-2 wrap
+    mov [rel kbd_head], bl
+    mov bl, [rel kbd_count]
+    inc bl
+    mov [rel kbd_count], bl
+    mov al, cl              ; restore input scancode in AL
+    popfq                   ; restore caller IF (and other flags)
+    clc                     ; CF=0 success (set after restore)
     pop rdx
+    pop rcx
+    pop rbx
+    ret
+.full:
+    mov al, cl              ; preserve input AL even on full
+    popfq                   ; restore caller IF
+    stc                     ; CF=1 full
+    pop rdx
+    pop rcx
     pop rbx
     ret
 
 ; ------------------------------------------------------------
-; kbd_queue_pop — pop scancode from queue
-;   Out: CF=0 AL=scancode, CF=1 empty
+; kbd_queue_pop — pop scancode from queue (IRQ-safe)
+;   Out: CF=0 AL=scancode, CF=1 empty (queue unchanged, AL undefined)
+;   Callable from synchronous code (IF=0/1); must NOT be called from the
+;   IRQ1 handler itself (handler is producer-only). Caller interrupt state
+;   is preserved (see contract above).
 ; ------------------------------------------------------------
 kbd_queue_pop:
     push rbx
     push rdx
+    pushfq
+    cli
     mov bl, [rel kbd_count]
     test bl, bl
     jz .empty
@@ -298,15 +346,22 @@ kbd_queue_pop:
     movzx ebx, bl
     lea rdx, [rel kbd_queue]
     add rdx, rbx
-    mov al, [rdx]
-    inc byte [rel kbd_tail]
-    and byte [rel kbd_tail], 0x7F
-    dec byte [rel kbd_count]
-    clc
-    jmp .done2
+    mov al, [rdx]           ; AL=scancode; survives popfq (regs untouched)
+    mov bl, [rel kbd_tail]
+    inc bl
+    and bl, 0x7F
+    mov [rel kbd_tail], bl
+    mov bl, [rel kbd_count]
+    dec bl
+    mov [rel kbd_count], bl
+    popfq                   ; restore caller IF (and other flags)
+    clc                     ; CF=0 success (AL already holds scancode)
+    pop rdx
+    pop rbx
+    ret
 .empty:
-    stc
-.done2:
+    popfq                   ; restore caller IF
+    stc                     ; CF=1 empty
     pop rdx
     pop rbx
     ret
@@ -507,6 +562,8 @@ kbd_getc_nonblock:
 global kbd_test_poll_status
 global kbd_test_translation
 global kbd_test_queue
+global kbd_test_queue_stress
+global kbd_test_queue_if
 global kbd_test_shift
 
 ; Test that status port readable and has_data works (no fault)
@@ -604,7 +661,11 @@ kbd_test_translation:
     ret
 
 kbd_test_queue:
+    push rbx
+    push rcx
+    push rdx
     call kbd_flush
+    ; --- legacy basic order ---
     mov al, 0x1E
     call kbd_queue_push
     jc .fail_q
@@ -622,9 +683,389 @@ kbd_test_queue:
     ; Empty pop should fail (CF=1)
     call kbd_queue_pop
     jnc .fail_q
-    xor rax, rax
+    ; count must still be 0 (no underflow)
+    cmp byte [rel kbd_count], 0
+    jne .fail_q
+    ; --- full boundary: fill 128, overflow, drain in order ---
+    call kbd_flush
+    xor ebx, ebx
+    mov ecx, 128
+.fill_q:
+    mov al, bl
+    call kbd_queue_push
+    jc .fail_q
+    inc bl
+    dec ecx
+    jnz .fill_q
+    cmp byte [rel kbd_count], 128
+    jne .fail_q
+    ; 129th push must fail, count unchanged (no overflow)
+    mov al, 0xAA
+    call kbd_queue_push
+    jnc .fail_q
+    cmp byte [rel kbd_count], 128
+    jne .fail_q
+    ; drain 128 in exact FIFO order
+    xor ebx, ebx
+    mov ecx, 128
+.drain_q:
+    call kbd_queue_pop
+    jc .fail_q
+    cmp al, bl
+    jne .fail_q
+    inc bl
+    dec ecx
+    jnz .drain_q
+    cmp byte [rel kbd_count], 0
+    jne .fail_q
+    call kbd_queue_pop
+    jnc .fail_q
+    cmp byte [rel kbd_count], 0
+    jne .fail_q
+    ; head==tail after a full fill/drain cycle
+    mov al, [rel kbd_head]
+    cmp al, [rel kbd_tail]
+    jne .fail_q
+    ; --- wraparound: advance indices to 100, then wrap past 127 ---
+    call kbd_flush
+    mov ecx, 100
+    mov al, 0x55
+.adv_q:
+    call kbd_queue_push
+    jc .fail_q
+    dec ecx
+    jnz .adv_q
+    mov ecx, 100
+.advd_q:
+    call kbd_queue_pop
+    jc .fail_q
+    cmp al, 0x55
+    jne .fail_q
+    dec ecx
+    jnz .advd_q
+    cmp byte [rel kbd_count], 0
+    jne .fail_q
+    ; head==tail==100 now; push 50 distinct (wraps 100->22), pop verify
+    xor ebx, ebx
+    mov ecx, 50
+.fill2_q:
+    mov al, bl
+    add al, 0x80
+    call kbd_queue_push
+    jc .fail_q
+    inc bl
+    dec ecx
+    jnz .fill2_q
+    xor ebx, ebx
+    mov ecx, 50
+.drain2_q:
+    call kbd_queue_pop
+    jc .fail_q
+    mov dl, al              ; save popped scancode
+    mov al, bl
+    add al, 0x80            ; expected pattern
+    cmp dl, al
+    jne .fail_q
+    inc bl
+    dec ecx
+    jnz .drain2_q
+    call kbd_flush          ; leave queue clean
+    xor eax, eax
+    pop rdx
+    pop rcx
+    pop rbx
     ret
 .fail_q:
+    call kbd_flush          ; leave queue clean even on failure
+    mov rax, 1
+    pop rdx
+    pop rcx
+    pop rbx
+    ret
+
+; ------------------------------------------------------------
+; kbd_test_queue_stress — alternating push/pop at empty/full boundaries
+;   plus an exact-N FIFO check. Verifies no drops/reorders/count drift.
+;   Out: RAX 0 pass, 1 fail (queue left flushed, caller IF preserved).
+;   Preserves RBX/RCX/RDX/R8. Runs with any caller IF; IF is saved on
+;   entry (pushfq) and restored on exit (popfq).
+; ------------------------------------------------------------
+kbd_test_queue_stress:
+    push rbx
+    push rcx
+    push rdx
+    push r8
+    ; NOTE: no sti/cli here — runs with caller IF (early suite runs with
+    ; IF=0 before the IDT is loaded, so enabling interrupts would triple
+    ; fault). push/pop/flush preserve caller IF internally, so the stress
+    ; is valid under either IF; explicit IF=1/0 preservation is covered by
+    ; kbd_test_queue_if, which the suite calls after the IDT is up.
+    call kbd_flush
+    ; 1) empty-boundary alternation x1000: push i, pop must equal i
+    mov ecx, 1000
+    xor ebx, ebx
+.alt_empty:
+    mov al, bl
+    call kbd_queue_push
+    jc .fail_qs
+    cmp byte [rel kbd_count], 1
+    jne .fail_qs
+    call kbd_queue_pop
+    jc .fail_qs
+    cmp al, bl
+    jne .fail_qs
+    cmp byte [rel kbd_count], 0
+    jne .fail_qs
+    inc bl
+    dec ecx
+    jnz .alt_empty
+    ; 2) fill 127 with 0..126, then 256x push/pop at the full boundary.
+    ;    Push pattern Pi = 0x80|(i&0x7F) (high bit set, distinct from V).
+    ;    Popped expectation: i<127 -> V_i=i, else P_{i-127}.
+    call kbd_flush
+    mov ecx, 127
+    xor ebx, ebx
+.fill127_qs:
+    mov al, bl
+    call kbd_queue_push
+    jc .fail_qs
+    inc bl
+    dec ecx
+    jnz .fill127_qs
+    cmp byte [rel kbd_count], 127
+    jne .fail_qs
+    mov ecx, 256
+    xor ebx, ebx            ; i = 0..255
+.alt_full_qs:
+    mov al, bl
+    and al, 0x7F
+    or al, 0x80             ; Pi in AL
+    mov r8b, bl
+    cmp bl, 127
+    jb .exp_old_qs
+    mov r8b, bl
+    sub r8b, 127
+    and r8b, 0x7F
+    or r8b, 0x80            ; expected = P_{i-127}
+    jmp .do_push_qs
+.exp_old_qs:
+    ; expected = V_i = i (r8b already bl, bl<127 so high bit clear)
+.do_push_qs:
+    ; expected already in r8b (untouched by push/pop); AL holds Pi
+    call kbd_queue_push     ; AL=Pi
+    jc .fail_qs
+    cmp byte [rel kbd_count], 128
+    jne .fail_qs
+    call kbd_queue_pop
+    jc .fail_qs
+    cmp al, r8b
+    jne .fail_qs
+    cmp byte [rel kbd_count], 127
+    jne .fail_qs
+    inc bl
+    dec ecx
+    jnz .alt_full_qs
+    ; 3) drain remaining 127 (P129..P255) in exact order
+    mov ecx, 127
+    mov ebx, 129            ; j base: expected P_j, j=129..255
+.drain_qs:
+    call kbd_queue_pop
+    jc .fail_qs
+    mov dl, al              ; popped
+    mov al, bl
+    and al, 0x7F
+    or al, 0x80             ; expected P_j
+    cmp dl, al
+    jne .fail_qs
+    inc bl
+    dec ecx
+    jnz .drain_qs
+    cmp byte [rel kbd_count], 0
+    jne .fail_qs
+    ; 4) exact-N FIFO: push 64 pattern 0x10+i, pop 64 verify order
+    call kbd_flush
+    mov ecx, 64
+    xor ebx, ebx
+.fill64_qs:
+    mov al, bl
+    add al, 0x10
+    call kbd_queue_push
+    jc .fail_qs
+    inc bl
+    dec ecx
+    jnz .fill64_qs
+    cmp byte [rel kbd_count], 64
+    jne .fail_qs
+    xor ebx, ebx
+    mov ecx, 64
+.drain64_qs:
+    call kbd_queue_pop
+    jc .fail_qs
+    mov dl, al
+    mov al, bl
+    add al, 0x10
+    cmp dl, al
+    jne .fail_qs
+    inc bl
+    dec ecx
+    jnz .drain64_qs
+    call kbd_flush
+    xor eax, eax
+    pop r8
+    pop rdx
+    pop rcx
+    pop rbx
+    ret
+.fail_qs:
+    call kbd_flush
+    mov rax, 1
+    pop r8
+    pop rdx
+    pop rcx
+    pop rbx
+    ret
+
+; ------------------------------------------------------------
+; kbd_test_queue_if — caller-IF preservation + simulated IRQ context.
+;   push/pop must leave IF exactly as found (IF=1 stays 1, IF=0 stays 0)
+;   with CF set after the restore; nested cli sections (outer peek like
+;   handler_constat's pop+push) must keep IF=0 throughout and restore 1.
+;   Out: RAX 0 pass, 1 fail (queue flushed, IF=1 on return).
+;   REQUIRES IDT loaded (uses sti): suite calls this from test 55 (kbd IRQ,
+;   after idt_load), NOT from early test 15 (IF=0, no IDT -> sti would
+;   triple-fault on the unremapped timer IRQ).
+; ------------------------------------------------------------
+kbd_test_queue_if:
+    push rbx
+    push rcx
+    push rdx
+    push rax
+    call kbd_flush
+    sti
+    ; --- IF=1: push preserves 1 ---
+    pushfq
+    pop rax
+    test rax, 0x200
+    jz .fail_qi
+    mov al, 0x1E
+    call kbd_queue_push
+    jc .fail_qi
+    pushfq
+    pop rax
+    test rax, 0x200
+    jz .fail_qi
+    ; --- IF=1: pop preserves 1 ---
+    call kbd_queue_pop
+    jc .fail_qi
+    cmp al, 0x1E
+    jne .fail_qi
+    pushfq
+    pop rax
+    test rax, 0x200
+    jz .fail_qi
+    ; --- IF=1: empty pop fails CF=1, IF stays 1, no underflow ---
+    call kbd_queue_pop
+    jnc .fail_qi
+    pushfq
+    pop rax
+    test rax, 0x200
+    jz .fail_qi
+    cmp byte [rel kbd_count], 0
+    jne .fail_qi
+    ; --- IF=0 (simulated IRQ-disabled producer context) ---
+    cli
+    pushfq
+    pop rax
+    test rax, 0x200
+    jnz .fail_qi_rst
+    mov al, 0x33
+    call kbd_queue_push
+    jc .fail_qi_rst
+    pushfq
+    pop rax
+    test rax, 0x200
+    jnz .fail_qi_rst
+    call kbd_queue_pop
+    jc .fail_qi_rst
+    cmp al, 0x33
+    jne .fail_qi_rst
+    pushfq
+    pop rax
+    test rax, 0x200
+    jnz .fail_qi_rst
+    sti                     ; back to IF=1
+    ; --- IF=0: full push fails CF=1, IF stays 0, no overflow ---
+    call kbd_flush
+    mov ecx, 128
+    xor ebx, ebx
+.fill_qi:
+    mov al, bl
+    call kbd_queue_push
+    jc .fail_qi
+    inc bl
+    dec ecx
+    jnz .fill_qi
+    cli
+    mov al, 0xAA
+    call kbd_queue_push
+    jnc .fail_qi_rst
+    pushfq
+    pop rax
+    test rax, 0x200
+    jnz .fail_qi_rst
+    cmp byte [rel kbd_count], 128
+    jne .fail_qi_rst
+    sti
+    ; --- nested cli (outer peek pop+push, inner calls preserve 0) ---
+    call kbd_flush
+    mov al, 0x1E
+    call kbd_queue_push
+    jc .fail_qi
+    pushfq                  ; outer save (IF=1)
+    cli                     ; outer critical section
+    call kbd_queue_pop      ; inner: saves IF=0, restores 0
+    jc .fail_qi_outer
+    cmp al, 0x1E
+    jne .fail_qi_outer
+    pushfq                  ; inner check: still 0 inside outer section
+    pop rax
+    test rax, 0x200
+    jnz .fail_qi_outer
+    mov al, 0x1E
+    call kbd_queue_push     ; inner again
+    jc .fail_qi_outer
+    popfq                   ; outer restore -> IF=1
+    pushfq
+    pop rax
+    test rax, 0x200
+    jz .fail_qi
+    cmp byte [rel kbd_count], 1
+    jne .fail_qi
+    call kbd_queue_pop
+    jc .fail_qi
+    cmp al, 0x1E
+    jne .fail_qi
+    call kbd_flush
+    pop rax
+    pop rdx
+    pop rcx
+    pop rbx
+    xor eax, eax
+    ret
+.fail_qi_outer:
+    popfq                   ; restore outer IF (was 1) before failing
+    jmp .fail_qi_cmn
+.fail_qi_rst:
+    sti                     ; restore IF=1 (was testing IF=0 path)
+    jmp .fail_qi_cmn
+.fail_qi:
+    sti                     ; ensure IF=1 on failure
+.fail_qi_cmn:
+    call kbd_flush
+    pop rax
+    pop rdx
+    pop rcx
+    pop rbx
     mov rax, 1
     ret
 
