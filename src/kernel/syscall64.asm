@@ -52,8 +52,6 @@ extern fs_fcb_rename64
 extern fs_fcb_search64
 extern fs_make_fcb64
 extern fs_fcb_close64
-extern fs_vol_root
-extern fs_vol_dpb
 section .text
 global syscall_init
 global syscall_dispatch64

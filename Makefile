@@ -17,8 +17,20 @@ VOL_SECTORS ?= 2880
 KERNEL_LBA ?= 16
 
 NASM := nasm
-NASM_BIN := $(NASM) -f bin
-NASM_ELF := $(NASM) -f elf64 -g -F dwarf -I.
+# -Wall enables all assembler warnings; -Werror promotes them to errors so
+# build warnings fail the build instead of scrolling past. Explicit silences
+# below cover relocations that are benign by design (linker-resolved or
+# intended absolute addresses) and would otherwise make -Wall unusable:
+#   -Wno-reloc-abs-word: 16-bit absolute addressing in the ORG'd boot code
+#     (intended [boot_drive]/DAP/msg references at 0x7C00/0x7E00).
+#   -Wno-reloc-abs-dword/-qword (BIN): GDT descriptors and page-table setup
+#     use intentional absolute addresses in the flat binary.
+#   -Wno-reloc-rel-dword/-abs-qword (ELF): cross-section calls/jmps and
+#     64-bit absolute symbol loads in kernel objects; resolved by ld.
+# (--warn-section-align stays omitted for ld: the flat-binary linker script
+# intentionally shifts section starts.)
+NASM_BIN := $(NASM) -f bin -Wall -Werror -Wno-reloc-abs-word -Wno-reloc-abs-dword -Wno-reloc-abs-qword
+NASM_ELF := $(NASM) -f elf64 -g -F dwarf -Wall -Werror -Wno-reloc-abs-word -Wno-reloc-rel-dword -Wno-reloc-abs-qword -I.
 # Self-test control (docs/05 §7): default full build runs the suite.
 #   Full: -DRUN_SELFTEST (default) -> _start runs tests 1..76 then shell.
 #   Lean: -DSKIP_SELFTEST -> _start skips suite, minimal init, shell direct.
@@ -69,7 +81,7 @@ $(LEAN_BUILD)/%.o: %.asm | $(LEAN_OBJ_DIRS)
 	$(NASM_ELF) -DSKIP_SELFTEST $< -o $@
 
 $(BUILD)/kernel.elf: $(KERNEL_OBJS) linker.ld | $(BUILD)
-	ld -T linker.ld -o $@ $(BUILD)/src/kernel/main.o $(filter-out $(BUILD)/src/kernel/main.o,$(KERNEL_OBJS)) -nostdlib -Map=$(BUILD)/kernel.map || (cat $(BUILD)/kernel.map; exit 1)
+	ld -T linker.ld -o $@ $(BUILD)/src/kernel/main.o $(filter-out $(BUILD)/src/kernel/main.o,$(KERNEL_OBJS)) -nostdlib --fatal-warnings -Map=$(BUILD)/kernel.map || (cat $(BUILD)/kernel.map; exit 1)
 	@echo "Kernel linked: $$(stat -c %s $@) bytes, objects: $(words $(KERNEL_OBJS))"
 
 $(BUILD)/kernel.bin: $(BUILD)/kernel.elf | $(BUILD)
@@ -82,11 +94,11 @@ $(BUILD)/dos64.img: $(BUILD)/mbr.bin $(BUILD)/stage2.bin $(BUILD)/kernel.bin | $
 	dd if=$(BUILD)/mbr.bin of=$@ conv=notrunc status=none
 	dd if=$(BUILD)/stage2.bin of=$@ bs=512 seek=1 conv=notrunc status=none
 	dd if=$(BUILD)/kernel.bin of=$@ bs=512 seek=$(KERNEL_LBA) conv=notrunc status=none
-	DOS64_VOL_LBA=$(VOL_LBA) DOS64_VOL_TOTSEC=$(VOL_SECTORS) python3 tools/mkfat12.py $@
+	DOS64_VOL_LBA=$(VOL_LBA) DOS64_VOL_TOTSEC=$(VOL_SECTORS) python3 -W error tools/mkfat12.py $@
 	@echo "Created $@ ($$(stat -c %s $@) bytes)"
 
 $(LEAN_BUILD)/kernel.elf: $(LEAN_OBJS) linker.ld | $(BUILD)
-	ld -T linker.ld -o $@ $(LEAN_BUILD)/src/kernel/main.o $(filter-out $(LEAN_BUILD)/src/kernel/main.o,$(LEAN_OBJS)) -nostdlib -Map=$(LEAN_BUILD)/kernel.map || (cat $(LEAN_BUILD)/kernel.map; exit 1)
+	ld -T linker.ld -o $@ $(LEAN_BUILD)/src/kernel/main.o $(filter-out $(LEAN_BUILD)/src/kernel/main.o,$(LEAN_OBJS)) -nostdlib --fatal-warnings -Map=$(LEAN_BUILD)/kernel.map || (cat $(LEAN_BUILD)/kernel.map; exit 1)
 	@echo "Lean kernel linked: $$(stat -c %s $@) bytes, objects: $(words $(LEAN_OBJS))"
 
 $(LEAN_BUILD)/kernel.bin: $(LEAN_BUILD)/kernel.elf | $(BUILD)
@@ -99,7 +111,7 @@ $(BUILD)/dos64-lean.img: $(BUILD)/mbr.bin $(BUILD)/stage2.bin $(LEAN_BUILD)/kern
 	dd if=$(BUILD)/mbr.bin of=$@ conv=notrunc status=none
 	dd if=$(BUILD)/stage2.bin of=$@ bs=512 seek=1 conv=notrunc status=none
 	dd if=$(LEAN_BUILD)/kernel.bin of=$@ bs=512 seek=$(KERNEL_LBA) conv=notrunc status=none
-	DOS64_VOL_LBA=$(VOL_LBA) DOS64_VOL_TOTSEC=$(VOL_SECTORS) python3 tools/mkfat12.py $@
+	DOS64_VOL_LBA=$(VOL_LBA) DOS64_VOL_TOTSEC=$(VOL_SECTORS) python3 -W error tools/mkfat12.py $@
 	@echo "Created $@ ($$(stat -c %s $@) bytes)"
 
 # Verify the layout constants stay consistent across Makefile, mkfat12.py
@@ -108,8 +120,8 @@ $(BUILD)/dos64-lean.img: $(BUILD)/mbr.bin $(BUILD)/stage2.bin $(LEAN_BUILD)/kern
 check-layout:
 	@test "$(VOL_LBA)" = "$$(grep -E '^%define FS_VOL_LBA' include/fs.inc | awk '{print $$3}')" || (echo "layout drift: Makefile VOL_LBA=$(VOL_LBA) != include/fs.inc FS_VOL_LBA=$$(grep -E '^%define FS_VOL_LBA' include/fs.inc | awk '{print $$3}')"; exit 1)
 	@test "$(VOL_SECTORS)" = "$$(grep -E '^%define FS_VOL_TOTSEC' include/fs.inc | awk '{print $$3}')" || (echo "layout drift: Makefile VOL_SECTORS=$(VOL_SECTORS) != include/fs.inc FS_VOL_TOTSEC=$$(grep -E '^%define FS_VOL_TOTSEC' include/fs.inc | awk '{print $$3}')"; exit 1)
-	@test "$$(DOS64_VOL_LBA= DOS64_VOL_TOTSEC= python3 -c 'import sys; sys.path.insert(0, "tools"); import mkfat12; print(mkfat12.VOL_LBA)')" = "$(VOL_LBA)" || (echo "layout drift: Makefile VOL_LBA=$(VOL_LBA) != tools/mkfat12.py default"; exit 1)
-	@test "$$(DOS64_VOL_LBA= DOS64_VOL_TOTSEC= python3 -c 'import sys; sys.path.insert(0, "tools"); import mkfat12; print(mkfat12.TOTSEC)')" = "$(VOL_SECTORS)" || (echo "layout drift: Makefile VOL_SECTORS=$(VOL_SECTORS) != tools/mkfat12.py default"; exit 1)
+	@test "$$(DOS64_VOL_LBA= DOS64_VOL_TOTSEC= python3 -W error -c 'import sys; sys.path.insert(0, "tools"); import mkfat12; print(mkfat12.VOL_LBA)')" = "$(VOL_LBA)" || (echo "layout drift: Makefile VOL_LBA=$(VOL_LBA) != tools/mkfat12.py default"; exit 1)
+	@test "$$(DOS64_VOL_LBA= DOS64_VOL_TOTSEC= python3 -W error -c 'import sys; sys.path.insert(0, "tools"); import mkfat12; print(mkfat12.TOTSEC)')" = "$(VOL_SECTORS)" || (echo "layout drift: Makefile VOL_SECTORS=$(VOL_SECTORS) != tools/mkfat12.py default"; exit 1)
 	@test $$(( ($(VOL_LBA) + $(VOL_SECTORS)) * 512 )) -le $$(( $(IMG_MB) * 1024 * 1024 )) || (echo "layout drift: volume end LBA $$(( $(VOL_LBA) + $(VOL_SECTORS) )) exceeds IMG_MB=$(IMG_MB) image"; exit 1)
 	@echo "Layout OK: img=$(IMG_MB)MiB vol_lba=$(VOL_LBA) vol_sectors=$(VOL_SECTORS) kernel_lba=$(KERNEL_LBA)"
 
