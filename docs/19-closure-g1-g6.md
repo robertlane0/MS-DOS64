@@ -1,9 +1,12 @@
-# Closure G1–G6 — how each gap was fixed (2026-09-05, 72/72 PASS)
+# Closure G1–G6 — how each gap was fixed (2026-09-05, 82/82 PASS)
 
 Companion to `docs/18-truth-gap-analysis.md` (the audit). Each section gives
 the fix location, the design decision where DOS semantics were simplified,
 and the test/transcript that proves it. Final state: clean `make`, QEMU boot
-`Summary: 72 passed, 0`, all ten `ALL TESTS PASS` banners, then the shell.
+`Summary: 82 passed, 0`, all ten `ALL TESTS PASS` banners, then the shell.
+(The 77–82 cross-layer suite — BPB table + sentinels, pure ATA table,
+FAT-chain bounds, allocator arithmetic, queue interleave, layout invariants
+— was added 2026-09-06; see `docs/05 §7.3` for its coverage.)
 
 ## G5 → done: `fat_dir_read64` is real
 `src/kernel/fat64.asm`: the no-op body is now a tail-call to the ATA-backed

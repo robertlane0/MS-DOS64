@@ -66,7 +66,7 @@ NASM := nasm
 NASM_BIN := $(NASM) -f bin -Wall -Werror -Wno-reloc-abs-word -Wno-reloc-abs-dword -Wno-reloc-abs-qword
 NASM_ELF := $(NASM) -f elf64 -g -F dwarf -Wall -Werror -Wno-reloc-abs-word -Wno-reloc-rel-dword -Wno-reloc-abs-qword -I.
 # Self-test control (docs/05 §7): default full build runs the suite.
-#   Full: -DRUN_SELFTEST (default) -> _start runs tests 1..76 then shell.
+#   Full: -DRUN_SELFTEST (default) -> _start runs tests 1..82 then shell.
 #   Lean: -DSKIP_SELFTEST -> _start skips suite, minimal init, shell direct.
 # Override with `make NASM_DEFS=-DSKIP_SELFTEST` or `make lean`.
 NASM_DEFS ?= -DRUN_SELFTEST
@@ -208,6 +208,29 @@ check-layout: $(LAYOUT_INC)
 	@test $$(( ($(VOL_LBA) + $(VOL_SECTORS)) * $(IMG_SECTOR_SIZE) )) -le $$(( $(IMG_MB) * 1024 * 1024 )) || (echo "layout drift: volume end LBA $$(( $(VOL_LBA) + $(VOL_SECTORS) )) exceeds IMG_MB=$(IMG_MB) image"; exit 1)
 	@echo "Layout OK: img=$(IMG_MB)MiB secsiz=$(IMG_SECTOR_SIZE) vol_lba=$(VOL_LBA) vol_sectors=$(VOL_SECTORS) kernel_lba=$(KERNEL_LBA) kernel_sectors=$(KERNEL_SECTORS)"
 
+# Negative layout checks — same paths `make all` uses, but with bad inputs
+# that must be rejected. Deterministic, no emulator, no timing.
+# Verifies: (1) command-line layout overrides are rejected by the
+# single-source guard (same error path a relocated `make VOL_LBA=...`
+# would hit); (2) the stamper (tools/mkfat12.py, same explicit flags the
+# image recipes pass) rejects an overlapping kernel/volume extent and a
+# non-512 sector size instead of stamping a corrupt image.
+# Run manually (`make check-layout-neg`); `make all` already runs the
+# positive `check-layout` on every build, and test 82 locks the same
+# arithmetic (kernel_end<=VOL_LBA, volume fits IMG_MB) at runtime.
+check-layout-neg: $(BUILD)/mbr.bin
+	@echo "Layout negative checks (same paths as make all)..."
+	@! $(MAKE) --no-print-directory VOL_LBA=600 check-layout >/dev/null 2>&1 || (echo "layout-neg FAIL: VOL_LBA override not rejected"; exit 1)
+	@echo "  override rejection OK"
+	@rm -f $(BUILD)/.layout-neg.img
+	@dd if=/dev/zero of=$(BUILD)/.layout-neg.img bs=1M count=$(IMG_MB) status=none
+	@! python3 -W error tools/mkfat12.py --vol-lba $(VOL_LBA) --vol-totsec $(VOL_SECTORS) --sector-size $(IMG_SECTOR_SIZE) --kernel-lba $(VOL_LBA) --kernel-sectors $(KERNEL_SECTORS) $(BUILD)/.layout-neg.img >/dev/null 2>&1 || (echo "layout-neg FAIL: overlapping kernel/volume not rejected by stamper"; exit 1)
+	@echo "  stamper overlap rejection OK"
+	@! python3 -W error tools/mkfat12.py --vol-lba $(VOL_LBA) --vol-totsec $(VOL_SECTORS) --sector-size 1024 --kernel-lba $(KERNEL_LBA) --kernel-sectors $(KERNEL_SECTORS) $(BUILD)/.layout-neg.img >/dev/null 2>&1 || (echo "layout-neg FAIL: sector-size 1024 not rejected by stamper"; exit 1)
+	@echo "  stamper sector-size rejection OK"
+	@rm -f $(BUILD)/.layout-neg.img
+	@echo "Layout negative checks OK"
+
 run-bochs: $(BUILD)/dos64.img
 	rm -f $(BUILD)/dos64.img.lock bochs.log serial.log
 	bochs -f bochsrc.txt -q
@@ -222,4 +245,4 @@ clean:
 	rm -rf $(BUILD)/*.bin $(BUILD)/*.o $(BUILD)/*.img $(BUILD)/*.elf $(BUILD)/*.map $(BUILD)/*.lock
 	rm -rf $(BUILD)/src $(BUILD)/lean $(BUILD)/include
 
-.PHONY: all lean clean run-bochs run-qemu run-qemu-lean check-layout
+.PHONY: all lean clean run-bochs run-qemu run-qemu-lean check-layout check-layout-neg

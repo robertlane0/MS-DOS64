@@ -1,13 +1,15 @@
 # Phase 1 – Boot & Testing Strategy for 64-bit Conversion
 
-> **As built (2026-09-05):** this strategy is implemented — MBR → stage2 →
-> kernel at `0x100000` boots 76/76 PASS + `COMMAND64` REPL on QEMU (primary)
+> **As built (2026-09-06):** this strategy is implemented — MBR → stage2 →
+> kernel at `0x100000` boots 82/82 PASS + `COMMAND64` REPL on QEMU (primary)
 > and Bochs. Concrete sizes/layout below reflect the code; the step rationale
 > is unchanged. See `README.md` + `docs/19-closure-g1-g6.md` for the final
 > state (chunked loads, `KERNEL_SECTORS 176`, FAT12 volume at LBA 512+,
 > PIC master `0x28`/slave `0x30`). `make lean` builds a shell-only
 > `build/dos64-lean.img` (`SKIP_SELFTEST`, §7.1); tests 73–76 (§7.2) lock in
-> negative-path handling.
+> negative-path handling, tests 77–82 (§7.3) lock in cross-layer
+> malformed-input invariants (BPB table + sentinels, pure ATA table,
+> FAT-chain bounds, allocator arithmetic, queue interleave, layout).
 
 ## 1. Why New Boot Chain Is Needed
 
@@ -160,9 +162,9 @@ wraps the test-calling block in `_start` with a build flag:
 `Makefile` exposes both (objects are kept separate so the images can coexist):
 
 ```bash
-make                    # full: build/dos64.img (RUN_SELFTEST, 76 tests + shell)
+make                    # full: build/dos64.img (RUN_SELFTEST, 82 tests + shell)
 make lean               # lean: build/dos64-lean.img (SKIP_SELFTEST, shell direct)
-make run-qemu           # boot full image, expect "Summary: 76 passed, 0"
+make run-qemu           # boot full image, expect "Summary: 82 passed, 0"
 make run-qemu-lean      # boot lean image, expect "Lean boot ... entering COMMAND64..."
 ```
 
@@ -204,6 +206,56 @@ with systematic failure-mode checks, following the existing
   volume's real DPB), while the valid boot sector still parses;
   `fs_cluster_to_lba64`/`fs_get_cluster64` reject clusters 0/1/huge and
   accept cluster 2.
+
+### 7.3 Cross-layer malformed-input invariants (tests 77–82)
+
+Table-driven where boundaries must stay obvious; all deterministic, no
+emulator timing, no disk I/O except the already-mounted volume for
+read-only sampling. Each leaves its subsystem clean for the shell.
+
+* `[77] BPB table + sentinels` (`test_bpb_table`): 14 single-field
+  mutations from a valid 1.44M baseline — `FATSz=10` (FAT > `fs_vol_fat`),
+  `Root=225` (root > `fs_vol_root`), `Spc=128` (cluster > `fs_vol_iobuf`,
+  parse fail) vs `Spc=64` boundary still ok (32 KiB == iobuf), `1024B`
+  sectors (parse ok, `GEOM_ERR` under the 512B cache), `Tot=4112`
+  (`maxclus` 4080 beyond FAT bytes) — plus stale-`Tot=100` data-end and a
+  `Spc=128` defense-in-depth branch. Guards (`bpb77_pre/post`,
+  `bpb77_dpb_post` + `fs_vol_fat/root/iobuf` samples) prove the validator
+  is read-only and never overflows the fixed cache.
+* `[78] ATA pure table` (`test_ata_table`): 16 `ata_validate_range64`
+  cases (helper only, no port I/O) — `0x0FFFFFFF+1` ok vs `+2` overflow,
+  exact-fit `0x0FFFFFC0+64` ok vs `0x0FFFFFC1+64` past-max, count
+  `0/65/256/high-bits` rejected, `LBA>=2^28`/huge rejected, endpoint
+  inclusive `0x0FFFFFFE+2` ok vs `+3` fail — plus `R8-R11`/`RSI`/`RDX`
+  preservation (the endpoint/count contract from ISSUE-02).
+* `[79] FAT chain bounds` (`test_chain_bounds`): `maxclus=10` synthetic
+  FAT with guards — empty ok, valid `2->3->EOF` ok + cleared, exact-fit
+  `2..10->EOF` (9 hops) ok, overlong cycle `2..10->2` corrupt (hops ≥
+  `maxclus`), dangling `2->0` / `2->11(>maxclus)` terminate ok, `NULL`
+  `RSI`/`RBP` corrupt, `maxclus<2` corrupt, self-loop with `maxclus=2`
+  corrupt, all best-effort cleared and bounded, valid-again (no sticky).
+* `[80] Alloc table` (`test_alloc_table`): 10 `mem_alloc64` sizes from an
+  empty heap — `0` fail, `1/16` ok, `6M-48` ok (max fitting, header 40),
+  `6M/100M/UINT64_MAX/MAX-14(wraps size+15)/MAX-15/2^63-1` fail with the
+  chain intact (validate 0, single `Z`) — then aligned (`4096` ok +
+  aligned, huge/`4G`-align fail), pages (`1` ok, `MAX`/`2^52` fail),
+  resize (`512` ok, `MAX`/`MAX-14`/`10M` fail with `CF`, chain intact).
+* `[81] Queue interleave` (`test_queue_interleave`): empty pop fails,
+  single round-trip, `500x` alternating push/pop at empty, `127`-fill +
+  `100x` push/pop at full with exact FIFO order + drain of the remaining
+  `127`, wraparound `100x0x55` + `50x0x80+i` past `127`, `IF`
+  preservation (`push`/`pop`/`flush` leave `IF` as found) and nested `cli`
+  (inner calls keep `IF=0`, restore to found). Ends flushed.
+* `[82] Layout invariants` (`test_layout`): canonical values
+  (`IMG 10M`, `secsiz 512`, kernel `16+176`, volume `512+2880`, `FAT 4608`
+  / `root 7168` / `iobuf 32768`) plus the same predicates `make
+  check-layout` enforces — `kernel_end<=VOL_LBA`, `volume_end<=IMG_MB`,
+  `FS_VOL_*` aliases, scratch `200/500/501/510/511` clear of kernel and
+  volume, `FAT 9sec` / `root 14sec <=64` (ATA `1..64` contract for the
+  mount reads) — plus negative tables proving off-by-one overlaps
+  (`191`, `500`-extents) and oversize volumes (`1M` image, `20000`
+  sectors) are rejected. `make check-layout-neg` covers the same paths
+  from the host side (override + stamper overlap/sector-size rejection).
 
 ## 8. Bochs Config (AGENTS.md template)
 

@@ -5,13 +5,13 @@ Microsoft MS-DOS v1.25 (MIT). It preserves DOS semantics — FAT12, FCBs,
 PSPs, `INT 21h`, `COMMAND`-style builtins — on native 64-bit code with no
 BIOS calls after the boot handoff.
 
-On boot the kernel runs a 72-check self-test suite (serial + VGA log), then
+On boot the kernel runs a 82-check self-test suite (serial + VGA log), then
 drops into an interactive `COMMAND64` shell.
 
 ## Status
 
 Boots on QEMU (`qemu-system-x86_64 -serial stdio`) and Bochs (256 MiB,
-`ryzen` profile). Self-tests: **72/72 PASS**, then the shell prompt.
+`ryzen` profile). Self-tests: **82/82 PASS**, then the shell prompt.
 Per-subsystem design notes live in `docs/`; `docs/18-*.md` + `docs/19-*.md`
 are the audit trail for the last correctness pass.
 
@@ -128,7 +128,7 @@ Verify (QEMU is the primary proof path):
 
 ```bash
 timeout 25 qemu-system-x86_64 -drive file=build/dos64.img,format=raw -serial stdio -display none
-# tail: Summary: 72 passed, 0 failed ... MS-DOS64 shell (COMMAND64). Type HELP for commands.
+# tail: Summary: 82 passed, 0 failed ... MS-DOS64 shell (COMMAND64). Type HELP for commands.
 
 printf '\rDIR\rTYPE HELLO.TXT\rHELP\rEXIT\r' | timeout 25 qemu-system-x86_64 -drive file=build/dos64.img,format=raw -serial stdio -display none
 
@@ -139,7 +139,7 @@ rm -f bochs.log serial.log build/dos64.img.lock && make && timeout 25 bochs -f b
 
 ```
 src/boot/      mbr.asm (A20, INT13 LBA/CHS) + stage2.asm (mode switch, chunked loads) + gdt.asm
-src/kernel/    main.asm (entry @0x100000, 72-test harness) + shell64.asm (REPL)
+src/kernel/    main.asm (entry @0x100000, 82-test harness) + shell64.asm (REPL)
                cmd64.asm (COMMAND64 parser/builtins/exec/batch) + fat64.asm (UNPACK/PACK)
                fs64.asm (FAT12 mount/read/flush/alloc + FCB record-I/O core)
                mem64.asm (MCB64 manager) + proc64.asm (PSP64/env/loader/spawn)

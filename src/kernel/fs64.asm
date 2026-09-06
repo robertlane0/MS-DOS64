@@ -45,6 +45,7 @@ global fs_alloc_cluster64
 global fs_vol_dpb
 global fs_vol_fat
 global fs_vol_root
+global fs_vol_iobuf
 global fs_vol_boot
 global fs_vol_mounted
 global fs_file_write_cluster64

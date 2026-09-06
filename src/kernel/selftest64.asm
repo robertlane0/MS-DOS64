@@ -1,5 +1,5 @@
 ; MS-DOS64 self-test suite — extracted from main.asm so main stays boot glue.
-; Provides selftest_run64: runs tests 1..76, prints PASS/FAIL + summary + phase lines.
+; Provides selftest_run64: runs tests 1..82, prints PASS/FAIL + summary + phase lines.
 ; Returns RAX = failed count (0 = all pass). Called by _start in full builds.
 ; Lean builds (SKIP_SELFTEST): stub returns 0; test code excluded via RUN_SELFTEST.
 bits 64
@@ -10,6 +10,7 @@ default rel
 %include "include/dpb.inc"
 %include "include/fcb.inc"
 %include "include/psp.inc"
+%include "include/fs.inc"
 
 %ifdef SKIP_SELFTEST
 %undef RUN_SELFTEST
@@ -159,10 +160,16 @@ extern fs_test_geom
 extern fs_mount_volume64
 extern fs_vol_read_file64
 extern fs_bpb_parse64
+extern fs_vol_validate64
 extern fs_cluster_to_lba64
 extern fs_get_cluster64
+extern fs_set_cluster64
+extern fs_chain_free_mem64
 extern fs_vol_boot
 extern fs_vol_dpb
+extern fs_vol_fat
+extern fs_vol_root
+extern fs_vol_iobuf
 extern handler_getdate
 extern handler_setdate
 extern handler_gettime
@@ -1547,6 +1554,108 @@ selftest_run64:
     inc r12
     mov rsi, msg_pass
 .t76_done:
+    call vga_print
+    call serial_print64
+
+    ; ---- Test 77: BPB table + sentinels (FAT/root/cluster/tot/maxclus) ----
+    mov rsi, msg_test77
+    call vga_print
+    call serial_print64
+    call test_bpb_table
+    test rax, rax
+    jz .t77_pass
+    inc r13
+    mov rsi, msg_fail
+    jmp .t77_done
+.t77_pass:
+    inc r12
+    mov rsi, msg_pass
+.t77_done:
+    call vga_print
+    call serial_print64
+
+    ; ---- Test 78: ATA pure table (endpoint/count, no hardware) ----
+    mov rsi, msg_test78
+    call vga_print
+    call serial_print64
+    call test_ata_table
+    test rax, rax
+    jz .t78_pass
+    inc r13
+    mov rsi, msg_fail
+    jmp .t78_done
+.t78_pass:
+    inc r12
+    mov rsi, msg_pass
+.t78_done:
+    call vga_print
+    call serial_print64
+
+    ; ---- Test 79: FAT chain bounds (cycle/iteration, best-effort clear) ----
+    mov rsi, msg_test79
+    call vga_print
+    call serial_print64
+    call test_chain_bounds
+    test rax, rax
+    jz .t79_pass
+    inc r13
+    mov rsi, msg_fail
+    jmp .t79_done
+.t79_pass:
+    inc r12
+    mov rsi, msg_pass
+.t79_done:
+    call vga_print
+    call serial_print64
+
+    ; ---- Test 80: Allocator arithmetic table (near-UINT64_MAX) ----
+    mov rsi, msg_test80
+    call vga_print
+    call serial_print64
+    call test_alloc_table
+    test rax, rax
+    jz .t80_pass
+    inc r13
+    mov rsi, msg_fail
+    jmp .t80_done
+.t80_pass:
+    inc r12
+    mov rsi, msg_pass
+.t80_done:
+    call vga_print
+    call serial_print64
+
+    ; ---- Test 81: Queue interleave (empty/full/wrap + IF preserve) ----
+    mov rsi, msg_test81
+    call vga_print
+    call serial_print64
+    call test_queue_interleave
+    test rax, rax
+    jz .t81_pass
+    inc r13
+    mov rsi, msg_fail
+    jmp .t81_done
+.t81_pass:
+    inc r12
+    mov rsi, msg_pass
+.t81_done:
+    call vga_print
+    call serial_print64
+
+    ; ---- Test 82: Layout invariants (same arithmetic as make check-layout) ----
+    mov rsi, msg_test82
+    call vga_print
+    call serial_print64
+    call test_layout
+    test rax, rax
+    jz .t82_pass
+    inc r13
+    mov rsi, msg_fail
+    jmp .t82_done
+.t82_pass:
+    inc r12
+    mov rsi, msg_pass
+.t82_done:
     call vga_print
     call serial_print64
 
@@ -4050,6 +4159,1416 @@ test_fs_neg:
     ret
 
 ; ------------------------------------------------------------
+; Test 77: BPB table + sentinels — cross-layer malformed-input contracts.
+;   Table-driven: each entry mutates one BPB field from a valid 1.44M
+;   baseline, then checks parse vs validate expectations:
+;     FAT size > fs_vol_fat (FATSz=10 -> GEOM), root > fs_vol_root
+;     (Root=225 -> GEOM), cluster bytes > iobuf (Spc=128 -> parse fail,
+;     Spc=64 boundary still ok), tot/data-region overflow (stale Tot=100
+;     -> GEOM), maxclus beyond FAT bytes (Tot=4112 -> maxclus 4080 -> GEOM).
+;   Sentinels: bpb77_pre/post around scratch boot, dpb_post after DPB,
+;   plus samples of the real fs_vol_fat/root/iobuf prove the validator
+;   never writes to the fixed cache (read-only boundary).
+;   Deterministic, no disk I/O, no timing.
+; ------------------------------------------------------------
+test_bpb_table:
+    push rbx
+    push rcx
+    push rdx
+    push rsi
+    push rdi
+    push rbp
+    push r8
+    push r9
+    push r10
+    push r11
+    push r14
+    lea rdi, [rel bpb77_snap]
+    mov rax, [rel fs_vol_fat]
+    mov [rdi+0], rax
+    mov rax, [rel fs_vol_fat+FS_VOL_FAT_BYTES-8]
+    mov [rdi+8], rax
+    mov rax, [rel fs_vol_root]
+    mov [rdi+16], rax
+    mov rax, [rel fs_vol_root+FS_VOL_ROOT_BYTES-8]
+    mov [rdi+24], rax
+    mov rax, [rel fs_vol_iobuf]
+    mov [rdi+32], rax
+    mov rax, [rel fs_vol_iobuf+FS_VOL_IOBUF_BYTES-8]
+    mov [rdi+40], rax
+    mov dword [rel bpb77_pre], 0xA5A5A5A5
+    mov dword [rel bpb77_pre+4], 0xA5A5A5A5
+    mov dword [rel bpb77_pre+8], 0xA5A5A5A5
+    mov dword [rel bpb77_pre+12], 0xA5A5A5A5
+    mov dword [rel bpb77_post], 0x5A5A5A5A
+    mov dword [rel bpb77_post+4], 0x5A5A5A5A
+    mov dword [rel bpb77_post+8], 0x5A5A5A5A
+    mov dword [rel bpb77_post+12], 0x5A5A5A5A
+    mov dword [rel bpb77_dpb_post], 0xA55A5AA5
+    mov dword [rel bpb77_dpb_post+4], 0xA55A5AA5
+    mov dword [rel bpb77_dpb_post+8], 0xA55A5AA5
+    mov dword [rel bpb77_dpb_post+12], 0xA55A5AA5
+    lea rdi, [rel bpb77_boot]
+    call .bpb77_make_valid
+    lea rsi, [rel bpb77_boot]
+    lea rbp, [rel bpb77_dpb]
+    call fs_bpb_parse64
+    test rax, rax
+    jnz .fail77
+    call fs_vol_validate64
+    test rax, rax
+    jnz .fail77
+    lea rbp, [rel bpb77_dpb]
+    cmp dword [rbp+DPB64.maxclus], 2848
+    jne .fail77
+    call .bpb77_check
+    test rax, rax
+    jnz .fail77
+    lea rbx, [rel bpb77_table]
+    mov r14, bpb77_count
+.loop77:
+    test r14, r14
+    jz .tabledone77
+    lea rdi, [rel bpb77_boot]
+    call .bpb77_make_valid
+    mov eax, [rbx+0]
+    movzx ecx, byte [rbx+4]
+    mov edx, [rbx+8]
+    cmp ecx, 1
+    je .w177
+    cmp ecx, 2
+    je .w277
+    jmp .fail77
+.w177:
+    lea rdi, [rel bpb77_boot]
+    add rdi, rax
+    mov [rdi], dl
+    jmp .doparse77
+.w277:
+    lea rdi, [rel bpb77_boot]
+    add rdi, rax
+    mov [rdi], dx
+    jmp .doparse77
+.doparse77:
+    lea rsi, [rel bpb77_boot]
+    lea rbp, [rel bpb77_dpb]
+    call fs_bpb_parse64
+    movzx ecx, byte [rbx+5]
+    cmp ecx, 1
+    je .expfail77
+    test rax, rax
+    jnz .fail77
+    call fs_vol_validate64
+    movzx ecx, byte [rbx+6]
+    cmp ecx, 0
+    je .expok77
+    cmp ecx, 2
+    je .expgeom77
+    jmp .fail77
+.expfail77:
+    test rax, rax
+    jz .fail77
+    jmp .next77
+.expok77:
+    test rax, rax
+    jnz .fail77
+    jmp .next77
+.expgeom77:
+    cmp rax, FS_MOUNT_GEOM_ERR
+    jne .fail77
+    jmp .next77
+.next77:
+    call .bpb77_check
+    test rax, rax
+    jnz .fail77
+    add rbx, 16
+    dec r14
+    jmp .loop77
+.tabledone77:
+    lea rdi, [rel bpb77_boot]
+    call .bpb77_make_valid
+    lea rsi, [rel bpb77_boot]
+    lea rbp, [rel bpb77_dpb]
+    call fs_bpb_parse64
+    test rax, rax
+    jnz .fail77
+    mov word [rel bpb77_boot + BPB_TotSec16], 100
+    call fs_vol_validate64
+    cmp rax, FS_MOUNT_GEOM_ERR
+    jne .fail77
+    call .bpb77_check
+    test rax, rax
+    jnz .fail77
+    lea rdi, [rel bpb77_boot]
+    call .bpb77_make_valid
+    mov byte [rel bpb77_boot + BPB_SecPerClus], 128
+    lea rsi, [rel bpb77_boot]
+    lea rbp, [rel bpb77_dpb]
+    call fs_bpb_parse64
+    test rax, rax
+    jz .spcparsed77
+    jmp .spcok77
+.spcparsed77:
+    call fs_vol_validate64
+    cmp rax, FS_MOUNT_GEOM_ERR
+    jne .fail77
+.spcok77:
+    call .bpb77_check
+    test rax, rax
+    jnz .fail77
+    lea rdi, [rel bpb77_boot]
+    call .bpb77_make_valid
+    lea rsi, [rel bpb77_boot]
+    lea rbp, [rel bpb77_dpb]
+    call fs_bpb_parse64
+    test rax, rax
+    jnz .fail77
+    call fs_vol_validate64
+    test rax, rax
+    jnz .fail77
+    call .bpb77_check
+    test rax, rax
+    jnz .fail77
+    xor eax, eax
+    jmp .done77
+.bpb77_make_valid:
+    push rdi
+    push rcx
+    push rax
+    mov rcx, 512
+    xor al, al
+    cld
+    rep stosb
+    pop rax
+    pop rcx
+    pop rdi
+    mov word [rdi + BPB_BytsPerSec], 512
+    mov byte [rdi + BPB_SecPerClus], 1
+    mov word [rdi + BPB_RsvdSecCnt], 1
+    mov byte [rdi + BPB_NumFATs], 2
+    mov word [rdi + BPB_RootEntCnt], 224
+    mov word [rdi + BPB_TotSec16], 2880
+    mov byte [rdi + BPB_Media], 0xF0
+    mov word [rdi + BPB_FATSz16], 9
+    mov word [rdi + BPB_SecPerTrk], 18
+    mov word [rdi + BPB_NumHeads], 2
+    mov dword [rdi + BPB_HiddSec], 0
+    mov dword [rdi + BPB_TotSec32], 0
+    mov word [rdi + BPB_BootSig], 0xAA55
+    ret
+.bpb77_check:
+    cmp dword [rel bpb77_pre], 0xA5A5A5A5
+    jne .cgfail77
+    cmp dword [rel bpb77_pre+4], 0xA5A5A5A5
+    jne .cgfail77
+    cmp dword [rel bpb77_pre+8], 0xA5A5A5A5
+    jne .cgfail77
+    cmp dword [rel bpb77_pre+12], 0xA5A5A5A5
+    jne .cgfail77
+    cmp dword [rel bpb77_post], 0x5A5A5A5A
+    jne .cgfail77
+    cmp dword [rel bpb77_post+4], 0x5A5A5A5A
+    jne .cgfail77
+    cmp dword [rel bpb77_post+8], 0x5A5A5A5A
+    jne .cgfail77
+    cmp dword [rel bpb77_post+12], 0x5A5A5A5A
+    jne .cgfail77
+    cmp dword [rel bpb77_dpb_post], 0xA55A5AA5
+    jne .cgfail77
+    cmp dword [rel bpb77_dpb_post+4], 0xA55A5AA5
+    jne .cgfail77
+    cmp dword [rel bpb77_dpb_post+8], 0xA55A5AA5
+    jne .cgfail77
+    cmp dword [rel bpb77_dpb_post+12], 0xA55A5AA5
+    jne .cgfail77
+    lea rdi, [rel bpb77_snap]
+    mov rax, [rel fs_vol_fat]
+    cmp rax, [rdi+0]
+    jne .cgfail77
+    mov rax, [rel fs_vol_fat+FS_VOL_FAT_BYTES-8]
+    cmp rax, [rdi+8]
+    jne .cgfail77
+    mov rax, [rel fs_vol_root]
+    cmp rax, [rdi+16]
+    jne .cgfail77
+    mov rax, [rel fs_vol_root+FS_VOL_ROOT_BYTES-8]
+    cmp rax, [rdi+24]
+    jne .cgfail77
+    mov rax, [rel fs_vol_iobuf]
+    cmp rax, [rdi+32]
+    jne .cgfail77
+    mov rax, [rel fs_vol_iobuf+FS_VOL_IOBUF_BYTES-8]
+    cmp rax, [rdi+40]
+    jne .cgfail77
+    xor eax, eax
+    ret
+.cgfail77:
+    mov rax, 1
+    ret
+.fail77:
+    mov rax, 1
+.done77:
+    pop r14
+    pop r11
+    pop r10
+    pop r9
+    pop r8
+    pop rbp
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rcx
+    pop rbx
+    ret
+
+; ------------------------------------------------------------
+; Test 78: ATA pure table — endpoint/count contract without hardware.
+;   Table-driven ata_validate_range64: LBA 0..0x0FFFFFFF, count strict
+;   1..64, endpoint LBA+count-1 <= 0x0FFFFFFF with no 64-bit wrap.
+;   Covers count 0/65/256/high-bits, LBA max/max+1/huge, exact-fit
+;   0x0FFFFFC0+64, endpoint inclusive 0x0FFFFFFE+2 vs past-max +3.
+;   Also proves the helper preserves all other registers (R8-R11/RSI/RDX
+;   patterns survive) and never issues port I/O. Deterministic, no timing.
+; ------------------------------------------------------------
+test_ata_table:
+    push rbx
+    push rcx
+    push rdx
+    push rsi
+    push rdi
+    push rbp
+    push r8
+    push r9
+    push r10
+    push r11
+    push r14
+    lea rbx, [rel ata78_table]
+    mov r14, ata78_count
+.loop78:
+    test r14, r14
+    jz .done78ok
+    mov rsi, [rbx+0]
+    mov rdx, [rbx+8]
+    mov r8, 0x1111111111111111
+    mov r9, 0x2222222222222222
+    mov r10, 0x3333333333333333
+    mov r11, 0x4444444444444444
+    call ata_validate_range64
+    mov rcx, rax
+    mov rax, 0x1111111111111111
+    cmp r8, rax
+    jne .fail78
+    mov rax, 0x2222222222222222
+    cmp r9, rax
+    jne .fail78
+    mov rax, 0x3333333333333333
+    cmp r10, rax
+    jne .fail78
+    mov rax, 0x4444444444444444
+    cmp r11, rax
+    jne .fail78
+    mov rax, [rbx+0]
+    cmp rsi, rax
+    jne .fail78
+    mov rax, [rbx+8]
+    cmp rdx, rax
+    jne .fail78
+    mov rax, [rbx+16]
+    cmp rcx, rax
+    jne .fail78
+    add rbx, 24
+    dec r14
+    jmp .loop78
+.done78ok:
+    xor eax, eax
+    jmp .done78
+.fail78:
+    mov rax, 1
+.done78:
+    pop r14
+    pop r11
+    pop r10
+    pop r9
+    pop r8
+    pop rbp
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rcx
+    pop rbx
+    ret
+
+; ------------------------------------------------------------
+; Test 79: FAT chain bounds — cycle/iteration limits, best-effort clear.
+;   Synthetic FAT in fat79_buf (guards pre/post prove no overflow) with
+;   small maxclus=10 (9 distinct data clusters 2..10). Proves:
+;   empty/no-op, valid EOF ok + cleared, exact-fit 9-cluster ok,
+;   overlong cycle 2..10->2 corrupt (hops>=maxclus), dangling 2->0 and
+;   2->11(>maxclus) terminate ok, NULL RSI/RBP corrupt, maxclus<2 corrupt,
+;   self-loop corrupt, all bounded (return) with best-effort clears and
+;   valid-again (no sticky state). Pure, no disk I/O, no timing.
+; ------------------------------------------------------------
+test_chain_bounds:
+    push rbx
+    push rcx
+    push rdx
+    push rsi
+    push rdi
+    push rbp
+    push r8
+    push r9
+    push r10
+    push r11
+    push r14
+    mov dword [rel fat79_pre], 0xA5A5A5A5
+    mov dword [rel fat79_pre+4], 0xA5A5A5A5
+    mov dword [rel fat79_pre+8], 0xA5A5A5A5
+    mov dword [rel fat79_pre+12], 0xA5A5A5A5
+    mov dword [rel fat79_post], 0x5A5A5A5A
+    mov dword [rel fat79_post+4], 0x5A5A5A5A
+    mov dword [rel fat79_post+8], 0x5A5A5A5A
+    mov dword [rel fat79_post+12], 0x5A5A5A5A
+    mov dword [rel fat79_dpb_post], 0xA55A5AA5
+    mov dword [rel fat79_dpb_post+4], 0xA55A5AA5
+    mov dword [rel fat79_dpb_post+8], 0xA55A5AA5
+    mov dword [rel fat79_dpb_post+12], 0xA55A5AA5
+    lea rdi, [rel fat79_dpb]
+    mov rcx, 64
+    xor al, al
+    cld
+    rep stosb
+    lea rbp, [rel fat79_dpb]
+    mov dword [rbp+DPB64.maxclus], 10
+    lea rsi, [rel fat79_buf]
+    lea rbp, [rel fat79_dpb]
+    mov rdi, 0
+    call fs_chain_free_mem64
+    test rax, rax
+    jnz .fail79
+    jc .fail79
+    mov rdi, 1
+    call fs_chain_free_mem64
+    test rax, rax
+    jnz .fail79
+    jc .fail79
+    call .fat79_check
+    test rax, rax
+    jnz .fail79
+    call .fat79_zero
+    lea rsi, [rel fat79_buf]
+    lea rbp, [rel fat79_dpb]
+    mov rbx, 2
+    mov rdx, 3
+    call fs_set_cluster64
+    test rax, rax
+    jnz .fail79
+    mov rbx, 3
+    mov rdx, 0xFFF
+    call fs_set_cluster64
+    test rax, rax
+    jnz .fail79
+    mov rdi, 2
+    call fs_chain_free_mem64
+    jc .fail79
+    test rax, rax
+    jnz .fail79
+    mov rbx, 2
+    call fs_get_cluster64
+    test rax, rax
+    jnz .fail79
+    test rdi, rdi
+    jnz .fail79
+    mov rbx, 3
+    call fs_get_cluster64
+    test rax, rax
+    jnz .fail79
+    test rdi, rdi
+    jnz .fail79
+    call .fat79_check
+    test rax, rax
+    jnz .fail79
+    call .fat79_zero
+    lea rsi, [rel fat79_buf]
+    lea rbp, [rel fat79_dpb]
+    mov rbx, 2
+    mov rdx, 3
+    call fs_set_cluster64
+    test rax, rax
+    jnz .fail79
+    mov rbx, 3
+    mov rdx, 4
+    call fs_set_cluster64
+    test rax, rax
+    jnz .fail79
+    mov rbx, 4
+    mov rdx, 5
+    call fs_set_cluster64
+    test rax, rax
+    jnz .fail79
+    mov rbx, 5
+    mov rdx, 6
+    call fs_set_cluster64
+    test rax, rax
+    jnz .fail79
+    mov rbx, 6
+    mov rdx, 7
+    call fs_set_cluster64
+    test rax, rax
+    jnz .fail79
+    mov rbx, 7
+    mov rdx, 8
+    call fs_set_cluster64
+    test rax, rax
+    jnz .fail79
+    mov rbx, 8
+    mov rdx, 9
+    call fs_set_cluster64
+    test rax, rax
+    jnz .fail79
+    mov rbx, 9
+    mov rdx, 10
+    call fs_set_cluster64
+    test rax, rax
+    jnz .fail79
+    mov rbx, 10
+    mov rdx, 0xFFF
+    call fs_set_cluster64
+    test rax, rax
+    jnz .fail79
+    mov rdi, 2
+    call fs_chain_free_mem64
+    jc .fail79
+    test rax, rax
+    jnz .fail79
+    mov rbx, 2
+    call fs_get_cluster64
+    test rax, rax
+    jnz .fail79
+    test rdi, rdi
+    jnz .fail79
+    mov rbx, 10
+    call fs_get_cluster64
+    test rax, rax
+    jnz .fail79
+    test rdi, rdi
+    jnz .fail79
+    call .fat79_check
+    test rax, rax
+    jnz .fail79
+    call .fat79_zero
+    lea rsi, [rel fat79_buf]
+    lea rbp, [rel fat79_dpb]
+    mov rbx, 2
+    mov rdx, 3
+    call fs_set_cluster64
+    test rax, rax
+    jnz .fail79
+    mov rbx, 3
+    mov rdx, 4
+    call fs_set_cluster64
+    test rax, rax
+    jnz .fail79
+    mov rbx, 4
+    mov rdx, 5
+    call fs_set_cluster64
+    test rax, rax
+    jnz .fail79
+    mov rbx, 5
+    mov rdx, 6
+    call fs_set_cluster64
+    test rax, rax
+    jnz .fail79
+    mov rbx, 6
+    mov rdx, 7
+    call fs_set_cluster64
+    test rax, rax
+    jnz .fail79
+    mov rbx, 7
+    mov rdx, 8
+    call fs_set_cluster64
+    test rax, rax
+    jnz .fail79
+    mov rbx, 8
+    mov rdx, 9
+    call fs_set_cluster64
+    test rax, rax
+    jnz .fail79
+    mov rbx, 9
+    mov rdx, 10
+    call fs_set_cluster64
+    test rax, rax
+    jnz .fail79
+    mov rbx, 10
+    mov rdx, 2
+    call fs_set_cluster64
+    test rax, rax
+    jnz .fail79
+    mov rdi, 2
+    call fs_chain_free_mem64
+    jnc .fail79
+    cmp rax, 1
+    jne .fail79
+    mov rbx, 2
+    call fs_get_cluster64
+    test rax, rax
+    jnz .fail79
+    test rdi, rdi
+    jnz .fail79
+    mov rbx, 10
+    call fs_get_cluster64
+    test rax, rax
+    jnz .fail79
+    test rdi, rdi
+    jnz .fail79
+    call .fat79_check
+    test rax, rax
+    jnz .fail79
+    call .fat79_zero
+    lea rsi, [rel fat79_buf]
+    lea rbp, [rel fat79_dpb]
+    mov rbx, 2
+    mov rdx, 0
+    call fs_set_cluster64
+    test rax, rax
+    jnz .fail79
+    mov rdi, 2
+    call fs_chain_free_mem64
+    jc .fail79
+    test rax, rax
+    jnz .fail79
+    mov rbx, 2
+    call fs_get_cluster64
+    test rax, rax
+    jnz .fail79
+    test rdi, rdi
+    jnz .fail79
+    call .fat79_check
+    test rax, rax
+    jnz .fail79
+    call .fat79_zero
+    lea rsi, [rel fat79_buf]
+    lea rbp, [rel fat79_dpb]
+    mov rbx, 2
+    mov rdx, 11
+    call fs_set_cluster64
+    test rax, rax
+    jnz .fail79
+    mov rdi, 2
+    call fs_chain_free_mem64
+    jc .fail79
+    test rax, rax
+    jnz .fail79
+    mov rbx, 2
+    call fs_get_cluster64
+    test rax, rax
+    jnz .fail79
+    test rdi, rdi
+    jnz .fail79
+    call .fat79_check
+    test rax, rax
+    jnz .fail79
+    lea rbp, [rel fat79_dpb]
+    mov rdi, 2
+    xor esi, esi
+    call fs_chain_free_mem64
+    jnc .fail79
+    cmp rax, 1
+    jne .fail79
+    lea rsi, [rel fat79_buf]
+    mov rdi, 2
+    xor ebp, ebp
+    call fs_chain_free_mem64
+    jnc .fail79
+    cmp rax, 1
+    jne .fail79
+    lea rbp, [rel fat79_dpb]
+    mov dword [rbp+DPB64.maxclus], 1
+    lea rsi, [rel fat79_buf]
+    mov rdi, 2
+    call fs_chain_free_mem64
+    jnc .fail79
+    cmp rax, 1
+    jne .fail79
+    mov dword [rbp+DPB64.maxclus], 10
+    call .fat79_check
+    test rax, rax
+    jnz .fail79
+    lea rbp, [rel fat79_dpb]
+    mov dword [rbp+DPB64.maxclus], 2
+    call .fat79_zero
+    lea rsi, [rel fat79_buf]
+    lea rbp, [rel fat79_dpb]
+    mov rbx, 2
+    mov rdx, 2
+    call fs_set_cluster64
+    test rax, rax
+    jnz .fail79
+    mov rdi, 2
+    call fs_chain_free_mem64
+    jnc .fail79
+    cmp rax, 1
+    jne .fail79
+    mov rbx, 2
+    call fs_get_cluster64
+    test rax, rax
+    jnz .fail79
+    test rdi, rdi
+    jnz .fail79
+    lea rbp, [rel fat79_dpb]
+    mov dword [rbp+DPB64.maxclus], 10
+    call .fat79_check
+    test rax, rax
+    jnz .fail79
+    call .fat79_zero
+    lea rsi, [rel fat79_buf]
+    lea rbp, [rel fat79_dpb]
+    mov rbx, 2
+    mov rdx, 3
+    call fs_set_cluster64
+    test rax, rax
+    jnz .fail79
+    mov rbx, 3
+    mov rdx, 0xFFF
+    call fs_set_cluster64
+    test rax, rax
+    jnz .fail79
+    mov rdi, 2
+    call fs_chain_free_mem64
+    jc .fail79
+    test rax, rax
+    jnz .fail79
+    call .fat79_check
+    test rax, rax
+    jnz .fail79
+    xor eax, eax
+    jmp .done79
+.fat79_zero:
+    push rdi
+    push rcx
+    push rax
+    lea rdi, [rel fat79_buf]
+    mov rcx, 128
+    xor al, al
+    cld
+    rep stosb
+    pop rax
+    pop rcx
+    pop rdi
+    ret
+.fat79_check:
+    cmp dword [rel fat79_pre], 0xA5A5A5A5
+    jne .fc79fail
+    cmp dword [rel fat79_pre+4], 0xA5A5A5A5
+    jne .fc79fail
+    cmp dword [rel fat79_pre+8], 0xA5A5A5A5
+    jne .fc79fail
+    cmp dword [rel fat79_pre+12], 0xA5A5A5A5
+    jne .fc79fail
+    cmp dword [rel fat79_post], 0x5A5A5A5A
+    jne .fc79fail
+    cmp dword [rel fat79_post+4], 0x5A5A5A5A
+    jne .fc79fail
+    cmp dword [rel fat79_post+8], 0x5A5A5A5A
+    jne .fc79fail
+    cmp dword [rel fat79_post+12], 0x5A5A5A5A
+    jne .fc79fail
+    cmp dword [rel fat79_dpb_post], 0xA55A5AA5
+    jne .fc79fail
+    cmp dword [rel fat79_dpb_post+4], 0xA55A5AA5
+    jne .fc79fail
+    cmp dword [rel fat79_dpb_post+8], 0xA55A5AA5
+    jne .fc79fail
+    cmp dword [rel fat79_dpb_post+12], 0xA55A5AA5
+    jne .fc79fail
+    xor eax, eax
+    ret
+.fc79fail:
+    mov rax, 1
+    ret
+.fail79:
+    mov rax, 1
+.done79:
+    pop r14
+    pop r11
+    pop r10
+    pop r9
+    pop r8
+    pop rbp
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rcx
+    pop rbx
+    ret
+
+; ------------------------------------------------------------
+; Test 80: Allocator arithmetic table — near-UINT64_MAX boundaries.
+;   Table-driven mem_alloc64 sizes (each from an empty heap via
+;   mem_reset64, so success is deterministic): 0 fail, 1/16 ok,
+;   6M-48 ok (max fitting: header 40 + 16-align), 6M fail (capacity),
+;   100M fail, UINT64_MAX / MAX-14 (wraps size+15 to 0) / MAX-15
+;   (rounds huge) / 2^63-1 fail via overflow-or-capacity with the chain
+;   intact (validate 0, single Z after fails). Then aligned (4096 ok +
+;   aligned, huge/4G-align fail), pages (1 ok, MAX/2^52 fail), resize
+;   (512 ok, MAX/MAX-14/10M fail with CF, chain intact). No timing.
+; ------------------------------------------------------------
+test_alloc_table:
+    push rbx
+    push rcx
+    push rdx
+    push rsi
+    push rdi
+    push rbp
+    push r8
+    push r9
+    push r10
+    push r11
+    push r14
+    lea rbx, [rel alloc80_table]
+    mov r14, alloc80_count
+.loop80:
+    test r14, r14
+    jz .tabledone80
+    mov r10, [rbx+8]
+    call mem_reset64
+    call mem_validate64
+    test rax, rax
+    jnz .fail80
+    mov rdi, [rbx+0]
+    call mem_alloc64
+    mov r11, rax
+    cmp r10, 0
+    je .expfail80
+    test r11, r11
+    jz .fail80
+    cmp r11, 0x200000
+    jb .fail80
+    call mem_validate64
+    test rax, rax
+    jnz .fail80
+    mov rdi, r11
+    call mem_free64
+    jc .fail80
+    call mem_validate64
+    test rax, rax
+    jnz .fail80
+    jmp .next80
+.expfail80:
+    test r11, r11
+    jnz .fail80
+    call mem_validate64
+    test rax, rax
+    jnz .fail80
+    call mem_count_blocks64
+    cmp rax, 1
+    jne .fail80
+.next80:
+    add rbx, 16
+    dec r14
+    jmp .loop80
+.tabledone80:
+    call mem_reset64
+    mov rdi, 16
+    mov rsi, 4096
+    call mem_alloc_aligned64
+    test rax, rax
+    jz .fail80
+    test rax, 0xFFF
+    jnz .fail80
+    mov rdi, rax
+    call mem_free64
+    jc .fail80
+    call mem_validate64
+    test rax, rax
+    jnz .fail80
+    mov rdi, -1
+    mov rsi, 4096
+    call mem_alloc_aligned64
+    test rax, rax
+    jnz .fail80
+    call mem_validate64
+    test rax, rax
+    jnz .fail80
+    mov rdi, 16
+    mov rsi, 1
+    shl rsi, 32
+    call mem_alloc_aligned64
+    test rax, rax
+    jnz .fail80
+    call mem_validate64
+    test rax, rax
+    jnz .fail80
+    mov rdi, -16
+    mov rsi, 4096
+    call mem_alloc_aligned64
+    test rax, rax
+    jnz .fail80
+    call mem_validate64
+    test rax, rax
+    jnz .fail80
+    mov rdi, 1
+    call mem_alloc_pages64
+    test rax, rax
+    jz .fail80
+    mov rdi, rax
+    call mem_free64
+    jc .fail80
+    call mem_validate64
+    test rax, rax
+    jnz .fail80
+    mov rdi, -1
+    call mem_alloc_pages64
+    test rax, rax
+    jnz .fail80
+    call mem_validate64
+    test rax, rax
+    jnz .fail80
+    mov rdi, 1
+    shl rdi, 52
+    call mem_alloc_pages64
+    test rax, rax
+    jnz .fail80
+    call mem_validate64
+    test rax, rax
+    jnz .fail80
+    mov rdi, 256
+    call mem_alloc64
+    test rax, rax
+    jz .fail80
+    mov rbx, rax
+    mov rdi, rax
+    mov rsi, 512
+    call mem_resize64
+    jc .fail80
+    test rax, rax
+    jnz .fail80
+    call mem_validate64
+    test rax, rax
+    jnz .fail80
+    mov rdi, rbx
+    mov rsi, -1
+    call mem_resize64
+    jnc .fail80
+    test rax, rax
+    jz .fail80
+    call mem_validate64
+    test rax, rax
+    jnz .fail80
+    mov rdi, rbx
+    mov rsi, -15
+    call mem_resize64
+    jnc .fail80
+    test rax, rax
+    jz .fail80
+    call mem_validate64
+    test rax, rax
+    jnz .fail80
+    mov rdi, rbx
+    mov rsi, 10*1024*1024
+    call mem_resize64
+    jnc .fail80
+    test rax, rax
+    jz .fail80
+    call mem_validate64
+    test rax, rax
+    jnz .fail80
+    mov rdi, rbx
+    call mem_free64
+    jc .fail80
+    call mem_validate64
+    test rax, rax
+    jnz .fail80
+    call mem_reset64
+    call mem_validate64
+    test rax, rax
+    jnz .fail80
+    xor eax, eax
+    jmp .done80
+.fail80:
+    mov rax, 1
+.done80:
+    pop r14
+    pop r11
+    pop r10
+    pop r9
+    pop r8
+    pop rbp
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rcx
+    pop rbx
+    ret
+
+; ------------------------------------------------------------
+; Test 81: Queue interleave — empty/full/wrap state machine + IF preserve.
+;   Pure queue logic (no hardware, no timing): empty pop fails, single
+;   push/pop round-trip, 500x alternating push/pop at the empty boundary
+;   (no drops/reorders/count drift), 127-fill + 100x push/pop at the full
+;   boundary with exact FIFO order (V0..V126 then P0..P99), drain of the
+;   remaining 127 in order, wraparound 100x0x55 drain + 50x0x80+i wrap
+;   past 127, IF preservation (push/pop/flush leave IF as found) and
+;   nested cli (outer cli + inner calls keep IF=0, restore to found).
+;   Ends flushed (clean for later tests/shell).
+; ------------------------------------------------------------
+test_queue_interleave:
+    push rbx
+    push rcx
+    push rdx
+    push rsi
+    push rdi
+    push r8
+    push r9
+    push r10
+    push r14
+    call kbd_flush
+    call kbd_queue_pop
+    jnc .fail81
+    mov al, 0x1E
+    call kbd_queue_push
+    jc .fail81
+    call kbd_queue_pop
+    jc .fail81
+    cmp al, 0x1E
+    jne .fail81
+    call kbd_queue_pop
+    jnc .fail81
+    mov ecx, 500
+    xor ebx, ebx
+.alt81:
+    mov al, bl
+    call kbd_queue_push
+    jc .fail81
+    call kbd_queue_pop
+    jc .fail81
+    cmp al, bl
+    jne .fail81
+    inc bl
+    dec ecx
+    jnz .alt81
+    call kbd_queue_pop
+    jnc .fail81
+    call kbd_flush
+    mov ecx, 127
+    xor ebx, ebx
+.fill127_81:
+    mov al, bl
+    call kbd_queue_push
+    jc .fail81
+    inc bl
+    dec ecx
+    jnz .fill127_81
+    mov ecx, 100
+    xor ebx, ebx
+.altfull81:
+    mov al, bl
+    and al, 0x7F
+    or al, 0x80
+    mov r8b, bl
+    call kbd_queue_push
+    jc .fail81
+    call kbd_queue_pop
+    jc .fail81
+    cmp al, r8b
+    jne .fail81
+    inc bl
+    dec ecx
+    jnz .altfull81
+    mov ecx, 27
+    mov ebx, 100
+.drain1_81:
+    call kbd_queue_pop
+    jc .fail81
+    cmp al, bl
+    jne .fail81
+    inc bl
+    dec ecx
+    jnz .drain1_81
+    mov ecx, 100
+    xor ebx, ebx
+.drain2_81:
+    call kbd_queue_pop
+    jc .fail81
+    mov dl, al
+    mov al, bl
+    and al, 0x7F
+    or al, 0x80
+    cmp dl, al
+    jne .fail81
+    inc bl
+    dec ecx
+    jnz .drain2_81
+    call kbd_queue_pop
+    jnc .fail81
+    call kbd_flush
+    mov ecx, 100
+    mov al, 0x55
+.adv81:
+    call kbd_queue_push
+    jc .fail81
+    dec ecx
+    jnz .adv81
+    mov ecx, 100
+.advd81:
+    call kbd_queue_pop
+    jc .fail81
+    cmp al, 0x55
+    jne .fail81
+    dec ecx
+    jnz .advd81
+    xor ebx, ebx
+    mov ecx, 50
+.fillw81:
+    mov al, bl
+    add al, 0x80
+    call kbd_queue_push
+    jc .fail81
+    inc bl
+    dec ecx
+    jnz .fillw81
+    xor ebx, ebx
+    mov ecx, 50
+.drainw81:
+    call kbd_queue_pop
+    jc .fail81
+    mov dl, al
+    mov al, bl
+    add al, 0x80
+    cmp dl, al
+    jne .fail81
+    inc bl
+    dec ecx
+    jnz .drainw81
+    pushfq
+    pop rax
+    and rax, 0x200
+    mov r14, rax
+    mov al, 0x1E
+    call kbd_queue_push
+    jc .fail81
+    pushfq
+    pop rax
+    and rax, 0x200
+    cmp rax, r14
+    jne .fail81
+    call kbd_queue_pop
+    jc .fail81
+    pushfq
+    pop rax
+    and rax, 0x200
+    cmp rax, r14
+    jne .fail81
+    call kbd_flush
+    pushfq
+    pop rax
+    and rax, 0x200
+    cmp rax, r14
+    jne .fail81
+    pushfq
+    cli
+    pushfq
+    pop rax
+    test rax, 0x200
+    jnz .fail81outer
+    mov al, 0x33
+    call kbd_queue_push
+    jc .fail81outer
+    pushfq
+    pop rax
+    test rax, 0x200
+    jnz .fail81outer
+    call kbd_queue_pop
+    jc .fail81outer
+    cmp al, 0x33
+    jne .fail81outer
+    pushfq
+    pop rax
+    test rax, 0x200
+    jnz .fail81outer
+    popfq
+    pushfq
+    pop rax
+    and rax, 0x200
+    cmp rax, r14
+    jne .fail81
+    call kbd_flush
+    xor eax, eax
+    jmp .done81
+.fail81outer:
+    popfq
+    jmp .fail81
+.fail81:
+    mov r11, 1
+    jmp .flush81
+.done81:
+    xor r11d, r11d
+.flush81:
+    call kbd_flush
+    mov rax, r11
+.done81ret:
+    pop r14
+    pop r10
+    pop r9
+    pop r8
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rcx
+    pop rbx
+    ret
+
+; ------------------------------------------------------------
+; Test 82: Layout invariants — same arithmetic as make check-layout.
+;   Locks the canonical disk layout ( IMG 10M, secsiz 512, kernel 16+176,
+;   volume 512+2880, FAT 4608 / root 7168 / iobuf 32768 ) and proves the
+;   build-time predicates at runtime, pure arithmetic, no disk I/O:
+;     kernel_end=16+176<=512, volume_end=3392*512<=10M, aliases
+;     FS_VOL_LBA==VOL_LBA, scratch 200/500/501/510/511 clear of kernel
+;     [16,192) and volume [512,3392), FAT 9sec / root 14sec <=64 (ATA
+;     1..64 contract for the mount reads). Negative tables prove the same
+;   predicates reject off-by-one overlaps (511, 500+extents) and oversize
+;   volumes (1M image, 20000 sectors). Deterministic, no timing.
+; ------------------------------------------------------------
+test_layout:
+    push rbx
+    push rcx
+    push rdx
+    push rsi
+    push rdi
+    push rbp
+    push r8
+    push r9
+    push r10
+    push r11
+    push r14
+    mov eax, IMG_MB
+    cmp eax, 10
+    jne .fail82
+    mov eax, IMG_SECTOR_SIZE
+    cmp eax, 512
+    jne .fail82
+    mov eax, KERNEL_LBA
+    cmp eax, 16
+    jne .fail82
+    mov eax, KERNEL_SECTORS
+    cmp eax, 176
+    jne .fail82
+    mov eax, VOL_LBA
+    cmp eax, 512
+    jne .fail82
+    mov eax, VOL_SECTORS
+    cmp eax, 2880
+    jne .fail82
+    mov eax, FS_VOL_LBA
+    cmp eax, 512
+    jne .fail82
+    mov eax, FS_VOL_TOTSEC
+    cmp eax, 2880
+    jne .fail82
+    mov eax, FS_VOL_FAT_BYTES
+    cmp eax, 4608
+    jne .fail82
+    mov eax, FS_VOL_ROOT_BYTES
+    cmp eax, 7168
+    jne .fail82
+    mov eax, FS_VOL_IOBUF_BYTES
+    cmp eax, 32768
+    jne .fail82
+    mov eax, FS_VOL_BOOT_BYTES
+    cmp eax, 512
+    jne .fail82
+    mov eax, FS_VOL_SECSIZ
+    cmp eax, 512
+    jne .fail82
+    mov eax, KERNEL_LBA
+    add eax, KERNEL_SECTORS
+    cmp eax, VOL_LBA
+    ja .fail82
+    mov rax, VOL_LBA
+    add rax, VOL_SECTORS
+    jc .fail82
+    imul rax, 512
+    jc .fail82
+    mov rbx, IMG_MB
+    imul rbx, 1024*1024
+    cmp rax, rbx
+    ja .fail82
+    mov eax, FS_VOL_LBA
+    cmp eax, VOL_LBA
+    jne .fail82
+    mov eax, FS_VOL_TOTSEC
+    cmp eax, VOL_SECTORS
+    jne .fail82
+    mov eax, 200
+    cmp eax, KERNEL_LBA
+    jb .s200v82
+    mov ebx, KERNEL_LBA
+    add ebx, KERNEL_SECTORS
+    cmp eax, ebx
+    jb .fail82
+.s200v82:
+    cmp eax, VOL_LBA
+    jb .s200ok82
+    mov ebx, VOL_LBA
+    add ebx, VOL_SECTORS
+    cmp eax, ebx
+    jb .fail82
+.s200ok82:
+    mov eax, 500
+    cmp eax, KERNEL_LBA
+    jb .s500v82
+    mov ebx, KERNEL_LBA
+    add ebx, KERNEL_SECTORS
+    cmp eax, ebx
+    jb .fail82
+.s500v82:
+    cmp eax, VOL_LBA
+    jb .s500ok82
+    mov ebx, VOL_LBA
+    add ebx, VOL_SECTORS
+    cmp eax, ebx
+    jb .fail82
+.s500ok82:
+    mov eax, 501
+    cmp eax, KERNEL_LBA
+    jb .s501v82
+    mov ebx, KERNEL_LBA
+    add ebx, KERNEL_SECTORS
+    cmp eax, ebx
+    jb .fail82
+.s501v82:
+    cmp eax, VOL_LBA
+    jb .s501ok82
+    mov ebx, VOL_LBA
+    add ebx, VOL_SECTORS
+    cmp eax, ebx
+    jb .fail82
+.s501ok82:
+    mov eax, 510
+    cmp eax, KERNEL_LBA
+    jb .s510v82
+    mov ebx, KERNEL_LBA
+    add ebx, KERNEL_SECTORS
+    cmp eax, ebx
+    jb .fail82
+.s510v82:
+    cmp eax, VOL_LBA
+    jb .s510ok82
+    mov ebx, VOL_LBA
+    add ebx, VOL_SECTORS
+    cmp eax, ebx
+    jb .fail82
+.s510ok82:
+    mov eax, 511
+    cmp eax, KERNEL_LBA
+    jb .s511v82
+    mov ebx, KERNEL_LBA
+    add ebx, KERNEL_SECTORS
+    cmp eax, ebx
+    jb .fail82
+.s511v82:
+    cmp eax, VOL_LBA
+    jb .s511ok82
+    mov ebx, VOL_LBA
+    add ebx, VOL_SECTORS
+    cmp eax, ebx
+    jb .fail82
+.s511ok82:
+    mov eax, FS_VOL_FAT_BYTES
+    xor edx, edx
+    mov ecx, 512
+    div ecx
+    test edx, edx
+    jnz .fail82
+    cmp eax, 64
+    ja .fail82
+    cmp eax, 9
+    jne .fail82
+    mov eax, FS_VOL_ROOT_BYTES
+    xor edx, edx
+    mov ecx, 512
+    div ecx
+    test edx, edx
+    jnz .fail82
+    cmp eax, 64
+    ja .fail82
+    cmp eax, 14
+    jne .fail82
+    lea rbx, [rel layout82_ext_table]
+    mov r14, layout82_ext_count
+.loopext82:
+    test r14, r14
+    jz .extdone82
+    mov eax, [rbx+0]
+    mov ecx, [rbx+4]
+    mov edx, [rbx+8]
+    mov esi, [rbx+12]
+    add eax, ecx
+    jc .extfail82
+    cmp eax, edx
+    jbe .extpass82
+.extfail82:
+    cmp esi, 1
+    jne .fail82
+    jmp .extnext82
+.extpass82:
+    cmp esi, 0
+    jne .fail82
+.extnext82:
+    add rbx, 16
+    dec r14
+    jmp .loopext82
+.extdone82:
+    lea rbx, [rel layout82_fit_table]
+    mov r14, layout82_fit_count
+.loopfit82:
+    test r14, r14
+    jz .fitdone82
+    mov eax, [rbx+0]
+    mov ecx, [rbx+4]
+    mov edx, [rbx+8]
+    mov esi, [rbx+12]
+    mov rax, rax
+    mov rcx, rcx
+    add rax, rcx
+    jc .fitfail82
+    imul rax, 512
+    jc .fitfail82
+    mov rcx, rdx
+    imul rcx, 1024*1024
+    cmp rax, rcx
+    jbe .fitpass82
+.fitfail82:
+    cmp esi, 1
+    jne .fail82
+    jmp .fitnext82
+.fitpass82:
+    cmp esi, 0
+    jne .fail82
+.fitnext82:
+    add rbx, 16
+    dec r14
+    jmp .loopfit82
+.fitdone82:
+    xor eax, eax
+    jmp .done82
+.fail82:
+    mov rax, 1
+.done82:
+    pop r14
+    pop r11
+    pop r10
+    pop r9
+    pop r8
+    pop rbp
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rcx
+    pop rbx
+    ret
+
+; ------------------------------------------------------------
 ; Test 28: PSP init/validate (SETMEM analog, MSDOS.ASM:3363)
 ; ------------------------------------------------------------
 test_psp_init:
@@ -6428,6 +7947,12 @@ msg_test73 db " [73] Loader negative (image/entry/stack/bad hdr)... ",0
 msg_test74 db " [74] ATA negative (range reject, timeout, intact)... ",0
 msg_test75 db " [75] Syscall bounds (MAXCOM/MAXCOM+1/FF)... ",0
 msg_test76 db " [76] FAT12 negative (BPB/cluster/NULL/missing)... ",0
+msg_test77 db " [77] BPB table + sentinels (FAT/root/cluster/tot)... ",0
+msg_test78 db " [78] ATA pure table (endpoint/count, no hw)... ",0
+msg_test79 db " [79] FAT chain bounds (cycle/iter, clear)... ",0
+msg_test80 db " [80] Alloc table (near-UINT64_MAX, aligned/pages)... ",0
+msg_test81 db " [81] Queue interleave (empty/full/wrap + IF)... ",0
+msg_test82 db " [82] Layout invariants (same as check-layout)... ",0
 msg_pass db "PASS",13,10,0
 msg_fail db "FAIL",13,10,0
 msg_summary db 13,10,"Summary: ",0
@@ -6501,6 +8026,143 @@ p8_env_empty db 0
 p8_env_missing db "NOPE",0
 p8_outbuf_val db 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
 
+; ------------------------------------------------------------
+; Cross-layer tables for tests 77-82 (boundary values obvious).
+; ------------------------------------------------------------
+align 8
+; Test 77: BPB single-field mutations from a valid 1.44M baseline.
+; Entry: dd bpb_offset, db width(1/2), db exp_parse(0 ok/1 fail),
+;        db exp_valid(0 ok/2 GEOM/0xFF skip), db pad, dd value, dd 0.
+; Offsets are BPB_* from include/fs.inc (11=BytsPerSec, 13=SecPerClus,
+; 14=Rsvd, 16=NumFATs, 17=RootEnt, 19=Tot16, 22=FATSz).
+bpb77_table:
+    dd 22
+    db 2, 0, 2, 0
+    dd 10
+    dd 0
+    dd 22
+    db 2, 1, 0xFF, 0
+    dd 0
+    dd 0
+    dd 17
+    db 2, 0, 2, 0
+    dd 225
+    dd 0
+    dd 17
+    db 2, 1, 0xFF, 0
+    dd 0
+    dd 0
+    dd 13
+    db 1, 1, 0xFF, 0
+    dd 128
+    dd 0
+    dd 13
+    db 1, 0, 0, 0
+    dd 64
+    dd 0
+    dd 13
+    db 1, 1, 0xFF, 0
+    dd 0
+    dd 0
+    dd 11
+    db 2, 0, 2, 0
+    dd 1024
+    dd 0
+    dd 11
+    db 2, 1, 0xFF, 0
+    dd 123
+    dd 0
+    dd 19
+    db 2, 1, 0xFF, 0
+    dd 0
+    dd 0
+    dd 19
+    db 2, 0, 2, 0
+    dd 4112
+    dd 0
+    dd 16
+    db 1, 1, 0xFF, 0
+    dd 0
+    dd 0
+    dd 16
+    db 1, 1, 0xFF, 0
+    dd 5
+    dd 0
+    dd 14
+    db 2, 1, 0xFF, 0
+    dd 0
+    dd 0
+bpb77_table_end:
+bpb77_count equ (bpb77_table_end - bpb77_table)/16
+
+align 8
+; Test 78: pure ata_validate_range64 (LBA, count, expected 0 ok/1 invalid).
+; No hardware: helper only. Boundaries: max LBA 0x0FFFFFFF, max count 64,
+; exact-fit 0x0FFFFFC0+64, endpoint inclusive 0x0FFFFFFE+2.
+ata78_table:
+    dq 0, 1, 0
+    dq 0x0FFFFFFF, 1, 0
+    dq 0x0FFFFFFF, 2, 1
+    dq 0x0FFFFFC0, 64, 0
+    dq 0x0FFFFFC1, 64, 1
+    dq 0, 0, 1
+    dq 0, 65, 1
+    dq 0, 256, 1
+    dq 0, 0x100000001, 1
+    dq 0x10000000, 1, 1
+    dq 0x10000001, 1, 1
+    dq 0xFFFFFFFFFFFFFFFF, 1, 1
+    dq 0, 0xFFFFFFFFFFFFFFFF, 1
+    dq 0, 64, 0
+    dq 0x0FFFFFFE, 2, 0
+    dq 0x0FFFFFFE, 3, 1
+ata78_table_end:
+ata78_count equ (ata78_table_end - ata78_table)/24
+
+align 8
+; Test 80: mem_alloc64 sizes (size, expected 0 fail/1 success).
+; Each case runs from an empty heap (mem_reset64 first), so success is
+; deterministic. 6M heap: 6291456 bytes; max fitting request is 6M-48
+; (header 32 + 16-align). Near-UINT64_MAX sizes must fail via
+; size+15 overflow or capacity, never corrupt the chain.
+alloc80_table:
+    dq 0, 0
+    dq 1, 1
+    dq 16, 1
+    dq 6291408, 1
+    dq 6291456, 0
+    dq 104857600, 0
+    dq 0xFFFFFFFFFFFFFFFF, 0
+    dq 0xFFFFFFFFFFFFFFF1, 0
+    dq 0xFFFFFFFFFFFFFFF0, 0
+    dq 0x7FFFFFFFFFFFFFFF, 0
+alloc80_table_end:
+alloc80_count equ (alloc80_table_end - alloc80_table)/16
+
+align 8
+; Test 82: kernel extent predicate (k_lba, k_sec, v_lba, expected).
+; Predicate (same as make check-layout): k_lba+k_sec <= v_lba.
+layout82_ext_table:
+    dd 16, 176, 512, 0
+    dd 16, 176, 191, 1
+    dd 16, 500, 512, 1
+    dd 0, 16, 512, 0
+    dd 16, 176, 192, 0
+    dd 16, 177, 192, 1
+layout82_ext_table_end:
+layout82_ext_count equ (layout82_ext_table_end - layout82_ext_table)/16
+
+align 8
+; Test 82: volume-fits predicate (v_lba, v_sec, img_mb, expected).
+; Predicate: (v_lba+v_sec)*512 <= img_mb*1M, no 64-bit wrap.
+layout82_fit_table:
+    dd 512, 2880, 10, 0
+    dd 512, 2880, 1, 1
+    dd 512, 20000, 10, 1
+    dd 0, 2880, 10, 0
+layout82_fit_table_end:
+layout82_fit_count equ (layout82_fit_table_end - layout82_fit_table)/16
+
 
 section .bss
 align 16
@@ -6512,6 +8174,19 @@ p8_exe_src: resb 1024
 p8_file_buf: resb 1024
 p9_bufin: resb 32
 p9_rwbuf: resb 64
+; --- Test 77: BPB table scratch with sentinels (no disk I/O) ---
+bpb77_pre: resb 16
+bpb77_boot: resb 512
+bpb77_post: resb 16
+bpb77_dpb: resb 64
+bpb77_dpb_post: resb 16
+bpb77_snap: resb 48
+; --- Test 79: FAT chain bounds scratch with sentinels (no disk I/O) ---
+fat79_pre: resb 16
+fat79_buf: resb 128
+fat79_post: resb 16
+fat79_dpb: resb 64
+fat79_dpb_post: resb 16
 
 
 %else
