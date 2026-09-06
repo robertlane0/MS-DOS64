@@ -749,8 +749,9 @@ fs_dir_get_attr64:
 
 ; ------------------------------------------------------------
 ; fs_dread64 — absolute sector read (DREAD analog, no BIOS/retry)
-;   In: RDI = buffer linear, RSI = LBA, RDX = count 1..256
-;   Out: RAX 0 ok, 1 fail. (ATA PIO; HARDERR retry dropped.)
+;   In: RDI = buffer linear, RSI = LBA, RDX = count (strict 1..64,
+;       LBA+count-1 <= 0x0FFFFFFF; see ata_validate_range64).
+;   Out: RAX 0 ok, 1 fail (incl. invalid range). (ATA PIO; HARDERR retry dropped.)
 ; fs_dwrite64 — same for write (DWRITE analog).
 ; ------------------------------------------------------------
 fs_dread64:
@@ -2003,8 +2004,8 @@ fs_mount_volume64:
     mov edx, [rbp + DPB64.fatsiz]
     test edx, edx
     jz .fail_geom
-    cmp edx, 256
-    ja .fail_geom                  ; ATA count is 8-bit (0 means 256)
+    cmp edx, 64
+    ja .fail_geom                  ; ATA driver contract is strict 1..64
     mov r8d, edx
     mov r9d, eax
     imul r8, r9                    ; R8 = fatsiz_bytes
@@ -2023,8 +2024,8 @@ fs_mount_volume64:
     mov rdx, [rel fs_vol_dirsec]
     test rdx, rdx
     jz .fail_geom
-    cmp rdx, 256
-    ja .fail_geom
+    cmp rdx, 64
+    ja .fail_geom                  ; ATA driver contract is strict 1..64
     mov rax, rdx
     mov r8d, [rbp + DPB64.secsiz]
     imul rax, r8                   ; dirsec_bytes

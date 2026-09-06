@@ -132,6 +132,7 @@ extern ata_wait_ready
 extern ata_wait_drq
 extern ata_read_lba28
 extern ata_write_lba28
+extern ata_validate_range64
 extern ata_test_mbr_read
 extern ata_test_write_readback
 extern ata_test_chs_conversion
@@ -3527,8 +3528,11 @@ test_neg_verify:
 
 ; ------------------------------------------------------------
 ; Test 74: ATA negative paths — out-of-range LBA rejected fast
-;   (RAX=1, no hardware wait), wait helpers terminate (no hang),
-;   and a normal MBR read still works afterwards (no state damage).
+;   (RAX=1, no hardware wait), strict 1..64 count contract
+;   (count 0/65/256/high-bits rejected before any port I/O),
+;   pure endpoint validation via ata_validate_range64 (no device I/O),
+;   wait helpers terminate (no hang), and a normal MBR read still
+;   works afterwards (no state damage).
 ; ------------------------------------------------------------
 test_ata_neg:
     push rbx
@@ -3557,6 +3561,104 @@ test_ata_neg:
     mov rsi, 0x10000001
     mov rdx, 1
     call ata_read_lba28
+    cmp rax, 1
+    jne .fail74
+    ; Strict count contract: 0 rejected (read+write, no I/O issued)
+    lea rdi, [rel vol_read_buf]
+    xor esi, esi
+    xor edx, edx
+    call ata_read_lba28
+    cmp rax, 1
+    jne .fail74
+    lea rdi, [rel vol_read_buf]
+    xor esi, esi
+    xor edx, edx
+    call ata_write_lba28
+    cmp rax, 1
+    jne .fail74
+    ; count 65 rejected (read+write)
+    lea rdi, [rel vol_read_buf]
+    xor esi, esi
+    mov rdx, 65
+    call ata_read_lba28
+    cmp rax, 1
+    jne .fail74
+    lea rdi, [rel vol_read_buf]
+    xor esi, esi
+    mov rdx, 65
+    call ata_write_lba28
+    cmp rax, 1
+    jne .fail74
+    ; count 256 rejected (read+write; no 0-means-256 encoding)
+    lea rdi, [rel vol_read_buf]
+    xor esi, esi
+    mov rdx, 256
+    call ata_read_lba28
+    cmp rax, 1
+    jne .fail74
+    lea rdi, [rel vol_read_buf]
+    xor esi, esi
+    mov rdx, 256
+    call ata_write_lba28
+    cmp rax, 1
+    jne .fail74
+    ; high bits of count not discarded: low byte 1 but full RDX > 64
+    lea rdi, [rel vol_read_buf]
+    xor esi, esi
+    mov rdx, 0x100000001
+    call ata_read_lba28
+    cmp rax, 1
+    jne .fail74
+    lea rdi, [rel vol_read_buf]
+    xor esi, esi
+    mov rdx, 0x101
+    call ata_write_lba28
+    cmp rax, 1
+    jne .fail74
+    ; Pure endpoint validation (helper only, no device I/O):
+    ; LBA=0x0FFFFFFF,count=1 valid
+    mov rsi, 0x0FFFFFFF
+    mov rdx, 1
+    call ata_validate_range64
+    test rax, rax
+    jnz .fail74
+    ; LBA=0x0FFFFFFF,count=2 wraps past 2^28 -> invalid
+    mov rsi, 0x0FFFFFFF
+    mov rdx, 2
+    call ata_validate_range64
+    cmp rax, 1
+    jne .fail74
+    ; LBA=0x0FFFFFC0,count=64 ends exactly at max -> valid
+    mov rsi, 0x0FFFFFC0
+    mov rdx, 64
+    call ata_validate_range64
+    test rax, rax
+    jnz .fail74
+    ; LBA=0x0FFFFFC1,count=64 ends past max -> invalid
+    mov rsi, 0x0FFFFFC1
+    mov rdx, 64
+    call ata_validate_range64
+    cmp rax, 1
+    jne .fail74
+    ; helper count edges (pure): 0/65/256/high-bits invalid
+    xor esi, esi
+    xor edx, edx
+    call ata_validate_range64
+    cmp rax, 1
+    jne .fail74
+    xor esi, esi
+    mov rdx, 65
+    call ata_validate_range64
+    cmp rax, 1
+    jne .fail74
+    xor esi, esi
+    mov rdx, 256
+    call ata_validate_range64
+    cmp rax, 1
+    jne .fail74
+    xor esi, esi
+    mov rdx, 0x100000001
+    call ata_validate_range64
     cmp rax, 1
     jne .fail74
     ; Wait helpers must return, not hang. Idle drive is not busy/ready.

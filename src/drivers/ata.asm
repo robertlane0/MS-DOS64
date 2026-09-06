@@ -44,6 +44,7 @@ global ata_wait_drq
 global ata_wait_ready
 global ata_read_lba28
 global ata_write_lba28
+global ata_validate_range64
 global ata_read_sectors
 global ata_write_sectors
 global ata_identify
@@ -289,13 +290,48 @@ ata_select_drive:
     ret
 
 ; ------------------------------------------------------------
+; ata_validate_range64 — pure LBA28 transfer range check, no device I/O
+;   In:  RSI = starting LBA, RDX = sector count (full 64-bit values)
+;   Out: RAX = 0 valid, 1 invalid
+;   Clobbers: RAX, flags. Preserves all other registers.
+;   Contract (strict): count must be 1..64; the full interval
+;     [LBA, LBA+count-1] must satisfy LBA+count-1 <= 0x0FFFFFFF
+;     with no 64-bit wrap. count==0, count>64 (including 65 and 256
+;     and any value with nonzero high bits), and endpoint overflow
+;     are all rejected. Encodes no device command; callers must
+;     validate through here BEFORE loading count/LBA port bytes so
+;     invalid input can never become a valid-looking device command.
+; ------------------------------------------------------------
+ata_validate_range64:
+    test rdx, rdx
+    jz .invalid_range
+    cmp rdx, 64
+    ja .invalid_range
+    cmp rsi, 0x10000000
+    jae .invalid_range
+    mov rax, rdx
+    dec rax                    ; 0..63 (safe: count >= 1 proven above)
+    add rax, rsi               ; LBA + count - 1
+    jc .invalid_range          ; 64-bit wrap
+    cmp rax, 0x0FFFFFFF
+    ja .invalid_range
+    xor eax, eax
+    ret
+.invalid_range:
+    mov eax, 1
+    ret
+
+; ------------------------------------------------------------
 ; ata_read_lba28 — read sectors via LBA28 PIO
 ;   In:  RDI = destination buffer (linear, must be writable, 512*count bytes)
 ;        RSI = LBA (28-bit, 0 .. 0x0FFFFFFF)
-;        RDX = sector count (1..256, 0 means 256 per ATA spec but we treat 0 as 256? We require 1..64)
-;   Out: RAX = 0 success, 1 error/timeout
+;        RDX = sector count (strict 1..64; 0 and >64 rejected)
+;   Out: RAX = 0 success, 1 error/timeout/invalid-range
 ;   Clobbers: RCX, RSI, RDI temp but restores? Buffer pointer advanced internally.
 ;   Uses flat addressing only.
+;   Range validation (ata_validate_range64) runs on the full 64-bit
+;   RSI/RDX BEFORE any port I/O or count-byte encoding; the count
+;   register is loaded only after validation, never masked/normalized.
 ; ------------------------------------------------------------
 ata_read_lba28:
     push rbx
@@ -311,19 +347,13 @@ ata_read_lba28:
 
     mov r8, rdi          ; r8 = current buffer pointer
     mov r9, rsi          ; r9 = LBA
-    mov r10, rdx         ; r10 = remaining sectors (low byte valid)
-    and r10, 0xFF
-    test r10, r10
-    jz .use256
-    jmp .cnt_ok
-.use256:
-    mov r10, 256
-.cnt_ok:
-    ; Validate LBA < 2^28
-    mov rax, r9
-    shr rax, 28
+    ; Strict range check on full RSI/RDX before any hardware access.
+    ; Rejects count==0, count>64 (high bits included), and
+    ; LBA+count-1 > 0x0FFFFFFF. No masking/normalization.
+    call ata_validate_range64
     test rax, rax
     jnz .fail_range
+    mov r10, rdx         ; r10 = remaining sectors (1..64 proven)
 
     ; Wait for not busy
     call ata_wait_not_busy
@@ -347,7 +377,7 @@ ata_read_lba28:
     call ata_wait_not_busy
     jc .fail
 
-    ; Sector count
+    ; Sector count (1..64 validated above; encoded directly, never 0)
     mov dx, ATA_SECCNT
     mov al, r10b
     out dx, al
@@ -421,8 +451,12 @@ ata_read_sectors:
 
 ; ------------------------------------------------------------
 ; ata_write_lba28 — write sectors via LBA28 PIO
-;   In: RDI = source buffer (linear), RSI = LBA, RDX = count
-;   Out: RAX 0 success
+;   In: RDI = source buffer (linear), RSI = LBA (0..0x0FFFFFFF),
+;       RDX = count (strict 1..64; 0 and >64 rejected)
+;   Out: RAX 0 success, 1 error/timeout/invalid-range
+;   Range validation (ata_validate_range64) runs on the full 64-bit
+;   RSI/RDX BEFORE any port I/O or count-byte encoding; the count
+;   register is loaded only after validation, never masked/normalized.
 ; ------------------------------------------------------------
 ata_write_lba28:
     push rbx
@@ -437,18 +471,13 @@ ata_write_lba28:
 
     mov r8, rdi
     mov r9, rsi
-    mov r10, rdx
-    and r10, 0xFF
-    test r10, r10
-    jz .w256
-    jmp .wcnt_ok
-.w256:
-    mov r10, 256
-.wcnt_ok:
-    mov rax, r9
-    shr rax, 28
+    ; Strict range check on full RSI/RDX before any hardware access.
+    ; Rejects count==0, count>64 (high bits included), and
+    ; LBA+count-1 > 0x0FFFFFFF. No masking/normalization.
+    call ata_validate_range64
     test rax, rax
     jnz .wfail
+    mov r10, rdx         ; 1..64 proven
 
     call ata_wait_not_busy
     jc .wfail
@@ -464,7 +493,7 @@ ata_write_lba28:
     call ata_wait_not_busy
     jc .wfail
 
-    mov dx, ATA_SECCNT
+    mov dx, ATA_SECCNT       ; count 1..64 validated; encoded directly, never 0
     mov al, r10b
     out dx, al
     mov eax, r9d
