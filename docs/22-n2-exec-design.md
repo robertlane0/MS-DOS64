@@ -11,9 +11,10 @@ Non-goals (stay cooperative like DOS): no timer preemption, no per-process
 ## 0. What exists today (do not regress)
 
 - `proc_spawn64` (`src/kernel/proc64.asm:1285`): memory image → PSP (664 B)
-  + payload at `PSP+512` + 2048 B stack + 1024 B env; records 16-slot table
-  (`proc_pid/psp/entry/stack/exitcode/memsize/envptr/state`); returns
-  `(pid, psp)`. Never enters the image.
+  + payload at `PSP+PSP_SIZE` + 2048 B stack + 1024 B env; records 16-slot
+  table (`proc_pid/psp/entry/stack/exitcode/memsize/envptr/state`);
+  returns `(pid, psp)`. Never enters the image (enter is N2a,
+  `proc_enter64`).
 - `handler_exec` (`src/kernel/syscall64.asm:2367`): trap wrapper, writes pid
   to the `SPSAVE64`/`STKPTRS64` frame (`include/regs.inc`), stack-slot
   discard (no BSS statics — `make check-debug-symbols` enforces).
@@ -31,32 +32,46 @@ Non-goals (stay cooperative like DOS): no timer preemption, no per-process
 
 ## 1. Enter/return (`proc_enter64`, N2a — first)
 
-New leaf in `proc64.asm`, called by `handler_exec` (opt-in run flag) and
-by `sh_do_exec` once tests 84–86 are green:
+New leaf in `proc64.asm` (`proc_enter64`, landed N2a). The `AH=4Bh` trap
+and `sh_do_exec` stay spawn-only until N2d — no run-flag wiring yet;
+tests call the leaf directly. `sh_do_exec` flips to enter once tests
+84–86 are green:
 
 ```text
 In:  RDI = pid (or psp — pick psp, it is unambiguous), documented at call sites
 Out: RAX = child exit code, CF 0/1
 ```
 
-1. Validate psp (`psp_validate64`), fetch `entry` + `stack_top` from the
-   proc table. `stack_top` is 16-aligned by construction
-   (`mem_alloc64` aligns); assert it.
-2. Save the caller on the **current (kernel) stack**: `push RBX RBP R12–R15`,
-   record `RSP` into one BSS qword `exec_caller_rsp` (functional save slot,
-   cooperative single-threaded — no reentrancy; this is not a debug hook,
-   document it next to `check-debug-symbols` so the audit stays clean).
-3. `RSP := stack_top - 8`, `push child_ret_trampoline` (so a bare `RET`
-   from a `.COM` — e.g. `TEST.COM`'s single `0xC3` — lands in the
-   trampoline with exit code 0), `RDI := psp` (argv convention §3),
-   `call entry` (near call — child `RET` also lands in the trampoline).
+1. Find the slot by `psp` (`proc_psp[]` + `PROC_RUNNING`; never dereference
+   the pointer, so garbage fails clean) and fetch `entry` + `stack_top`.
+   `stack_top` is aligned *down* (`and ~15`): `psp+total` inherits the
+   arbitrary payload size, so alignment is enforced, not assumed.
+2. Save the caller on the **current (kernel) stack**: `push RBX RBP R12–R15`
+   + `pushfq`, record `RSP` into one BSS qword `exec_caller_rsp`
+   (functional save slot, cooperative single-threaded — no reentrancy;
+   this is not a debug hook, documented next to `check-debug-symbols` so
+   the audit stays clean). `exec_prev_current` saves `proc_current`.
+   Single-depth: non-zero `exec_caller_rsp` on entry fails honestly.
+3. `RSP := stack_top`, `push child_ret_trampoline`, `RDI := psp` (+ zero
+   all other GPRs for a deterministic entry state), `jmp entry`. At entry
+   `RSP%16==8` with the trampoline as return address — exactly like `call
+   entry`, except a bare `RET` from a `.COM` (e.g. `TEST.COM`'s single
+   `0xC3`) lands in the trampoline with exit code 0. (`jmp`, not `call`,
+   is deliberate: `call` would put our own return address on top of the
+   child stack ahead of the trampoline.)
 4. Trampoline + `AH=4Ch` path converge: `proc_exit_current64` checks
-   `exec_caller_rsp != 0`: if set, store `AL`/`RDI`-code to
-   `proc_exitcode[slot]`, mark zombie, restore caller `RSP`/regs, clear the
-   slot, return code in `RAX`. If clear (child outliving its enter — must
-   not happen), keep today's mark-zombie behavior.
-5. Caller regs `RBX RBP R12–R15` + 16 B `RSP` alignment preserved across the
-   round trip (System V AMD64, `stack64.asm` discipline); canary intact.
+   `exec_caller_rsp != 0`: if set, terminate (stores code to
+   `proc_exitcode[slot]`, frees blocks, marks zombie — touching no child
+   memory afterwards), then restore `proc_current`, caller `RSP`/`RFLAGS`/
+   regs, clear both slots, and return the code in `RAX` to the enter
+   caller — abandoning the INT/stub frames on the freed child stack. The
+   `RFLAGS` restore matters: the `0xEE` interrupt gate clears `IF` on the
+   `INT 0x21` path, so the caller gets its own saved flags back. If clear
+   (child outliving its enter — must not happen), keep today's
+   mark-zombie behavior.
+5. Caller regs `RBX RBP R12–R15` + `RSP` + `RFLAGS.IF` preserved across the
+   round trip (System V AMD64, `stack64.asm` discipline); canary intact
+   (`mem_validate64`).
 
 Sequencing (per PLAN §7 risk row): land `proc_enter64` + tests 84–86 with
 the shell still spawn-only; flip `sh_do_exec` to enter only after 84–86
@@ -93,9 +108,10 @@ FAT1-then-FAT2, mount heals).
 
 ## 3. Argv/env convention (pins the N0 open item)
 
-- N2a: `RDI = PSP` on entry (also derivable as `entry - 512` for `.COM`,
-  which `samples/echo.asm` already does — both hold). Raw tail stays the
-  DOS-compatible fallback (`PSP+0xA0` len, `+0xA1` 127 B, set at spawn).
+- N2a: `RDI = PSP` on entry (also derivable as `entry - PSP_SIZE` =
+  `entry - 664` for `.COM`, which `samples/echo.asm` does — both hold).
+  Raw tail stays the DOS-compatible fallback (`PSP+0xA0` len, `+0xA1`
+  127 B, set at spawn).
 - N2b (with `libc64`): shell tokenizes the tail into a NUL-joined argv
   block above the child stack; `ECX = argc`, `RDX = argv` (pointer to
   pointer-array), block freed with the proc. `ENV` (1024 B, owner = PSP,

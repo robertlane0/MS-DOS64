@@ -4,7 +4,7 @@
 ; Runs on MS-DOS64 via:  A> HELLO   (loads HELLO.COM from the FAT12 volume)
 ;
 ; Constraints (see docs/21-nasm-cross.md):
-;   - bits 64, RIP-relative only, no `org` (load address is PSP+512,
+;   - bits 64, RIP-relative only, no `org` (load address is PSP+PSP_SIZE,
 ;     not DOS 0x100; `org` would only lie to absolute addresses, and
 ;     there are none here).
 ;   - Only real INT 21h handlers: AH=09h print (RDX -> $-string),

@@ -56,7 +56,7 @@ README = ((b"MS-DOS64 FAT12 demo volume (1.44M geometry, LBA 512+).\r\n"
            b"Scratch LBAs 200/500-511 stay clear of this region.\r\n"
            b"Padding to force a two-cluster chain follows....\r\n") * 4)[:1000]
 
-TESTCOM = b"\xc3"  # RET — minimal COM: loader copies it, entry = PSP+512
+TESTCOM = b"\xc3"  # RET — minimal COM: loader copies it, entry = PSP+PSP_SIZE
 DATA = bytes(range(256)) * 2  # 512B pattern
 
 

@@ -128,19 +128,20 @@ mini-assembler is days.
 ## 4. `MZ64` toolchain contract (for N2/N3 builders)
 
 Header (32 B, `proc64.asm:68-69`, verified `proc_verify_image64`,
-loaded by `proc_load_image64`):
+loaded by `proc_load_image64` at `PSP+PSP_SIZE` — 664, not the `PSP+512`
+of older comments; test 86 caught the drift):
 
 | Off | Size | Field | Rule |
 |---|---|---|---|
 | +0 | 4 | magic | `0x34365A4D` (`'MZ64'`, bytes `4D 5A 36 34`) else treated as raw `.COM` |
 | +4 | 4 | `hdr_size` | must == 32 |
 | +8 | 8 | `image_size` | payload bytes after header; `> 0`, `<= size-32`, `<= 8 MiB` |
-| +16 | 4 | `entry_off` | `< image_size`; entry = `PSP+512+entry_off` (`.COM`: entry = `PSP+512`) |
+| +16 | 4 | `entry_off` | `< image_size`; entry = `PSP+PSP_SIZE+entry_off` (`.COM`: entry = `PSP+PSP_SIZE`, 664) |
 | +20 | 4 | `stack_size` | `0..65536` (advisory; spawn always reserves 2048 B child stack today) |
 | +24 | 8 | reserved | zero |
 
-Entry ABI (as built; N2 will extend, not break, this): image is copied
-to `PSP+512` (`PSP_SIZE = PSP64_size = 664`, `PROC_STACK_SIZE = 2048`,
+Entry ABI (as built; N2a keeps it, N2d extends it): image is copied
+to `PSP+PSP_SIZE` (`PSP_SIZE = PSP64_size = 664`, `PROC_STACK_SIZE = 2048`,
 `PROC_ENV_SIZE = 1024`, `proc64.asm:65-67`); `proc_spawn64` records
 `pid/entry/stack_top = PSP+total/env` in the 16-slot table and returns
 `(pid, psp)` — it never `call`s the entry today. Cooperative model

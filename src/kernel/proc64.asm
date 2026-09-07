@@ -5,10 +5,13 @@
 ; Original: 256B PSP at segment DX, INT 20h CD20, top_seg para, CALL5 EAh far ptr,
 ;           INT22/23/24 vectors, FCB1@5Ch/FCB2@6Ch, cmd tail@80h, SETBASE via INT21.
 ;           COM loads at PSP+0x100, EXE with MZ header reloc, SS:SP=BX:CX.
-; 64-bit:   512B PSP64 (include/psp.inc), flat linear, INT20 kept as debug bytes,
-;           top_mem dq linear, call5_ptr dq, exit/cont/error RIP dq, FCB 32B each,
-;           cmd tail 127B @0xA0, env_ptr dq, CR3/RSP/RFLAGS, R8-R15 save, fd_table16.
-;           COM raw copy to PSP+512, EXE64 'MZ64' header (32B) payload to PSP+512.
+; 64-bit:   PSP64 664B (PSP64_size, include/psp.inc), flat linear, INT20 kept
+;           as debug bytes, top_mem dq linear, call5_ptr dq, exit/cont/error
+;           RIP dq, FCB 32B each, cmd tail 127B @0xA0, env_ptr dq, CR3/RSP/
+;           RFLAGS, R8-R15 save, fd_table16.
+;           COM raw copy to PSP+PSP_SIZE, EXE64 'MZ64' header (32B) payload
+;           to PSP+PSP_SIZE. (N2a: stale PSP+512 comments fixed — the loader
+;           always used PSP_SIZE; test 86 caught the doc/code drift.)
 ;           Owner in MCB64 set to PSP linear (was 1 kernel) for per-process accounting.
 ;           Env block is NUL-joined "NAME=VAL" + double NUL (DOS2+ env segment analog).
 ;
@@ -46,6 +49,7 @@ global proc_load_image64
 global proc_spawn64
 global proc_terminate64
 global proc_exit_current64
+global proc_enter64
 global proc_reap64
 global proc_free_all64
 global proc_next_pid
@@ -82,6 +86,12 @@ proc_envptr:    resq PROC_MAX
 proc_next_pid:  resq 1
 proc_current:   resq 1
 proc_inited:    resb 8
+; N2a enter/return save slots (functional, cooperative single-depth — not
+; debug hooks; see make check-debug-symbols). exec_caller_rsp != 0 means a
+; child is entered: proc_exit_current64 converges here instead of returning
+; normally. exec_prev_current holds the pre-enter proc_current to restore.
+exec_caller_rsp:   resq 1
+exec_prev_current: resq 1
 
 section .text
 
@@ -152,6 +162,8 @@ proc_init64:
     jnz .zero_env
     mov qword [rel proc_next_pid], 1
     mov qword [rel proc_current], 0
+    mov qword [rel exec_caller_rsp], 0
+    mov qword [rel exec_prev_current], 0
     mov qword [rel proc_state], PROC_RUNNING
     mov qword [rel proc_pid], 0
     mov byte [rel proc_inited], 1
@@ -378,7 +390,7 @@ psp_init64:
     push r9
     push r10
     push r11
-    ; validate: psp non-zero, canonical low, top > psp+512, top <= 0x800000
+    ; validate: psp non-zero, canonical low, top > psp+PSP_SIZE, top <= 0x800000
     test rdi, rdi
     jz .bad
     cmp rsi, rdi
@@ -1182,7 +1194,7 @@ proc_verify_image64:
     ret
 
 ; ------------------------------------------------------------
-; proc_load_image64 — copy payload to PSP+512, return entry
+; proc_load_image64 — copy payload to PSP+PSP_SIZE, return entry
 ;   In: RDI=psp, RSI=src, RDX=size
 ;   Out: RAX=entry RIP (0 fail), CF 0 ok / 1 fail
 ;   Checks PSP valid, size fits before MEM_END.
@@ -1215,7 +1227,7 @@ proc_load_image64:
     mov rcx, [rsp + 40]  ; size
     cmp r8, 1
     je .exe_load
-    ; COM: payload = entire file, dest = psp+512, entry = dest
+    ; COM: payload = entire file, dest = psp+PSP_SIZE, entry = dest
     mov rbx, r9
     add rbx, PSP_SIZE     ; dest
     mov rax, rbx
@@ -1227,7 +1239,7 @@ proc_load_image64:
     mov rsi, r10
     cld
     rep movsb             ; RCX=size, RSI=src, RDI=dest? Wait REP MOVSB uses RCX,RSI,RDI. RCX=size, good. But we used RCX for size, RDI dest, RSI src. Need to set RCX=size (already), RDI=dest, RSI=src. Good.
-    ; entry = psp+512
+    ; entry = psp+PSP_SIZE
     mov rax, r9
     add rax, PSP_SIZE
     jmp .ok_l
@@ -1236,7 +1248,7 @@ proc_load_image64:
     mov rax, [r10 + 8]   ; image_size
     mov rbx, rax         ; save image_size
     mov ecx, [r10 + 16]  ; entry_off (32-bit)
-    ; dest = psp+512
+    ; dest = psp+PSP_SIZE
     mov rsi, r9
     add rsi, PSP_SIZE     ; dest base
     mov rdi, rsi
@@ -1249,7 +1261,7 @@ proc_load_image64:
     mov rcx, rbx          ; count
     cld
     rep movsb
-    ; entry = psp+512+entry_off
+    ; entry = psp+PSP_SIZE+entry_off
     mov rax, r9
     add rax, PSP_SIZE
     mov ecx, [r10 + 16]
@@ -1603,10 +1615,15 @@ proc_terminate64:
 ; proc_exit_current64 — exit current process (INT20/INT21 4Ch analog)
 ;   In: RDI=exit_code (low byte used, full qword stored)
 ;   Out: RAX 0 ok, 1 fail (current is kernel or none)
+;   N2a: when a child is entered (exec_caller_rsp != 0), terminate converges
+;   to proc_enter_restore: caller context resumes with RAX=exit code instead
+;   of returning up the INT/handler chain (whose frames live on the freed
+;   child stack and are abandoned). Normal path unchanged.
 ; ------------------------------------------------------------
 proc_exit_current64:
     push rbx
     push r11
+    push r12
     mov rbx, [rel proc_current]
     cmp rbx, PROC_MAX
     jae .fail_c
@@ -1617,16 +1634,137 @@ proc_exit_current64:
     jne .fail_c
     lea r11, [rel proc_pid]
     mov rax, [r11 + rbx*8]
+    mov r12, rdi         ; save code across terminate (R12 restored below
+                         ; on normal paths; abandoned on the restore path)
     mov rsi, rdi         ; code
     mov rdi, rax         ; pid
     call proc_terminate64
+    test rax, rax
+    jnz .fail_c
+    cmp qword [rel exec_caller_rsp], 0
+    jne proc_enter_restore   ; R12=code; never returns here
+    xor eax, eax
+    pop r12
     pop r11
     pop rbx
     ret
 .fail_c:
     mov rax, 1
+    pop r12
     pop r11
     pop rbx
+    ret
+
+; ------------------------------------------------------------
+; proc_enter64 — enter a spawned child, cooperative (N2a, PLAN.md Phase N2)
+;   In: RDI = child PSP (as returned by proc_spawn64/cmd_exec_external64)
+;   Out: RAX = child exit code, CF 0 ok / 1 fail (bad/zombie psp, nested)
+;   Clobbers RAX/RCX/RDX/RSI/RDI/R8-R11; preserves RBX/RBP/R12-R15/RSP/RFLAGS.
+;   Single-depth: nested enter fails honestly (CF=1).
+;   Child entry contract: RDI=PSP, all other GPRs 0, RSP 16B%==8 with the
+;   RET trampoline as return address (exactly like `call entry`, except a
+;   bare RET lands in the trampoline = exit 0 instead of the caller).
+;   Child RET exits 0; AH=4Ch / INT 20h exits AL (converges via
+;   proc_exit_current64). No trap/shell wiring yet (lands in N2d); tests
+;   call this leaf directly.
+;   NOTE: `jmp entry` (not `call`) is deliberate: `call` would put our own
+;   return address on top of the child stack ahead of the trampoline, so a
+;   bare RET could never reach it. (Corrects docs/22 §1, which said call.)
+; ------------------------------------------------------------
+proc_enter64:
+    ; RDI=psp. Lookup uses RAX/RCX/RDX only (caller-saved, no prologue).
+    cmp qword [rel exec_caller_rsp], 0
+    jne .fail_nested_e
+    mov rdx, rdi                ; psp
+    xor ecx, ecx
+.find_e:
+    cmp ecx, PROC_MAX
+    jae .fail_noslot_e
+    lea rax, [rel proc_psp]
+    cmp [rax + rcx*8], rdx
+    jne .next_e
+    lea rax, [rel proc_state]
+    cmp qword [rax + rcx*8], PROC_RUNNING
+    jne .fail_noslot_e         ; psp known but not running (zombie) -> fail
+    jmp .found_e
+.next_e:
+    inc ecx
+    jmp .find_e
+.found_e:                        ; RCX=slot, RDX=psp
+    lea rax, [rel proc_entry]
+    mov r10, [rax + rcx*8]
+    test r10, r10
+    jz .fail_noslot_e
+    lea rax, [rel proc_stack]
+    mov r11, [rax + rcx*8]
+    test r11, r11
+    jz .fail_noslot_e
+    and r11, ~15                 ; stack top: align down (payload size is
+                                 ; arbitrary, so psp+total may be unaligned)
+    ; save caller frame on the current (caller) stack
+    push rbx
+    push rbp
+    push r12
+    push r13
+    push r14
+    push r15
+    pushfq
+    mov [rel exec_caller_rsp], rsp
+    mov rax, [rel proc_current]
+    mov [rel exec_prev_current], rax
+    mov [rel proc_current], rcx
+    ; child regs: RDI=psp, everything else 0 (deterministic entry state)
+    mov rdi, rdx
+    xor ebx, ebx
+    xor ebp, ebp
+    xor r12d, r12d
+    xor r13d, r13d
+    xor r14d, r14d
+    xor r15d, r15d
+    xor eax, eax
+    xor ecx, ecx
+    xor edx, edx
+    xor esi, esi
+    xor r8d, r8d
+    xor r9d, r9d
+    ; R10=entry, R11=stack top (untouched above). No stack use from here
+    ; until the child stack is live.
+    mov rsp, r11
+    lea rax, [rel child_ret_trampoline]
+    push rax                     ; RSP%16==8 at entry, trampoline on top
+    jmp r10                      ; enter child; returns via restore only
+.fail_nested_e:
+.fail_noslot_e:
+    xor eax, eax
+    stc
+    ret
+
+; child_ret_trampoline — bare-RET landing pad (runs on the child stack).
+; Exits the entered child with code 0 via the shared restore path.
+child_ret_trampoline:
+    xor edi, edi
+    jmp proc_exit_current64      ; current==child -> terminate -> restore
+
+; proc_enter_restore — INTERNAL resume-caller path (R12=exit code).
+; Child blocks are already freed; touches NO child memory. Restores
+; proc_current, caller RSP/RFLAGS/regs, clears enter slots, and returns
+; the code to proc_enter64's caller. Reached from proc_exit_current64
+; (INT 20h / AH=4Ch path) and child_ret_trampoline (RET path).
+proc_enter_restore:
+    mov rax, r12                 ; code to return (pops must not touch RAX)
+    mov rbx, [rel exec_prev_current]
+    mov [rel proc_current], rbx
+    mov qword [rel exec_prev_current], 0
+    mov rsp, [rel exec_caller_rsp]
+    mov qword [rel exec_caller_rsp], 0
+    popfq
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbp
+    pop rbx
+    clc
     ret
 
 ; ------------------------------------------------------------

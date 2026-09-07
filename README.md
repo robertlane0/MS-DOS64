@@ -9,8 +9,8 @@ Boot runs a short self-test, then drops you at an `A>` prompt.
 
 ## Status
 
-Works on QEMU (recommended) and Bochs. Default build passes 81 checks
-with 2 skipped; `make full` runs all 83, then starts the shell either way.
+Works on QEMU (recommended) and Bochs. Default build passes 84 checks
+with 2 skipped; `make full` runs all 86, then starts the shell either way.
 Design notes live in `docs/`; `AGENTS.md` has the full build record.
 
 ## Requirements

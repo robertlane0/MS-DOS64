@@ -1,7 +1,7 @@
 # Phase 1 – Boot & Testing Strategy for 64-bit Conversion
 
 > **As built (2026-09-07):** this strategy is implemented — MBR → stage2 →
-> kernel at `0x100000` boots smoke 81 + 2 SKIP (`make`) or full 83 PASS
+> kernel at `0x100000` boots smoke 84 + 2 SKIP (`make`) or full 86 PASS
 > (`make full`, destructive 71/83 in the reserved namespace with recovery)
 > + `COMMAND64` REPL on QEMU (primary) and Bochs. Concrete sizes/layout
 > below reflect the code; the step rationale is unchanged. See `README.md`
@@ -155,8 +155,8 @@ flags (classification: PURE / SCRATCH-DEVICE / REAL-VOLUME READ-ONLY /
 REAL-VOLUME DESTRUCTIVE — see `src/kernel/selftest64.asm` header):
 
 ```nasm
-; Smoke (default): nasm -DRUN_SELFTEST -> 81 + 2 SKIP, then shell_repl64
-; Full:  nasm -DRUN_SELFTEST -DSELFTEST_DESTRUCTIVE -> 83, then shell
+; Smoke (default): nasm -DRUN_SELFTEST -> 84 + 2 SKIP, then shell_repl64
+; Full:  nasm -DRUN_SELFTEST -DSELFTEST_DESTRUCTIVE -> 86, then shell
 ; Lean:  nasm -DSKIP_SELFTEST -> skip suite, minimal init, shell direct
 %ifdef SKIP_SELFTEST
 %undef RUN_SELFTEST
@@ -171,11 +171,11 @@ REAL-VOLUME DESTRUCTIVE — see `src/kernel/selftest64.asm` header):
 `Makefile` exposes all three (objects are kept separate so the images can coexist):
 
 ```bash
-make                    # smoke: build/dos64.img (RUN_SELFTEST, 81 + 2 SKIP + shell)
-make full               # full: build/dos64-full.img (RUN_SELFTEST+SELFTEST_DESTRUCTIVE, 83 + shell)
+make                    # smoke: build/dos64.img (RUN_SELFTEST, 84 + 2 SKIP + shell)
+make full               # full: build/dos64-full.img (RUN_SELFTEST+SELFTEST_DESTRUCTIVE, 86 + shell)
 make lean               # lean: build/dos64-lean.img (SKIP_SELFTEST, shell direct)
-make run-qemu           # boot smoke image, expect "Summary: 81 passed, 0" + "Skipped (destructive): 2"
-make run-qemu-full      # boot full image, expect "Summary: 83 passed, 0"
+make run-qemu           # boot smoke image, expect "Summary: 84 passed, 0" + "Skipped (destructive): 2"
+make run-qemu-full      # boot full image, expect "Summary: 86 passed, 0"
 make run-qemu-lean      # boot lean image, expect "Lean boot ... entering COMMAND64..."
 ```
 

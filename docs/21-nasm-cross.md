@@ -16,7 +16,7 @@ the samples (`cmp` clean).
 ```nasm
 bits 64
 default rel
-; NO `org`: a .COM loads at PSP+512 with entry = PSP+512
+; NO `org`: a .COM loads at PSP+PSP_SIZE (664) with entry = PSP+PSP_SIZE
 ; (proc_load_image64), not DOS CS:0x100. `org` only affects absolute
 ; addresses, and rule 2 forbids those — so omit it, not `org 0x100`.
 ```
@@ -69,9 +69,9 @@ nasm -f bin samples/hello.asm -o HELLO.COM
 ```
 
 PSP-tail example (`samples/echo.asm`): the shell stores the command tail
-at `PSP+0xA0` (len) / `PSP+0xA1` (127 B). A `.COM` loads at `PSP+512`,
-so `PSP = entry - 512`, derived from RIP (`lea rax, [rel start]` /
-`sub rax, 512`) — no entry-register convention needed (N2 pins one).
+at `PSP+0xA0` (len) / `PSP+0xA1` (127 B). A `.COM` loads at `PSP+PSP_SIZE`
+(664), so `PSP = entry - 664`, derived from RIP (`lea rax, [rel start]` /
+`sub rax, PSP_SIZE`) — N2a additionally guarantees `RDI = PSP` on entry.
 
 Stdin→stdout example (`samples/cat.asm`): loop `3Fh`/`40h` in 128-byte
 chunks, exit on a zero-length read. Named-file args need `3Dh` (N2 gap),
@@ -79,7 +79,7 @@ so this is a console-pipe demo, not `cat file`.
 
 ## 2. `MZ64` header recipe (> 64 KiB or entry-offset programs)
 
-Raw `.COM` (any non-`MZ64` image) enters at `PSP+512`. For anything
+Raw `.COM` (any non-`MZ64` image) enters at `PSP+PSP_SIZE`. For anything
 bigger or with a non-zero entry offset, prepend the 32-byte `MZ64`
 header (`proc_verify_image64` / `proc_load_image64`):
 
@@ -88,7 +88,7 @@ header (`proc_verify_image64` / `proc_load_image64`):
 | +0 | 4 | magic `0x34365A4D` (`'MZ64'`, bytes `4D 5A 36 34`) |
 | +4 | 4 | `hdr_size` = 32 |
 | +8 | 8 | `image_size` (payload bytes after header; `> 0`, `<= filesize-32`) |
-| +16 | 4 | `entry_off` (`< image_size`; entry = `PSP+512+entry_off`) |
+| +16 | 4 | `entry_off` (`< image_size`; entry = `PSP+PSP_SIZE+entry_off`) |
 | +20 | 4 | `stack_size` (`0..65536`, advisory) |
 | +24 | 8 | zero |
 

@@ -1,5 +1,5 @@
 ; MS-DOS64 self-test suite — extracted from main.asm so main stays boot glue.
-; Provides selftest_run64: runs tests 1..83, prints PASS/FAIL + summary + phase lines.
+; Provides selftest_run64: runs tests 1..86, prints PASS/FAIL + summary + phase lines.
 ; Returns RAX = failed count (0 = all pass). Called by _start in full builds.
 ; Lean builds (SKIP_SELFTEST): stub returns 0; test code excluded via RUN_SELFTEST.
 ;
@@ -9,7 +9,8 @@
 ;     stress), 28-34 (PSP/env/loader/spawn), 35-42 subset (IDT/console/vectors
 ;     without disk), 43-50 (cmd parser/builtins, RAM buffers only), 51-66
 ;     (IDT/PIC/stacks, bounded port I/O, no volume writes), 73-82 (negative
-;     paths + pure tables, read-only volume sampling only).
+;     paths + pure tables, read-only volume sampling only), 84-86 (N2a
+;     enter/return round-trip, exit code, argv echo — memory images only).
 ;   SCRATCH-DEVICE (bounded ATA writes to reserved LBAs outside the volume,
 ;     cleaned up): 14 (LBA 200 pattern + zero restore), 25 (FS_SCRATCH 500/502
 ;     + zero), 26 (FS_FILE_LBA_BASE 510 file-data scratch). Safe every boot.
@@ -30,7 +31,7 @@
 ;   -DRUN_SELFTEST alone (default `make`): smoke suite — PURE + SCRATCH-DEVICE
 ;     + REAL-VOLUME READ-ONLY. Tests 71/83 print SKIP and leave the volume
 ;     untouched (only mount reads + scratch-LBA I/O occur).
-;   -DRUN_SELFTEST -DSELFTEST_DESTRUCTIVE (`make full`): full suite — all 83
+;   -DRUN_SELFTEST -DSELFTEST_DESTRUCTIVE (`make full`): full suite — all 86
 ;     tests including 71/83 in the reserved namespace with mount-time recovery
 ;     (pre-clean delete + discard/remount + reclaim + heal + scrub) and
 ;     post-run non-test preservation checks (HELLO/README intact, scrub clean,
@@ -293,6 +294,7 @@ extern proc_load_image64
 extern proc_spawn64
 extern proc_terminate64
 extern proc_exit_current64
+extern proc_enter64
 extern proc_reap64
 extern proc_free_all64
 extern handler_exec
@@ -1751,6 +1753,57 @@ selftest_run64:
     inc r14
     mov rsi, msg_skip
 %endif
+    call vga_print
+    call serial_print64
+
+    ; ---- Test 84: enter/return round-trip (N2a, PURE) ----
+    mov rsi, msg_test84
+    call vga_print
+    call serial_print64
+    call test_enter_ret
+    test rax, rax
+    jz .t84_pass
+    inc r13
+    mov rsi, msg_fail
+    jmp .t84_done
+.t84_pass:
+    inc r12
+    mov rsi, msg_pass
+.t84_done:
+    call vga_print
+    call serial_print64
+
+    ; ---- Test 85: exit code via INT 0x21 AH=4Ch (N2a, PURE) ----
+    mov rsi, msg_test85
+    call vga_print
+    call serial_print64
+    call test_enter_code
+    test rax, rax
+    jz .t85_pass
+    inc r13
+    mov rsi, msg_fail
+    jmp .t85_done
+.t85_pass:
+    inc r12
+    mov rsi, msg_pass
+.t85_done:
+    call vga_print
+    call serial_print64
+
+    ; ---- Test 86: argv echo via PSP tail (N2a, PURE) ----
+    mov rsi, msg_test86
+    call vga_print
+    call serial_print64
+    call test_enter_argv
+    test rax, rax
+    jz .t86_pass
+    inc r13
+    mov rsi, msg_fail
+    jmp .t86_done
+.t86_pass:
+    inc r12
+    mov rsi, msg_pass
+.t86_done:
     call vga_print
     call serial_print64
 
@@ -9178,6 +9231,288 @@ test_idt_stress:
     ret
 
 ; ------------------------------------------------------------
+; Test 84: enter/return round-trip (N2a, PURE — no disk I/O).
+;   Spawn 1-byte RET image, enter via proc_enter64, expect code 0 with
+;   caller RBX/RBP/R12-R15 + RSP + IF preserved; zombie re-enter fails.
+; ------------------------------------------------------------
+test_enter_ret:
+    push rbx
+    push rcx
+    push rdx
+    push rsi
+    push rdi
+    push r8
+    push r9
+    push r10
+    push r11
+    push r12
+    push r13
+    push r14
+    push r15
+    call mem_reset64
+    call proc_init64
+    ; build 1-byte RET image (COM: size < 32 -> raw, entry = psp+PSP_SIZE)
+    mov byte [rel t84_img], 0xC3
+    lea rdi, [rel t84_img]
+    mov rsi, 1
+    xor edx, edx
+    xor ecx, ecx
+    xor r8d, r8d
+    call proc_spawn64
+    test rax, rax
+    jz .fail84
+    test rdx, rdx
+    jz .fail84
+    mov r12, rax              ; pid (callee-saved across enter)
+    mov r13, rdx              ; psp
+    ; negative: null psp must fail (CF=1), no state change
+    xor edi, edi
+    call proc_enter64
+    jnc .fail84
+    ; sentinel callee-saved regs + saved IF. pid/psp ride the stack
+    ; across enter: popping them back intact proves RSP restored exactly.
+    push r13                  ; [rsp+8] psp after next push
+    push r12                  ; [rsp] pid
+    mov rbx, 0x1111111111111111
+    mov rbp, 0x2222222222222222
+    mov r12, 0x3333333333333333
+    mov r13, 0x4444444444444444
+    mov r14, 0x5555555555555555
+    mov r15, 0x6666666666666666
+    pushfq
+    pop rax
+    mov [rel t84_flags], rax
+    mov rdi, [rsp + 8]        ; psp
+    call proc_enter64
+    jc .fail84s
+    cmp rax, 0                ; RET child exits 0
+    jne .fail84s
+    ; preservation checks (full-width: cmp r64,imm64 is not encodable,
+    ; so compare via RAX movabs; also catches high-half clobbers)
+    mov rax, 0x1111111111111111
+    cmp rbx, rax
+    jne .fail84s
+    mov rax, 0x2222222222222222
+    cmp rbp, rax
+    jne .fail84s
+    mov rax, 0x3333333333333333
+    cmp r12, rax
+    jne .fail84s
+    mov rax, 0x4444444444444444
+    cmp r13, rax
+    jne .fail84s
+    mov rax, 0x5555555555555555
+    cmp r14, rax
+    jne .fail84s
+    mov rax, 0x6666666666666666
+    cmp r15, rax
+    jne .fail84s
+    pushfq
+    pop rcx
+    mov rax, [rel t84_flags]
+    xor rax, rcx
+    test rax, 0x200           ; IF bit preserved (restore pops caller RFLAGS)
+    jnz .fail84s
+    pop r12                   ; pid (RSP intact => exact values)
+    pop r13                   ; psp
+    ; re-enter while zombie must fail (no pushes outstanding here)
+    mov rdi, r13
+    call proc_enter64
+    jnc .fail84
+    ; running == 1 (kernel only), zombie == 1 (child)
+    call proc_count_running64
+    cmp rax, 1
+    jne .fail84
+    call proc_count_zombie64
+    cmp rax, 1
+    jne .fail84
+    ; reap + heap clean
+    mov rdi, r12
+    call proc_reap64
+    test rax, rax
+    jnz .fail84
+    call mem_validate64
+    test rax, rax
+    jnz .fail84
+    xor eax, eax
+    jmp .done84
+.fail84s:
+    ; error inside the sentinel path: discard the stacked pid/psp first
+    add rsp, 16
+.fail84:
+    mov rax, 1
+.done84:
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop r11
+    pop r10
+    pop r9
+    pop r8
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rcx
+    pop rbx
+    ret
+
+; ------------------------------------------------------------
+; Test 85: exit-code propagation (N2a, PURE).
+;   Child (mov al,0x2A + AH=4Ch via real INT 0x21) exits; enter must
+;   return 0x2A through terminate -> zombie -> reap.
+; ------------------------------------------------------------
+test_enter_code:
+    push rbx
+    push rcx
+    push rdx
+    push rsi
+    push rdi
+    push r8
+    push r9
+    push r10
+    push r11
+    push r12
+    push r13
+    push r14
+    push r15
+    call mem_reset64
+    call proc_init64
+    ; 5-byte image: mov al,0x2A ; mov ah,0x4C ; int 0x21
+    mov byte [rel t85_img+0], 0xB0
+    mov byte [rel t85_img+1], 0x2A
+    mov byte [rel t85_img+2], 0xB4
+    mov byte [rel t85_img+3], 0x4C
+    mov byte [rel t85_img+4], 0xCD
+    mov byte [rel t85_img+5], 0x21
+    lea rdi, [rel t85_img]
+    mov rsi, 6
+    xor edx, edx
+    xor ecx, ecx
+    xor r8d, r8d
+    call proc_spawn64
+    test rax, rax
+    jz .fail85
+    test rdx, rdx
+    jz .fail85
+    mov r12, rax              ; pid
+    mov rdi, rdx              ; psp
+    call proc_enter64
+    jc .fail85
+    cmp rax, 0x2A             ; exit code through the INT path
+    jne .fail85
+    mov rdi, r12
+    call proc_reap64
+    test rax, rax
+    jnz .fail85
+    call mem_validate64
+    test rax, rax
+    jnz .fail85
+    xor eax, eax
+    jmp .done85
+.fail85:
+    mov rax, 1
+.done85:
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop r11
+    pop r10
+    pop r9
+    pop r8
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rcx
+    pop rbx
+    ret
+
+; ------------------------------------------------------------
+; Test 86: argv echo (N2a, PURE).
+;   Spawn with tail "HI"; child derives PSP as entry-PSP_SIZE, copies the tail
+;   to a harness buffer (address patched into the image at runtime);
+;   parent memcmps. Template bytes verified with host nasm -f bin
+;   (placeholder imm64 at +29); t86_len equ guards the size.
+; ------------------------------------------------------------
+test_enter_argv:
+    push rbx
+    push rcx
+    push rdx
+    push rsi
+    push rdi
+    push r8
+    push r9
+    push r10
+    push r11
+    push r12
+    push r13
+    push r14
+    push r15
+    call mem_reset64
+    call proc_init64
+    ; copy template -> writable image + patch output address
+    cld
+    lea rsi, [rel t86_template]
+    lea rdi, [rel t86_img]
+    mov rcx, t86_len
+    rep movsb
+    lea rax, [rel t86_out]
+    mov [rel t86_img+29], rax
+    ; spawn with tail "HI" (len 2)
+    lea rdi, [rel t86_img]
+    mov rsi, t86_len
+    lea rdx, [rel t86_tail]
+    mov rcx, 2
+    xor r8d, r8d
+    call proc_spawn64
+    test rax, rax
+    jz .fail86
+    test rdx, rdx
+    jz .fail86
+    mov r12, rax              ; pid
+    mov r13, rdx              ; psp
+    ; cmdlen made it into the PSP
+    mov rdi, rdx
+    call psp_get_cmdlen64
+    cmp rax, 2
+    jne .fail86
+    ; enter; child copies tail -> t86_out, RET-exits 0
+    mov rdi, r13
+    call proc_enter64
+    jc .fail86
+    test rax, rax
+    jnz .fail86
+    cmp word [rel t86_out], 0x4948   ; "HI" little-endian
+    jne .fail86
+    mov rdi, r12
+    call proc_reap64
+    test rax, rax
+    jnz .fail86
+    call mem_validate64
+    test rax, rax
+    jnz .fail86
+    xor eax, eax
+    jmp .done86
+.fail86:
+    mov rax, 1
+.done86:
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop r11
+    pop r10
+    pop r9
+    pop r8
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rcx
+    pop rbx
+    ret
+
+; ------------------------------------------------------------
 
 section .rodata
 msg_test1 db " [1] Register mapping (AX->RAX, R8-R15)... ",0
@@ -9263,6 +9598,28 @@ msg_test80 db " [80] Alloc table (near-UINT64_MAX, aligned/pages)... ",0
 msg_test81 db " [81] Queue interleave (empty/full/wrap + IF)... ",0
 msg_test82 db " [82] Layout invariants (same as check-layout)... ",0
 msg_test83 db " [83] FAT12 crash-order (FAT-first + mirrors/scrub)... ",0
+msg_test84 db " [84] Enter/return round-trip (RET + preserve)... ",0
+msg_test85 db " [85] Exit code via INT 0x21 AH=4Ch... ",0
+msg_test86 db " [86] Argv echo via PSP tail (enter)... ",0
+; Test 86 child template (56 bytes, nasm-verified; imm64 placeholder +29).
+;   lea rax,[rel start] / sub rax,664 / movzx ecx,[rax+0xA0] /
+;   lea rsi,[rax+0xA1] / mov rdx,imm64 / copy loop / ret
+;   664 = PSP64_size: .COM entry = PSP+PSP_SIZE (proc_load_image64), NOT
+;   the PSP+512 of stale comments (test 86 caught this; see N2a notes).
+t86_template:
+    db 0x48,0x8D,0x05,0xF9,0xFF,0xFF,0xFF
+    db 0x48,0x2D,0x98,0x02,0x00,0x00
+    db 0x0F,0xB6,0x88,0xA0,0x00,0x00,0x00
+    db 0x48,0x8D,0xB0,0xA1,0x00,0x00,0x00
+    db 0x48,0xBA,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+    db 0x85,0xC9,0x74,0x0E,0x8A,0x1E,0x88,0x1A
+    db 0x48,0xFF,0xC6,0x48,0xFF,0xC2,0xFF,0xC9,0xEB,0xEE,0xC3
+t86_template_end:
+t86_len equ (t86_template_end - t86_template)
+%if (t86_template_end - t86_template) != 56
+%error "t86 child template must stay 56 bytes (placeholder imm64 at +29)"
+%endif
+t86_tail db "HI"
 msg_pass db "PASS",13,10,0
 msg_fail db "FAIL",13,10,0
 msg_skip db "SKIP (destructive, needs SELFTEST_DESTRUCTIVE)",13,10,0
@@ -9502,6 +9859,12 @@ fat79_buf: resb 128
 fat79_post: resb 16
 fat79_dpb: resb 64
 fat79_dpb_post: resb 16
+; --- Tests 84-86: enter/return scratch (PURE, no disk I/O) ---
+t84_img: resb 8
+t84_flags: resq 1
+t85_img: resb 8
+t86_img: resb 64
+t86_out: resb 16
 
 
 %else

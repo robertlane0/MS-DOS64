@@ -1,10 +1,12 @@
 # AGENTS.md: Converting MS-DOS v1.25 ASM to 64-bit BIOS Bootable System
 
-> **Status (2026-09-07): implementation complete — smoke 81 + 2 SKIP
-> (`make`, default, non-destructive) and full 83/83 PASS (`make full`,
+> **Status (2026-09-07): implementation complete — smoke 84 + 2 SKIP
+> (`make`, default, non-destructive) and full 86/86 PASS (`make full`,
 > destructive 71/83 in the reserved SCRATCH/RENAMED/CRASH namespace with
 > mount-time recovery) on QEMU and Bochs, then the interactive `COMMAND64`
 > shell (`src/kernel/shell64.asm`).
+> N2a (PLAN.md slice 4) landed: `proc_enter64` cooperative enter/return
+> (tests 84–86, PURE) — EXEC still spawn-only from the shell/trap (N2d).
 > The phase plan below is kept as the build record; every checklist item is done.
 > Current entry points: `README.md` (what works / memory / disk / shell),
 > `docs/18-truth-gap-analysis.md` + `docs/19-closure-g1-g6.md` (audit trail for
@@ -854,9 +856,9 @@ linker.ld      flat link at 0x100000 (.text.start first)   bochsrc.txt   Bochs c
 ### Verify commands (removed from README)
 ```bash
 timeout 25 qemu-system-x86_64 -drive file=build/dos64.img,format=raw -serial stdio -display none
-# tail: Summary: 81 passed, 0 failed ... Skipped (destructive): 2 ... MS-DOS64 shell (COMMAND64). Type HELP for commands.
+# tail: Summary: 84 passed, 0 failed ... Skipped (destructive): 2 ... MS-DOS64 shell (COMMAND64). Type HELP for commands.
 timeout 25 qemu-system-x86_64 -drive file=build/dos64-full.img,format=raw -serial stdio -display none
-# tail: Summary: 83 passed, 0 failed ... MS-DOS64 shell (COMMAND64).
+# tail: Summary: 86 passed, 0 failed ... MS-DOS64 shell (COMMAND64).
 python3 tools/check_volume_clean.py --vol-lba 512 --vol-totsec 2880 --sector-size 512 --kernel-lba 16 --kernel-sectors 176 build/dos64.img
 python3 tools/check_volume_clean.py --vol-lba 512 --vol-totsec 2880 --sector-size 512 --kernel-lba 16 --kernel-sectors 176 build/dos64-full.img
 printf '\rDIR\rTYPE HELLO.TXT\rHELP\rEXIT\r' | timeout 25 qemu-system-x86_64 -drive file=build/dos64.img,format=raw -serial stdio -display none

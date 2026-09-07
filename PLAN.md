@@ -213,13 +213,14 @@ code the shell can print; `make` + `make full` green on QEMU and Bochs.
 - **N2a — enter/return, no I/O, no volume risk (do first).**
   `src/kernel/proc64.asm`: new `proc_enter64` + `exec_caller_rsp` save
   slot; `RET`-trampoline so bare-`RET` images (`TEST.COM`) exit 0;
-  `AH=4Ch` converges to the same restore path. `src/kernel/
-  syscall64.asm`: run flag through `handler_exec`; shell stays
-  spawn-only. `src/kernel/selftest64.asm`: tests 84 (round-trip),
-  85 (code `0x2A`), 86 (tail via DMA `memcmp`) — all PURE. Also update
-  the suite-count strings (`81 + 2` in `Makefile`/`README.md`/`AGENTS.md`
-  /`docs/`) to the new totals. Acceptance: smoke green on QEMU + Bochs
-  with zero new device writes; `check_volume_clean.py` CLEAN.
+  `AH=4Ch` converges to the same restore path. No trap/shell wiring yet
+  (`AH=4Bh` + shell stay spawn-only until N2d — smaller blast radius).
+  `src/kernel/selftest64.asm`: tests 84 (round-trip + preservation),
+  85 (code `0x2A` via real `INT 0x21`), 86 (tail echo into a harness
+  buffer + `memcmp`) — all PURE. Also update the suite-count strings
+  (`81 + 2` in `Makefile`/`README.md`/`AGENTS.md` /`docs/`) to the new
+  totals. Acceptance: smoke green on QEMU + Bochs with zero new device
+  writes; `check_volume_clean.py` CLEAN.
 - **N2b — handle table + `3Dh`-ro + `3Eh` (smallest useful file slice).**
   Define `PSP64.fd_table` semantics (fds 0–2 console, 3–15 files) on top
   of `fs_fcb_open64`/`fs_fcb_close64`; test 87a (`3Dh`-ro open + `3Eh`
@@ -352,8 +353,11 @@ Next — N2 implementation, one slice at a time (design + tests 84+ spec:
 `docs/22-n2-exec-design.md`; each slice keeps `make` / `make full` /
 `make lean` + the Bochs trio green):
 
-- [ ] 4. **N2a** enter/return (`proc_enter64`, `RET`-trampoline, `AH=4Ch`
+- [x] 4. **N2a** enter/return (`proc_enter64`, `RET`-trampoline, `AH=4Ch`
       convergence) + tests 84–86 (PURE) + suite-count string updates.
+      (Done: smoke 84+2 / full 86 green on QEMU + Bochs, volumes CLEAN.
+      Test 86 caught a real drift — loader uses `PSP+PSP_SIZE` (664), not
+      the `PSP+512` of stale comments; fixed across code/samples/docs.)
 - [ ] 5. **N2b** handle table + `3Dh`-ro + `3Eh` + test 87a (zero writes).
 - [ ] 6. **N2c** `3Ch` + file `3Fh`/`40h` + `42h` + tests 87b (destructive,
       `SCRATCH.TXT`) and 88 (scrub/mirror invariance).

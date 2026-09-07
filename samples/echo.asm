@@ -4,10 +4,11 @@
 ; Runs on MS-DOS64 via:  A> ECHO hello world   (prints "hello world")
 ;
 ; The shell stores the command tail in PSP64 (+0xA0 len, +0xA1 127 bytes)
-; via psp_set_cmdtail64 at spawn. A .COM image is loaded at PSP+512 with
-; entry = PSP+512 (proc_load_image64), so PSP = entry - 512. Derive it
-; from RIP instead of trusting any register (entry register convention
-; is pinned by N2; the subtraction holds by construction today).
+; via psp_set_cmdtail64 at spawn. A .COM image is loaded at PSP+PSP_SIZE
+; (664, include/psp.inc) with entry = PSP+PSP_SIZE (proc_load_image64),
+; so PSP = entry - 664. Derive it from RIP instead of trusting any
+; register (N2a pins RDI=PSP as the authoritative entry convention; the
+; subtraction holds by construction as fallback).
 ;
 ; Uses only: AH=02h conout (DL=char), AH=4Ch exit. Tail is length-prefixed,
 ; NOT '$'-terminated, so print char-by-char with a CRLF after.
@@ -17,10 +18,11 @@ default rel
 
 PSP_CMD_LEN equ 0xA0
 PSP_CMD_TAIL equ 0xA1
+PSP_SIZE equ 664            ; == PSP64_size (proc_load_image64 loads at PSP+PSP_SIZE)
 
 start:
-    lea rax, [rel start]   ; RAX = entry = PSP+512
-    sub rax, 512           ; RAX = PSP
+    lea rax, [rel start]   ; RAX = entry = PSP+PSP_SIZE
+    sub rax, PSP_SIZE      ; RAX = PSP
     movzx ecx, byte [rax + PSP_CMD_LEN]
     test ecx, ecx
     jz .crlf               ; empty tail: just newline
