@@ -1,5 +1,11 @@
 # Phase 11 Completion Report — Interrupt Descriptor Table (IVT replacement)
 
+> **As built (2026-09-07):** PIC is now master `0x28`/slave `0x30`
+> (timer IRQ0@`0x28`, keyboard IRQ1@`0x29` installed, disk IRQ14@`0x36`),
+> so IRQ1 no longer collides with DOS `INT 0x21`. The `0x20`/`0x28` map,
+> `0x20`/`0x2E` vectors, and masked-IRQ1 below are the Phase-11-era
+> state; see `docs/19-closure-g1-g6.md` G4 for the remap evidence.
+
 **Date:** 2026-09-05
 **Branch:** `main` (building on Phase 10 `50 PASS`)
 **Target:** Bochs 3.0 (ryzen) + QEMU 11.1.1, BIOS boot, 64-bit long mode

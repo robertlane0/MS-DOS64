@@ -48,7 +48,7 @@ endstruc
 
 ; --- Phase 7 scratch LBAs on dos64.img (IMG_MB, see Makefile) ---
 ; Kernel occupies [KERNEL_LBA, KERNEL_LBA+KERNEL_SECTORS).
-; ATA Phase-5 test uses LBA 100.
+; ATA Phase-5 test uses LBA 200.
 ; Phase-7 FS tests use 500..511 (12 sectors) — safely beyond kernel, below end.
 %define FS_SCRATCH_LBA   500
 %define FS_SCRATCH_LBA2  501

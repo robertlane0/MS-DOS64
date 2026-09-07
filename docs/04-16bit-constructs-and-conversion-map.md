@@ -165,6 +165,8 @@ src/boot/mbr.asm        # 512B boot0: INT 13h LBA + CHS fallback (ES advances ov
 src/boot/stage2.asm     # PAE + PML4 @0x1000/PDPT @0x2000/PD @0x3000 identity 0-8MiB (4×2MiB PS), EFER.LME, GDT64, staging 0x70000 → 0x100000 copy, KERNEL_SECTORS 176 (chunked ≤16 sectors/LBA packet)
 src/boot/gdt.asm        # GDT32 + GDT64 (code 0x9A, data 0x92, TSS if needed)
 src/kernel/main.asm     # 64-bit entry _start @0x100000 (section .text.start first): boot glue → selftest64.asm 83-test harness → shell_repl64
+src/kernel/selftest64.asm # 83-test harness (PURE / SCRATCH-DEVICE / READ-ONLY / DESTRUCTIVE, 81 + 2 SKIP smoke)
+src/kernel/time64.asm   # timekeeping leaf: software clock + CMOS RTC + FAT pack (time_*/rtc_* APIs)
 src/kernel/shell64.asm  # interactive COMMAND64 REPL (prompt/line-edit/volume builtins/*.COM EXEC)
 src/kernel/cmd64.asm    # COMMAND64 parser/COMTAB64/builtins/batch (%1-%9)
 src/kernel/syscall64.asm # IDT INT 21h gate + DISPATCH64 (77 entries AH=00h-4Ch)

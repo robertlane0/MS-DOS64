@@ -79,8 +79,8 @@ All 65 `SEGMENT/GROUP/ASSUME/PUT` sites cataloged in docs/04 §1 were removed in
 
 | File | Purpose | Key change |
 |------|---------|------------|
-| `psp.inc:1` | `PSP64` 512B (was 256B) | `top_mem` `dq` linear, `cr3`/`rsp0`/`r8-r15` saves, `fd_table` 16×`dq` |
-| `mcb.inc:1` | `MCB64` 32B (new, DOS 1.25 had none) | `type 'M'/'Z'`, `owner dq` linear, `size dq` bytes (was paragraphs), `name[8]` |
+| `psp.inc:1` | `PSP64` 664B actual (`PSP64_size` 0x298, was 256B) | `top_mem` `dq` linear, `cr3`/`rsp0`/`r8-r15` saves, `fd_table` 16×`dq` |
+| `mcb.inc:1` | `MCB64` 40B actual (`MCBSIZ64`, new, DOS 1.25 had none) | `type 'M'/'Z'`, `owner dq` linear, `size dq` bytes (was paragraphs), `name[8]` |
 | `regs.inc:1` | `STKPTRS64` 176B (was 24B) | `RAX–R15` + `DS/ES` + `RIP/CS/RFLAGS/RSP/SS` (IRETQ frame), macros for LES/LDS/AAM→DIV examples |
 | `dpb.inc:1` / `fcb.inc:1` | Updated from Phase 2 | `secsiz/dd`, `fat/dq`, `rr/q` etc. (20B→60B, 37B→48B) |
 

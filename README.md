@@ -26,7 +26,10 @@ make run-qemu     # boot it with serial output in your terminal
 make full         # full destructive test image (build/dos64-full.img)
 make run-qemu-full
 make lean         # skip self-test entirely, straight to shell
-make run-bochs    # target emulator path
+make run-qemu-lean
+make run-bochs    # boot smoke image (rendered build/bochsrc-dos64.txt)
+make run-bochs-full  # boot full image (rendered build/bochsrc-dos64-full.txt)
+make run-bochs-lean  # boot lean image (rendered build/bochsrc-dos64-lean.txt)
 make clean
 ```
 
@@ -55,7 +58,7 @@ A> TYPE HELLO.TXT
 A> COPY README.TXT BACKUP.TXT
 A> DEL BACKUP.TXT
 A> REN OLD.TXT NEW.TXT
-A> DATE / TIME / CLS / VER
+A> DATE / TIME / CLS / VER / PROMPT / PATH / ECHO text / REM comment / PAUSE
 A> TEST      (runs TEST.COM from the volume)
 A> HELP / EXIT
 ```

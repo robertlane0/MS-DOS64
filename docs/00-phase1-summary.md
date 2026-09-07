@@ -92,3 +92,12 @@ Phase 1 satisfies `AGENTS.md:Phase 1: Architecture Analysis 1-4` :
 Ready for Phase 2 review.
 
 *Prepared via automated repo inspection; every claim traceable to `file:line`.*
+
+**Update (closure):** this Phase-1 scaffolding snapshot is historical; as built
+the tree is `src/boot/` (mbr/stage2/gdt), `src/kernel/` (main/selftest/shell/
+cmd/fat/fs/mem/proc/syscall/time/idt/stack), `src/drivers/` (vga/ata/kbd),
+`src/lib/` (string/bcd/addr), `include/` (dpb/fcb/psp/mcb/regs/fs/stack),
+`tools/` (`mkfat12.py` + `check_volume_clean.py`; the original `ASM.ASM`/
+`TRANS.ASM`/`HEX2BIN.ASM` stay at the repo root for reference), `build/`
+(`dos64.img` smoke / `dos64-full.img` full / `dos64-lean.img` lean + rendered
+`build/bochsrc-*.txt`). See `docs/19-closure-g1-g6.md` for the final state.

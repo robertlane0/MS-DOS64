@@ -160,8 +160,7 @@ Since long mode doesn't support BIOS interrupts (must be called from real/protec
 ### Phase 6: Memory Management Overhaul
 
 **DOS 1.25 Memory Manager**:
-- Used a simple first-fit allocation scheme
-- MCB (Memory Control Block) chain starting at segment 0x0600
+- No MCB chain (only `SETMEM` + `MEMSCAN` paragraph scan, `MSDOS.ASM:3363,3900`)
 - 16-bit paragraph-based addressing (16-byte chunks)
 
 **64-bit Conversion**:
@@ -861,10 +860,15 @@ timeout 25 qemu-system-x86_64 -drive file=build/dos64-full.img,format=raw -seria
 python3 tools/check_volume_clean.py --vol-lba 512 --vol-totsec 2880 --sector-size 512 --kernel-lba 16 --kernel-sectors 176 build/dos64.img
 python3 tools/check_volume_clean.py --vol-lba 512 --vol-totsec 2880 --sector-size 512 --kernel-lba 16 --kernel-sectors 176 build/dos64-full.img
 printf '\rDIR\rTYPE HELLO.TXT\rHELP\rEXIT\r' | timeout 25 qemu-system-x86_64 -drive file=build/dos64.img,format=raw -serial stdio -display none
-rm -f bochs.log serial.log build/dos64.img.lock && make && timeout 25 bochs -f bochsrc.txt -q; cat serial.log
+rm -f bochs.log serial.log build/dos64.img.lock && make run-bochs; cat serial.log
+# (run-bochs boots build/dos64.img via the rendered build/bochsrc-dos64.txt;
+# run-bochs-full / run-bochs-lean boot their own images via build/bochsrc-dos64-full.txt
+# / build/bochsrc-dos64-lean.txt rendered from bochsrc.txt.in — see Makefile check-bochsrc)
 ```
 - Make targets: `make` (smoke img), `make full` (destructive full img),
   `make lean` (no self-test img), `make run-qemu` / `run-qemu-full` /
-  `run-qemu-lean` / `run-bochs` / `run-bochs-full` (bochs targets clear stale
+  `run-qemu-lean` / `run-bochs` / `run-bochs-full` / `run-bochs-lean` (bochs targets boot
+  their own rendered `build/bochsrc-*.txt` and clear their own stale
   lock first), `make clean`, `make check-layout` / `check-layout-neg` /
-  `check-kbc` / `check-serial` / `check-selftest-modes`.
+  `check-kbc` / `check-serial` / `check-selftest-modes` / `check-debug-symbols` /
+  `check-bochsrc`.

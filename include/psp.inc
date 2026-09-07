@@ -1,6 +1,6 @@
 ; 64-bit PSP (Program Segment Prefix) — expands MSDOS.ASM PSP concept (MSDOS.ASM:3374)
 ; Original PSP was 256 bytes at program segment base, 16-bit segment pointers.
-; 64-bit PSP is 512 bytes, flat 64-bit linear addresses, preserves DOS 1.25 compatibility fields.
+; 64-bit PSP is 664 bytes (PSP64_size 0x298), flat 64-bit linear addresses, preserves DOS 1.25 compatibility fields.
 ; See docs/03-memory-layout.md and AGENTS.md Phase 8.
 
 %ifndef PSP64_INC
@@ -45,13 +45,13 @@ struc PSP64
     .r14_save   resq 1    ; +0x188
     .r15_save   resq 1    ; +0x190
     .fd_table   resq 16   ; +0x198: extended file handle table (16×64-bit indices, was FCB-only)
-    .pad2       resb 64   ; +0x218: reserved to reach 512
+    .pad2       resb 64   ; +0x218: reserved to reach 664 (PSP64_size 0x298)
 endstruc
 %define PSPSIZ64 PSP64_size
 
-; Compile-time check: must be 512 bytes
-; %if PSPSIZ64 != 512
-; %error "PSP64 size must be 512"
+; Compile-time check: must be 664 bytes (0x298)
+; %if PSPSIZ64 != 664
+; %error "PSP64 size must be 664"
 ; %endif
 
 %endif

@@ -1,5 +1,5 @@
-# MS-DOS64 – 64-bit BIOS boot build (Phase 12 - stack & ABI)
-# Phase 12: Stack/ABI hardening (RSP 16B, System V RDI/RSI/RDX/RCX/R8/R9, callee-saved, canary, IST reserve) + all prior phases
+# MS-DOS64 – 64-bit BIOS boot build (83-test selftest + COMMAND64 shell; smoke/full/lean images)
+# Stack/ABI hardening (RSP 16B, System V RDI/RSI/RDX/RCX/R8/R9, callee-saved, canary, IST reserve) + all prior phases + G1-G6 closure (77-entry INT 21h, real FAT12 volume, REPL, PIC 0x28/0x30)
 # Requires: nasm >=2.15, ld (binutils), qemu or bochs
 BUILD := build
 SRC_BOOT := src/boot

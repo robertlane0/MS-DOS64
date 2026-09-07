@@ -6,7 +6,7 @@
 %define MCB64_INC
 
 ; On-disk/in-memory header preceding each allocated block.
-; Total header 32 bytes, followed by user data.
+; Total header 40 bytes, followed by user data.
 struc MCB64
     .type       resb 1    ; 'M' = more blocks, 'Z' = last block
     .pad0       resb 7    ; alignment

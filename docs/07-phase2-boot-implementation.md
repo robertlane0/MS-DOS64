@@ -14,7 +14,7 @@ Phase 2 (AGENTS.md §Phase 2 + docs/05 strategy) is **complete and verified**. T
 - Enables A20 (Fast 0x92 + 8042 KBC)
 - Loads stage2 via INT13h AH=42h LBA with CHS fallback
 - Transitions real → protected → long (GDT32, CR0.PE, CPUID LM check, CR4.PAE, 4-level paging identity map 0–8 MiB, EFER.LME, CR0.PG, GDT64)
-- Copies kernel from low staging 0x80000 → 0x100000
+- Copies kernel from low staging 0x80000 → 0x100000 (Phase-2 address; moved to `0x70000` as built — see `AGENTS.md` memory map and `src/boot/stage2.asm:17`)
 - Enters 64-bit kernel at 0x100000 with flat stack 0x90000 and native VGA (0xB8000) + COM1 (0x3F8) drivers
 
 Both Bochs and QEMU show the full serial trace and VGA text `Hello from 64-bit DOS64 kernel: Phase2 long mode OK!` with no triple fault. MBR is 512 B with 0xAA55, stage2 is 1021 B (2 sectors, fits in 15-sector slot).
@@ -70,9 +70,9 @@ gdt64_ptr: dw 23; dq gdt64_start
 ```nasm
 stage2_start: cli; mov ds/es/ss=0; sp=0x7C00; [boot_drive2]=dl; init_serial2; print "Stage2 @0x7E00"
 enable_a20_stage2: same 0x92+KBC
-load_kernel: ah=0x41 check -> LBA DAP {staging 0x8000:0x0000 (=0x80000), LBA16, sectors 16} ah=0x42
+load_kernel: ah=0x41 check -> LBA DAP {staging 0x8000:0x0000 (=0x80000 Phase-2; now 0x7000:0x0000 = 0x70000), LBA16, sectors 16} ah=0x42
              else CHS loop 1-sector reads: LBA→CHS (SPT=63 HPC=16, sector=(lba%63)+1, head=(lba/63)%16, cyl=(lba/63)/16)
-             staging at 0x80000 avoids high-mem BIOS issues (QEMU SeaBIOS hung on 0x100000 direct)
+             staging at 0x80000 (now 0x70000) avoids high-mem BIOS issues (QEMU SeaBIOS hung on 0x100000 direct)
 lgdt [gdt32_ptr]; cr0|=1; jmp 0x08:pmode
 ```
 
@@ -98,7 +98,7 @@ lgdt [gdt64_ptr]; jmp 0x08:long_entry
 
 ```nasm
 mov ax,0x10; mov ds/es/fs/gs/ss,ax; rsp=0x90000 & ~15
-mov rsi,0x80000; mov rdi,0x100000; rcx=16*512/8; rep movsq  ; copy kernel
+mov rsi,0x80000; mov rdi,0x100000; rcx=16*512/8; rep movsq  ; copy kernel (Phase-2 addresses; now rsi=0x70000, rcx=KERNEL_SECTORS*512/8)
 ; VGA proof: mov [0xB8000]='6','4','>'
 mov rax,0x100000; jmp rax ; kernel entry
 ```
@@ -220,7 +220,7 @@ Same serial output as Bochs (now via low staging, both emulators succeed). Verif
 0x0000_3000 PD    (4K, 2MiB pages 0,2M,4M,6M)
 0x0000_7C00 MBR
 0x0000_7E00 Stage2 (~1K, GDT at 0x7E02)
-0x0008_0000 Kernel staging (BIOS load, 8K)
+0x0008_0000 Kernel staging (BIOS load, 8K — Phase-2 address; as built 0x0007_0000, see AGENTS.md)
 0x0009_0000 Stack top (Grows down, 64K)
 0x000A_0000 Video 0xB8000
 0x0010_0000 Kernel final (flat, entry _start)
