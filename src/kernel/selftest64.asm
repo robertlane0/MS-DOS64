@@ -3232,6 +3232,7 @@ test_rtc_datetime:
     ; GETDATE direct: RCX=year RDX=(mon<<8)|day AL=wday
     call handler_getdate
     jc .fail68
+    mov r8b, al           ; save wday before RAX is reused for mon/day
     cmp rcx, 1980
     jb .fail68
     cmp rcx, 2099
@@ -3249,7 +3250,7 @@ test_rtc_datetime:
     jb .fail68
     cmp rax, 31
     ja .fail68
-    cmp al, 6
+    cmp r8b, 6
     ja .fail68
     mov r10, rcx          ; save year
     mov r11, rdx          ; save mon/day
