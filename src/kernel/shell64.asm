@@ -79,6 +79,7 @@ extern handler_blkwrt
 extern handler_close
 extern CURDRV64
 extern pic_unmask_irq64
+extern pic_get_mask64
 
 section .bss
 alignb 16
@@ -159,17 +160,38 @@ sh_poll_char:
     ret
 
 ; sh_read_line — RDI=buf RSI=maxlen -> RAX=len (CR/LF submits, BS edits,
-;   ESC clears). Echoes to VGA+serial. Spins on PAUSE when idle.
+;   ESC clears). Echoes to VGA+serial. Idles via bounded PAUSE spin, then
+;   HLT with interrupts enabled (IRQ0 timer / IRQ1 keyboard wake; the timer
+;   tick also bounds serial-input latency since COM1 RX is polled, not
+;   IRQ-driven). STI immediately precedes HLT so no wakeup is missed (x86
+;   delays IF recognition by one instruction).
+; Idle budget: SH_IDLE_SPIN failed polls of PAUSE between polls keeps the
+; worst-case spin well under ~2 ms (each poll is a few port reads + PAUSE),
+; then one HLT sleeps until the next IRQ.
+SH_IDLE_SPIN equ 512
 sh_read_line:
     push rbx
     push rcx
     push rdx
     push rdi
+    push r8
     mov rbx, rdi
     xor ecx, ecx
+    mov r8d, SH_IDLE_SPIN
 .poll_rl:
     call sh_poll_char
-    jc .idle_rl
+    jnc .got_rl
+    dec r8d
+    jnz .pause_rl
+    sti
+    hlt                     ; woken by IRQ0/IRQ1; IF stays 1 (queue ops preserve it)
+    mov r8d, SH_IDLE_SPIN
+    jmp .poll_rl
+.pause_rl:
+    pause
+    jmp .poll_rl
+.got_rl:
+    mov r8d, SH_IDLE_SPIN   ; activity: reset the HLT budget
     cmp al, 13
     je .submit_rl
     cmp al, 10
@@ -214,14 +236,12 @@ sh_read_line:
     test rcx, rcx
     jnz .clear_rl
     jmp .poll_rl
-.idle_rl:
-    pause
-    jmp .poll_rl
 .submit_rl:
     mov byte [rbx + rcx], 0
     mov rsi, sh_crlf
     call sh_print
     mov rax, rcx
+    pop r8
     pop rdi
     pop rdx
     pop rcx
@@ -1050,6 +1070,20 @@ shell_repl64:
     mov edi, 1
     call pic_unmask_irq64
     pop rdi
+    ; Wakeup-source guard: the sh_read_line HLT below only ever wakes on an
+    ; unmasked IRQ (timer IRQ0 bounds polled serial latency, keyboard IRQ1
+    ; wakes PS/2 immediately), so re-assert the mask here. A re-masked PIC
+    ; with STI+HLT would sleep until NMI — this keeps that unreachable.
+    call pic_get_mask64             ; RAX=combined IMR, preserves RDI
+    test eax, 0x03
+    jz .mask_ok_sh
+    push rdi
+    xor edi, edi
+    call pic_unmask_irq64
+    mov edi, 1
+    call pic_unmask_irq64
+    pop rdi
+.mask_ok_sh:
 .loop_repl:
     call sh_prompt_show
     lea rdi, [rel sh_line]
