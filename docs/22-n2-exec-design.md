@@ -94,7 +94,7 @@ FAT1-then-FAT2, mount heals).
   modes. Slice 1 ships read-only + `3Eh`.
 - `3Eh` CLOSE: flush (if dirty + writable), free slot. Double-close → CF=1.
 - **Slice 1 (smallest useful end-to-end, PLAN §8.4): table + `3Dh`-ro +
-  `3Eh` + test 87a (open/close round-trip, zero writes).**
+  `3Eh` + test 87 (open/close round-trip, zero writes) — landed in N2b.**
 - `3Ch` CREATE: `RDX` → name; truncate-if-exists (root→FAT order) else
   alloc entry; returns writable fd. Reuses `SCRATCH.TXT`-namespace tests.
 - `42h` LSEEK: `BX`=fd, `CX:DX`/`RCX`=offset, `AL`=origin (0 set / 1 cur /
@@ -136,15 +136,15 @@ but builtin-shadowed today — `docs/21-…md` §3).
 |---|---|---|
 | 84 | spawn→enter→return round-trip: in-memory `RET` image, expect code 0; caller `RBX RBP R12–R15`/`RSP`-align/canary preserved | PURE (smoke-safe) |
 | 85 | exit-code propagation: `mov al,0x2A` + `AH=4Ch` image → reap returns `0x2A` | PURE |
-| 86 | argv echo: spawn with tail `HI`, enter tail-reader image writing to parent `AH=1Ah` DMA buffer, parent `memcmp` | PURE (memory image + DMA buffer, no device writes) |
-| 87a | slice-1 handle cycle: `3Dh`-ro open + `3Eh` close of `README.TXT`, zero writes | READ-ONLY |
-| 87b | full handle cycle: `3Ch` create + `40h` write + `42h` seek + `3Fh` read + `3Eh` close on `SCRATCH.TXT`, content verified | DESTRUCTIVE (`SELFTEST_DESTRUCTIVE`, SKIP-counted in smoke like 71/83) |
-| 88 | volume-clean invariance after 84–87: scrub 0, mirrors match, `check_volume_clean.py` pre/post clean | READ-ONLY + destructive-half |
+| 86 | argv echo: spawn with tail `HI`, enter tail-reader image copying to a harness buffer (address patched into the image), parent `memcmp` | PURE (memory image + BSS buffer, no device writes) |
+| 87 | slice-1 handle cycle (N2b, landed): `3Dh`-ro open + `3Eh` close of `README.TXT` direct + trap paths, negatives, 13-fd bound, scrub/mirror/orphan invariance | READ-ONLY |
+| 88 | full handle cycle (N2c): `3Ch` create + `40h` write + `42h` seek + `3Fh` read + `3Eh` close on `SCRATCH.TXT`, content verified | DESTRUCTIVE (`SELFTEST_DESTRUCTIVE`, SKIP-counted in smoke like 71/83) |
+| 89 | volume-clean invariance after 84–88: scrub 0, mirrors match, `check_volume_clean.py` pre/post clean | READ-ONLY + destructive-half |
 
 Acceptance (PLAN N2): a hand-written 10-instruction `.COM` loaded **from
 the volume by name** with args runs, writes a file via `3Dh/40h/3Eh`,
 exits with a code the shell prints; `make` + `make full` green on QEMU
 and Bochs; `make lean` unaffected. Smoke stays non-destructive
-(`81+2`-pattern extended, never volume writes outside scratch LBAs);
+(`85+2`-pattern extended, never volume writes outside scratch LBAs);
 `make check-serial`/`check-kbc` patterns hold (child error paths use
 bounded `serial_try_putc64` only, never spin).

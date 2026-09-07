@@ -26,7 +26,7 @@ generates build/include/layout.inc for the bootloader/kernel and passes
 the same numbers here explicitly on every invocation, e.g.::
 
   python3 tools/mkfat12.py --vol-lba 512 --vol-totsec 2880 \\
-      --sector-size 512 --kernel-lba 16 --kernel-sectors 176 build/dos64.img
+      --sector-size 512 --kernel-lba 16 --kernel-sectors 184 build/dos64.img
 
 This script owns NO hardcoded layout defaults: every layout value must
 arrive via CLI flag or its DOS64_* env fallback (DOS64_VOL_LBA,

@@ -35,8 +35,10 @@ Bochs boots with the same image once its lock is cleared.
 
 ## G1 → done: the INT 21h surface is real (except DOS-reserved slots)
 `src/kernel/syscall64.asm` + `src/kernel/fs64.asm`. Only `AH=18h/20h/2Fh–34h/
-36h–3Eh/41h–47h` stay `mov al,0; ret` — those are DOS-reserved (`INUSE`/
+36h–3Ch/41h–47h` stay `mov al,0; ret` — those are DOS-reserved (`INUSE`/
 `USERCODE`), which DOS 1.25 itself stubs; documented, not a gap.
+(N2b implemented `3Dh` OPEN read-only + `3Eh` CLOSE: new row below;
+`3Ch/42h` land in N2c.)
 
 | AH | Handler | Backing |
 |---|---|---|
@@ -54,6 +56,7 @@ Bochs boots with the same image once its lock is cleared.
 | 29 | MAKEFCB | `fs_make_fcb64`: `d:name.ext` parse, upper, `*`→`?`, AL=0/1/FF + end ptr |
 | 2A–2D | GET/SETDATE/TIME | CMOS RTC 0x70/0x71 (UIP wait, BCD/binary + 12/24h modes, DOS weekday map, 1980+ year heuristic), validated via `cmd_date/time_set64` (also syncs the shell clock); software-clock fallback on RTC failure |
 | 2E | VERIFY | flag stored; AL>1 rejected |
+| 3D/3E | OPEN/CLOSE (handles) | N2b: per-context fd table (`PSP64.fd_table`, fds 3–15 over a 16-entry RAM description table); OPEN read-only (mode 0; 1/2 fail until N2c), flat-root 8.3 names, no wildcards/subdirs; CLOSE frees table+desc (double-close fails); DOS-flavored fail codes (2/4/5/6); zero device writes; test 87 |
 
 Record-I/O core `fs_fcb_io64` (per-record `pos=recno*recsiz`, chain walk with
 alloc-on-write, fresh-cluster zeroing so holes read 0, `filsiz` extension,
@@ -65,7 +68,8 @@ honestly instead of scribbling (documented deviation from the PSP:80h
 default). Tests 68 (RTC get/sane/set-restore/invalid/trap routing), 69
 (AUX/LIST/VERIFY/NEWBASE/pointers/attr), 70 (MAKEFCB/OPEN/FILESIZE/RNDRD/
 BLKRD/SEARCH/CLOSE + dispatch + `int 0x21` paths), 71 (CREATE→BLK/SEQ write→
-read-back→RENAME→DELETE with on-image proof of each step).
+read-back→RENAME→DELETE with on-image proof of each step), 87 (handle
+OPEN-ro/CLOSE + trap round-trip + table bounds, scrub/mirror invariance).
 
 Bugs caught by the new tests (all fixed): `fs_fcb_create64` dropping its
 `RBX`=entry return across pops; `fs_fcb_io64` keeping the record count in

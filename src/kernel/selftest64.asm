@@ -1,5 +1,5 @@
 ; MS-DOS64 self-test suite — extracted from main.asm so main stays boot glue.
-; Provides selftest_run64: runs tests 1..86, prints PASS/FAIL + summary + phase lines.
+; Provides selftest_run64: runs tests 1..87, prints PASS/FAIL + summary + phase lines.
 ; Returns RAX = failed count (0 = all pass). Called by _start in full builds.
 ; Lean builds (SKIP_SELFTEST): stub returns 0; test code excluded via RUN_SELFTEST.
 ;
@@ -10,7 +10,8 @@
 ;     without disk), 43-50 (cmd parser/builtins, RAM buffers only), 51-66
 ;     (IDT/PIC/stacks, bounded port I/O, no volume writes), 73-82 (negative
 ;     paths + pure tables, read-only volume sampling only), 84-86 (N2a
-;     enter/return round-trip, exit code, argv echo — memory images only).
+;     enter/return round-trip, exit code, argv echo — memory images only),
+;     87 (N2b handle open/close read-only + scrub/mirror invariance).
 ;   SCRATCH-DEVICE (bounded ATA writes to reserved LBAs outside the volume,
 ;     cleaned up): 14 (LBA 200 pattern + zero restore), 25 (FS_SCRATCH 500/502
 ;     + zero), 26 (FS_FILE_LBA_BASE 510 file-data scratch). Safe every boot.
@@ -31,7 +32,7 @@
 ;   -DRUN_SELFTEST alone (default `make`): smoke suite — PURE + SCRATCH-DEVICE
 ;     + REAL-VOLUME READ-ONLY. Tests 71/83 print SKIP and leave the volume
 ;     untouched (only mount reads + scratch-LBA I/O occur).
-;   -DRUN_SELFTEST -DSELFTEST_DESTRUCTIVE (`make full`): full suite — all 86
+;   -DRUN_SELFTEST -DSELFTEST_DESTRUCTIVE (`make full`): full suite — all 87
 ;     tests including 71/83 in the reserved namespace with mount-time recovery
 ;     (pre-clean delete + discard/remount + reclaim + heal + scrub) and
 ;     post-run non-test preservation checks (HELLO/README intact, scrub clean,
@@ -295,6 +296,8 @@ extern proc_spawn64
 extern proc_terminate64
 extern proc_exit_current64
 extern proc_enter64
+extern handler_open_file
+extern handler_close_file
 extern proc_reap64
 extern proc_free_all64
 extern handler_exec
@@ -1804,6 +1807,23 @@ selftest_run64:
     inc r12
     mov rsi, msg_pass
 .t86_done:
+    call vga_print
+    call serial_print64
+
+    ; ---- Test 87: handle open/close ro (N2b, READ-ONLY) ----
+    mov rsi, msg_test87
+    call vga_print
+    call serial_print64
+    call test_open_close
+    test rax, rax
+    jz .t87_pass
+    inc r13
+    mov rsi, msg_fail
+    jmp .t87_done
+.t87_pass:
+    inc r12
+    mov rsi, msg_pass
+.t87_done:
     call vga_print
     call serial_print64
 
@@ -6090,12 +6110,12 @@ test_queue_interleave:
 
 ; ------------------------------------------------------------
 ; Test 82: Layout invariants — same arithmetic as make check-layout.
-;   Locks the canonical disk layout ( IMG 10M, secsiz 512, kernel 16+176,
+;   Locks the canonical disk layout ( IMG 10M, secsiz 512, kernel 16+184,
 ;   volume 512+2880, FAT 4608 / root 7168 / iobuf 32768 ) and proves the
 ;   build-time predicates at runtime, pure arithmetic, no disk I/O:
-;     kernel_end=16+176<=512, volume_end=3392*512<=10M, aliases
+;     kernel_end=16+184<=512, volume_end=3392*512<=10M, aliases
 ;     FS_VOL_LBA==VOL_LBA, scratch 200/500/501/510/511 clear of kernel
-;     [16,192) and volume [512,3392), FAT 9sec / root 14sec <=64 (ATA
+;     [16,200) and volume [512,3392), FAT 9sec / root 14sec <=64 (ATA
 ;     1..64 contract for the mount reads). Negative tables prove the same
 ;   predicates reject off-by-one overlaps (511, 500+extents) and oversize
 ;   volumes (1M image, 20000 sectors). Deterministic, no timing.
@@ -6122,7 +6142,7 @@ test_layout:
     cmp eax, 16
     jne .fail82
     mov eax, KERNEL_SECTORS
-    cmp eax, 176
+    cmp eax, 184
     jne .fail82
     mov eax, VOL_LBA
     cmp eax, 512
@@ -9513,6 +9533,189 @@ test_enter_argv:
     ret
 
 ; ------------------------------------------------------------
+; Test 87: handle open/close, read-only (N2b, REAL-VOLUME READ-ONLY).
+;   3Dh-ro open + 3Eh close of README.TXT (direct + INT 0x21 trap paths),
+;   negatives (missing/mode/wild/subdir/empty/bad-fd/double-close), full
+;   table bound (13 opens -> fds 3..15, 14th fails), scrub/mirror/orphan
+;   snapshots before == after (zero-write proof). No volume writes.
+; ------------------------------------------------------------
+test_open_close:
+    push rbx
+    push rcx
+    push rdx
+    push rsi
+    push rdi
+    push r8
+    push r9
+    push r10
+    push r11
+    push r12
+    push r13
+    push r14
+    push r15
+    call mem_reset64
+    call proc_init64
+    ; clean-volume snapshot (must already hold this late in the suite:
+    ; test 70 recovered, 71/83 end clean or skipped)
+    call fs_vol_scrub64
+    test rax, rax
+    jnz .fail87
+    mov r12, rax              ; scrub bits (0)
+    mov r13, rcx              ; orphans
+    call fs_vol_check_mirrors64
+    test rax, rax
+    jnz .fail87
+    mov r14, rax              ; mirrors (0)
+    ; open README.TXT mode 0 -> fd in 3..15
+    xor edi, edi
+    lea rdx, [rel t87_readme]
+    call handler_open_file
+    jc .fail87
+    cmp rax, 3
+    jb .fail87
+    cmp rax, 15
+    ja .fail87
+    mov r15, rax              ; fd1
+    ; open again -> distinct fd
+    xor edi, edi
+    lea rdx, [rel t87_readme]
+    call handler_open_file
+    jc .fail87
+    cmp rax, r15
+    je .fail87
+    mov r11, rax              ; fd2
+    ; trap round-trip: INT 0x21 AH=3Dh then AH=3Eh (DISPATCH + frame path)
+    mov rax, 0x3D00
+    lea rdx, [rel t87_readme]
+    int 0x21
+    jc .fail87
+    cmp rax, 3
+    jb .fail87
+    cmp rax, 15
+    ja .fail87
+    push rax                  ; fd3
+    mov rax, 0x3E00
+    mov rbx, [rsp]            ; fd3 (int21 preserves GPRs but be explicit)
+    int 0x21
+    jc .fail87t
+    pop rax                   ; fd3 (drop; already closed via trap)
+    ; negatives: missing / write modes / wild / subdir / empty
+    xor edi, edi
+    lea rdx, [rel t87_nope]
+    call handler_open_file
+    jnc .fail87
+    mov edi, 1
+    lea rdx, [rel t87_readme]
+    call handler_open_file
+    jnc .fail87
+    mov edi, 2
+    lea rdx, [rel t87_readme]
+    call handler_open_file
+    jnc .fail87
+    xor edi, edi
+    lea rdx, [rel t87_wild]
+    call handler_open_file
+    jnc .fail87
+    xor edi, edi
+    lea rdx, [rel t87_sub]
+    call handler_open_file
+    jnc .fail87
+    xor edi, edi
+    lea rdx, [rel t87_empty]
+    call handler_open_file
+    jnc .fail87
+    ; close fd1/fd2; double-close + console/low/high fds must fail
+    mov rbx, r15
+    call handler_close_file
+    jc .fail87
+    mov rbx, r15
+    call handler_close_file
+    jnc .fail87
+    xor ebx, ebx
+    call handler_close_file
+    jnc .fail87
+    mov ebx, 1
+    call handler_close_file
+    jnc .fail87
+    mov ebx, 2
+    call handler_close_file
+    jnc .fail87
+    mov ebx, 16
+    call handler_close_file
+    jnc .fail87
+    mov rbx, r11
+    call handler_close_file
+    jc .fail87
+    ; full table: 13 opens -> fds exactly 3..15, 14th fails
+    lea r15, [rel t87_fds]
+    mov r14d, 3
+.openloop87:
+    cmp r14d, 16
+    jae .fullok87
+    xor edi, edi
+    lea rdx, [rel t87_readme]
+    call handler_open_file
+    jc .fail87
+    cmp rax, r14
+    jne .fail87
+    mov [r15], rax
+    add r15, 8
+    inc r14d
+    jmp .openloop87
+.fullok87:
+    xor edi, edi
+    lea rdx, [rel t87_readme]
+    call handler_open_file
+    jnc .fail87
+    ; close all 13
+    lea r15, [rel t87_fds]
+    mov r14d, 13
+.closeloop87:
+    test r14d, r14d
+    jz .closedok87
+    mov rbx, [r15]
+    call handler_close_file
+    jc .fail87
+    add r15, 8
+    dec r14d
+    jmp .closeloop87
+.closedok87:
+    ; post snapshot == pre (zero writes through the whole cycle)
+    call fs_vol_scrub64
+    cmp rax, r12
+    jne .fail87
+    cmp rcx, r13
+    jne .fail87
+    call fs_vol_check_mirrors64
+    cmp rax, r14
+    jne .fail87
+    call mem_validate64
+    test rax, rax
+    jnz .fail87
+    xor eax, eax
+    jmp .done87
+.fail87t:
+    ; trap-close failed with fd3 still pushed: drop it, then fail
+    add rsp, 8
+.fail87:
+    mov rax, 1
+.done87:
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop r11
+    pop r10
+    pop r9
+    pop r8
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rcx
+    pop rbx
+    ret
+
+; ------------------------------------------------------------
 
 section .rodata
 msg_test1 db " [1] Register mapping (AX->RAX, R8-R15)... ",0
@@ -9601,6 +9804,12 @@ msg_test83 db " [83] FAT12 crash-order (FAT-first + mirrors/scrub)... ",0
 msg_test84 db " [84] Enter/return round-trip (RET + preserve)... ",0
 msg_test85 db " [85] Exit code via INT 0x21 AH=4Ch... ",0
 msg_test86 db " [86] Argv echo via PSP tail (enter)... ",0
+msg_test87 db " [87] Handle open/close ro + trap + bounds... ",0
+t87_readme db "README.TXT",0
+t87_nope db "NOPE.TXT",0
+t87_wild db "*.TXT",0
+t87_sub db "SUB\F.TXT",0
+t87_empty db 0
 ; Test 86 child template (56 bytes, nasm-verified; imm64 placeholder +29).
 ;   lea rax,[rel start] / sub rax,664 / movzx ecx,[rax+0xA0] /
 ;   lea rsi,[rax+0xA1] / mov rdx,imm64 / copy loop / ret
@@ -9865,6 +10074,8 @@ t84_flags: resq 1
 t85_img: resb 8
 t86_img: resb 64
 t86_out: resb 16
+; --- Test 87: fd spill area (13-entry fill order check) ---
+t87_fds: resq 13
 
 
 %else

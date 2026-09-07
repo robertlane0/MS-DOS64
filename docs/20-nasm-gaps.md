@@ -117,7 +117,7 @@ growth headroom**. Options, in preference order: (a) accept the
 mini-assembler as the on-image tool (KiB-scale, fits today); (b) grow
 `VOL_SECTORS`/`IMG_MB` via the layout-block change + `check-layout`
 update; (c) ship `NASM.COM` on a second optional image
-(`dos64-tools.img`). Never squeeze the 176-sector kernel slot.
+(`dos64-tools.img`). Never squeeze the 184-sector kernel slot.
 
 Line counts (for scale, not exactness): `wc -l nasm/*/*.c` ≈ 53 kLOC
 total including vendored `zlib/`; the PLAN §3 figure (~44 kLOC hosted C

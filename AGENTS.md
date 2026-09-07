@@ -1,12 +1,15 @@
 # AGENTS.md: Converting MS-DOS v1.25 ASM to 64-bit BIOS Bootable System
 
-> **Status (2026-09-07): implementation complete — smoke 84 + 2 SKIP
-> (`make`, default, non-destructive) and full 86/86 PASS (`make full`,
+> **Status (2026-09-07): implementation complete — smoke 85 + 2 SKIP
+> (`make`, default, non-destructive) and full 87/87 PASS (`make full`,
 > destructive 71/83 in the reserved SCRATCH/RENAMED/CRASH namespace with
 > mount-time recovery) on QEMU and Bochs, then the interactive `COMMAND64`
 > shell (`src/kernel/shell64.asm`).
 > N2a (PLAN.md slice 4) landed: `proc_enter64` cooperative enter/return
 > (tests 84–86, PURE) — EXEC still spawn-only from the shell/trap (N2d).
+> N2b (slice 5) landed: handle `3Dh` OPEN (read-only) + `3Eh` CLOSE over
+> a per-context fd table (`PSP64.fd_table`, test 87 READ-ONLY); kernel slot
+> grew `176→184` sectors (extent `[16,200)`, test 82 locks it).
 > The phase plan below is kept as the build record; every checklist item is done.
 > Current entry points: `README.md` (what works / memory / disk / shell),
 > `docs/18-truth-gap-analysis.md` + `docs/19-closure-g1-g6.md` (audit trail for
@@ -82,7 +85,7 @@ Create a modern 64-bit boot sequence:
 - **A20 Enabling**: Use Fast A20 method or keyboard controller
 - **Page Table Setup**: Identity map 0–8 MiB via PML4 @`0x1000` → PDPT @`0x2000` → PD @`0x3000` with 4×2 MiB pages (covers stage2, staging `0x70000`, stack `0x90000`, kernel `0x100000`)
 - **GDT**: Create 64-bit code/data segments (base=0, limit=0xFFFFF, flags for long mode)
-- **Kernel load**: `KERNEL_SECTORS 176` (LBA 16+, clear of scratch `200`/`500–511` and the FAT12 volume at LBA 512+ stamped by `tools/mkfat12.py`)
+- **Kernel load**: `KERNEL_SECTORS 184` (LBA 16+, extent [16,200), clear of scratch `200`/`500–511` and the FAT12 volume at LBA 512+ stamped by `tools/mkfat12.py`)
 
 ### Phase 3: Register and Instruction Conversion
 
@@ -353,7 +356,7 @@ endstruc
 - [x] Create identity-mapped page tables (0–8 MiB via PML4 @`0x1000` → PDPT @`0x2000` → PD @`0x3000`, 4×2 MiB pages)
 - [x] Enable long mode via CR4 and EFER MSR
 - [x] Load 64-bit GDT with proper code/data segments
-- [x] Jump to 64-bit kernel entry point (`0x100000`, staged via `0x70000`, `KERNEL_SECTORS 176`)
+- [x] Jump to 64-bit kernel entry point (`0x100000`, staged via `0x70000`, `KERNEL_SECTORS 184`)
 
 ### Core Kernel Conversion
 - [x] Convert IO.SYS initialization routines to 64-bit
@@ -496,7 +499,7 @@ Recommended Kernel Load Address: 0x00100000 (1MB mark)
 
 > As built (see `README.md` Memory map): page tables PML4 @`0x1000` → PDPT
 > @`0x2000` → PD @`0x3000` (0–8 MiB, 4×2 MiB); kernel staging `0x70000` →
-> final `0x100000` (`KERNEL_SECTORS 176`); initial `RSP` `0x90000`;
+> final `0x100000` (`KERNEL_SECTORS 184`); initial `RSP` `0x90000`;
 > `IOSTACK`/`DSKSTACK` 4 KiB BSS stacks; heap `0x200000+` (`MCB64` 40 B);
 > disk: kernel LBA 16+, scratch `200`/`500–511`, FAT12 volume LBA 512–3391.
 
@@ -554,7 +557,7 @@ make
 # dd if=build/mbr.bin of=build/dos64.img conv=notrunc
 # dd if=build/stage2.bin of=build/dos64.img bs=512 seek=1 conv=notrunc
 # dd if=build/kernel.bin of=build/dos64.img bs=512 seek=16 conv=notrunc
-# python3 tools/mkfat12.py --vol-lba 512 --vol-totsec 2880 --sector-size 512 --kernel-lba 16 --kernel-sectors 176 build/dos64.img   # stamps FAT12 volume (canonical values: Makefile disk-layout block)
+# python3 tools/mkfat12.py --vol-lba 512 --vol-totsec 2880 --sector-size 512 --kernel-lba 16 --kernel-sectors 184 build/dos64.img   # stamps FAT12 volume (canonical values: Makefile disk-layout block)
 
 # Test in QEMU (primary) or Bochs
 make run-qemu
@@ -781,13 +784,13 @@ authoritative.
 | `0x70000` | Kernel staging buffer (copied to `0x100000`; must avoid `0x90000` — BIOS `INT 13h` clobbers transfers ending there) |
 | `0x90000` | Initial `RSP` top (16-aligned); `IOSTACK`/`DSKSTACK` separate 4 KiB BSS stacks (16-aligned tops) |
 | `0xB8000` | VGA text buffer |
-| `0x100000+` | Kernel (linked flat at 1 MiB, ~86 KiB / ~172 sectors, ≤176) |
+| `0x100000+` | Kernel (linked flat at 1 MiB, ~88 KiB / ~178 sectors, ≤184) |
 | `0x200000+` | Heap (`MCB64` chain, first-fit) |
 
 ### Disk layout (`build/dos64.img`, 10 MiB)
 - Canonical values live only in the Makefile disk-layout block
   (`IMG_MB=10`, `IMG_SECTOR_SIZE=512`, `VOL_LBA=512`, `VOL_SECTORS=2880`,
-  `KERNEL_LBA=16`, `KERNEL_SECTORS=176`), which generates
+  `KERNEL_LBA=16`, `KERNEL_SECTORS=184`), which generates
   `build/include/layout.inc` for bootloader/kernel and passes the same
   numbers explicitly to `tools/mkfat12.py`. `make check-layout` (prerequisite
   of every image build) enforces this; layout overrides on the make
@@ -796,7 +799,7 @@ authoritative.
 |---|---|
 | 0 | MBR + boot signature `55 AA` |
 | 1–15 | Stage2 |
-| 16+ | Kernel binary (up to 176 sectors) |
+| 16+ | Kernel binary (up to 184 sectors) |
 | 200, 500–511 | ATA/filesystem scratch (kept clear of kernel and volume) |
 | 512–3391 | Real FAT12 volume (1.44 M geometry, stamped at build by `tools/mkfat12.py`) |
 - Volume files: `HELLO.TXT` (1 cluster), `README.TXT` (2-cluster chain),
@@ -856,11 +859,11 @@ linker.ld      flat link at 0x100000 (.text.start first)   bochsrc.txt   Bochs c
 ### Verify commands (removed from README)
 ```bash
 timeout 25 qemu-system-x86_64 -drive file=build/dos64.img,format=raw -serial stdio -display none
-# tail: Summary: 84 passed, 0 failed ... Skipped (destructive): 2 ... MS-DOS64 shell (COMMAND64). Type HELP for commands.
+# tail: Summary: 85 passed, 0 failed ... Skipped (destructive): 2 ... MS-DOS64 shell (COMMAND64). Type HELP for commands.
 timeout 25 qemu-system-x86_64 -drive file=build/dos64-full.img,format=raw -serial stdio -display none
-# tail: Summary: 86 passed, 0 failed ... MS-DOS64 shell (COMMAND64).
-python3 tools/check_volume_clean.py --vol-lba 512 --vol-totsec 2880 --sector-size 512 --kernel-lba 16 --kernel-sectors 176 build/dos64.img
-python3 tools/check_volume_clean.py --vol-lba 512 --vol-totsec 2880 --sector-size 512 --kernel-lba 16 --kernel-sectors 176 build/dos64-full.img
+# tail: Summary: 87 passed, 0 failed ... MS-DOS64 shell (COMMAND64).
+python3 tools/check_volume_clean.py --vol-lba 512 --vol-totsec 2880 --sector-size 512 --kernel-lba 16 --kernel-sectors 184 build/dos64.img
+python3 tools/check_volume_clean.py --vol-lba 512 --vol-totsec 2880 --sector-size 512 --kernel-lba 16 --kernel-sectors 184 build/dos64-full.img
 printf '\rDIR\rTYPE HELLO.TXT\rHELP\rEXIT\r' | timeout 25 qemu-system-x86_64 -drive file=build/dos64.img,format=raw -serial stdio -display none
 rm -f bochs.log serial.log build/dos64.img.lock && make run-bochs; cat serial.log
 # (run-bochs boots build/dos64.img via the rendered build/bochsrc-dos64.txt;

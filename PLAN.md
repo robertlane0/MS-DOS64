@@ -34,7 +34,7 @@ tier 3 broken into fundable milestones, not attempted in one jump.
 | Handle I/O gap | `3Fh` READ / `40h` WRITE exist, but **`3Ch` CREATE, `3Dh` OPEN, `3Eh` CLOSE, `42h` LSEEK are stubs** (`handler_inuse`). Assembler file output needs these | `src/kernel/syscall64.asm:381-389` (`41–47` all `handler_inuse`) |
 | Memory | Flat 64-bit, heap `0x200000+` (`MCB64` 40 B, first-fit), identity map 0–8 MiB (PML4 @`0x1000` → PDPT @`0x2000` → PD @`0x3000`, 4×2 MiB), spawn `total = PSP + payload + 2048 < 6 MiB`, 16 proc slots | `AGENTS.md` Memory map, `src/kernel/proc64.asm:1320-1326` |
 | Filesystem | Real FAT12 volume LBA 512–3391 (2880 sectors, 1.44 M geometry, stamped by `tools/mkfat12.py`), FCB record I/O core + `3F/40` handles; `TYPE` shows first 4 KiB; reserved test namespace `SCRATCH.TXT` / `RENAMED.TXT` / `CRASH.TXT` | `Makefile:23-28` layout block, `include/fs.inc` |
-| Disk budget | Kernel ≤ 176 sectors (~86 KiB today); volume holds `HELLO.TXT`, `README.TXT`, `TEST.COM`, `DATA.BIN`. A full NASM binary (~1 MB Linux build) **does not fit** alongside the kernel growth headroom without layout changes | `Makefile:174,181`, `README.md` |
+| Disk budget | Kernel ≤ 184 sectors (~88 KiB today); volume holds `HELLO.TXT`, `README.TXT`, `TEST.COM`, `DATA.BIN`. A full NASM binary (~1 MB Linux build) **does not fit** alongside the kernel growth headroom without layout changes | `Makefile:174,181`, `README.md` |
 | Shell | `COMMAND64` REPL (`src/kernel/shell64.asm` + `src/kernel/cmd64.asm`): builtins, batch `%1`–`%9` + `%%`, `*.COM` via `proc_spawn64`; single address space, no argv beyond 127 B PSP tail, no redirection/pipes | `AGENTS.md` Phase 10 |
 | ABI | System V AMD64, 16 B `RSP` alignment, near `CALL/RET` only, no TSS/IST yet | `AGENTS.md` Driver/ABI specifics |
 
@@ -76,7 +76,7 @@ NASM upstream (`nasm/asm`, `nasm/output`, `nasm/nasmlib`, `nasm/x86`,
    for the first port; keep `outbin.c` (+ `outelf.c` iff `MZ64` output is
    wanted). This is a build-system task in the submodule, not a fork.
 6. **Image size and delivery (`P1`).** Even trimmed, a NASM binary is
-   hundreds of KiB. The 1.44 M FAT12 volume + 176-sector kernel slot leave
+   hundreds of KiB. The 1.44 M FAT12 volume + 184-sector kernel slot leave
    little room. Options: grow `VOL_SECTORS`/`IMG_MB` (layout-block change +
    `make check-layout` update), ship NASM outside the base image as an
    optional second image, or accept the mini-assembler (KiB-scale) as the
@@ -200,8 +200,8 @@ before any assembler work. **Design + acceptance tests (84+) are done in
       create/write/seek/read/close handle cycle in scratch namespace,
       volume-clean pre/post via `tools/check_volume_clean.py`. Smoke must
       stay non-destructive (`make` 81+2 pattern); destructive parts gated
-      behind `SELFTEST_DESTRUCTIVE` like tests 71/83. (84–86 in N2a, 87a
-      in N2b, 87b–88 in N2c.)
+      behind `SELFTEST_DESTRUCTIVE` like tests 71/83. (84–86 in N2a, 87
+      in N2b, 88–89 in N2c.)
 
 Acceptance: a hand-written 10-instruction `.COM` loaded **from the volume
 by name** with args runs, writes a file via `3Dh/40h/3Eh`, exits with a
@@ -223,13 +223,13 @@ code the shell can print; `make` + `make full` green on QEMU and Bochs.
   writes; `check_volume_clean.py` CLEAN.
 - **N2b — handle table + `3Dh`-ro + `3Eh` (smallest useful file slice).**
   Define `PSP64.fd_table` semantics (fds 0–2 console, 3–15 files) on top
-  of `fs_fcb_open64`/`fs_fcb_close64`; test 87a (`3Dh`-ro open + `3Eh`
+  of `fs_fcb_open64`/`fs_fcb_close64`; test 87 (`3Dh`-ro open + `3Eh`
   close of `README.TXT`, zero writes, READ-ONLY). Acceptance: smoke
-  green, volume CLEAN.
+  green, volume CLEAN. (Done — see item 5.)
 - **N2c — `3Ch` + file `3Fh`/`40h` + `42h`.** CREATE (truncate/create,
   root→FAT order), extend `3Fh`/`40h` to fds ≥ 3 (short-read at EOF,
   alloc-on-write at `pos == size`), LSEEK clamped to `0..size`; tests
-  87b (`SCRATCH.TXT` cycle, destructive-gated) + 88 (scrub/mirror
+  88 (`SCRATCH.TXT` cycle, destructive-gated) + 89 (scrub/mirror
   invariance). Acceptance: `make full` green on QEMU + Bochs,
   `check_volume_clean.py` pre/post CLEAN.
 - **N2d — shell flip + exit codes (N2 acceptance).** `sh_do_exec` enters
@@ -285,7 +285,7 @@ full-port funding arrives early.**
 
 **Track A (after B is stable): full NASM port. Entry: N3.5 + N4B.3
 green; take the N4A.3 size decision (grow volume vs `dos64-tools.img`)
-first — never squeeze the 176-sector kernel slot.**
+first — never squeeze the 184-sector kernel slot.**
 
 - [ ] Submodule build variant: `nasm/configure` with `--disable-*`,
       keep `asm/parser/preproc`, `nasmlib` (minus `mmap/realpath/rlimit`),
@@ -358,9 +358,12 @@ Next — N2 implementation, one slice at a time (design + tests 84+ spec:
       (Done: smoke 84+2 / full 86 green on QEMU + Bochs, volumes CLEAN.
       Test 86 caught a real drift — loader uses `PSP+PSP_SIZE` (664), not
       the `PSP+512` of stale comments; fixed across code/samples/docs.)
-- [ ] 5. **N2b** handle table + `3Dh`-ro + `3Eh` + test 87a (zero writes).
-- [ ] 6. **N2c** `3Ch` + file `3Fh`/`40h` + `42h` + tests 87b (destructive,
-      `SCRATCH.TXT`) and 88 (scrub/mirror invariance).
+- [x] 5. **N2b** handle table + `3Dh`-ro + `3Eh` + test 87 (zero writes).
+      (Done: smoke 85+2 / full 87 green on QEMU + Bochs, volumes CLEAN.
+      Slot grew `176→184` (test 82 locks `[16,200)`); `3Dh` refuses modes
+      1/2, wildcards, subdirs; `3Eh` refuses 0–2/double-close.)
+- [ ] 6. **N2c** `3Ch` + file `3Fh`/`40h` + `42h` + tests 88 (destructive,
+      `SCRATCH.TXT`) and 89 (scrub/mirror invariance).
 - [ ] 7. **N2d** shell flip (`sh_do_exec` enters, `Exit <code>`,
       `%ERRORLEVEL%`); N2 acceptance demo on `dos64-nasm.img`.
 
@@ -383,6 +386,6 @@ Then, towards NASM running on DOS64 (breakdown: `docs/23-…`):
 
 ---
 *Baseline refs: `Makefile` layout block (`IMG_MB=10, VOL_LBA=512,
-VOL_SECTORS=2880, KERNEL_LBA=16, KERNEL_SECTORS=176`), `src/kernel/
+VOL_SECTORS=2880, KERNEL_LBA=16, KERNEL_SECTORS=184`), `src/kernel/
 proc64.asm:1277`, `src/kernel/syscall64.asm:319`, `include/psp.inc`
 (664 B `PSP64`), `include/mcb.inc` (40 B `MCB64`), `nasm/` @ 3.02.*

@@ -56,6 +56,7 @@ global proc_next_pid
 global proc_current
 global proc_state
 global proc_pid
+global proc_psp
 
 extern mem_alloc64
 extern mem_free64

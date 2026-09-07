@@ -3,6 +3,7 @@ default rel
 %include "include/regs.inc"
 %include "include/fcb.inc"
 %include "include/dpb.inc"
+%include "include/psp.inc"
 extern vga_putc
 extern vga_print
 extern mem_alloc64
@@ -18,6 +19,8 @@ extern proc_exit_current64
 extern proc_init64
 extern proc_get_psp64
 extern proc_get_current64
+extern proc_current
+extern proc_psp
 extern kbd_poll
 extern kbd_has_data
 extern kbd_queue_push
@@ -92,6 +95,8 @@ global handler_setvect
 global handler_getvect
 global handler_read_file
 global handler_write_file
+global handler_open_file
+global handler_close_file
 global handler_abort
 global handler_alloc_mem
 global handler_free_mem
@@ -155,6 +160,20 @@ NUMDRV64: resb 1
 VERIFY_FLAG64: resb 1
 global VERIFY_FLAG64
 srch_next_slot: resq 1
+; N2b handle layer (AH=3Dh/3Eh; 3Ch/42h + file 3Fh/40h land in N2c).
+; kern_fd_table mirrors PSP64.fd_table (16 qwords) for the kernel context
+; (proc_current slot with no PSP, e.g. shell/harness): slot content is a
+; 1-based index into fs_hdesc, 0 = free. Fds 0-2 are reserved console
+; handles (never allocated); files live at 3..15.
+; fs_hdesc: 16 system-wide open-file descriptions, 5 qwords each:
+;   +0 state (0 free, 1 open read-only; 2 open read/write lands in N2c),
+;   +8 first cluster, +16 size bytes, +24 position (N2c; 0),
+;   +32 owner PSP (0 = kernel context; close-on-exit sweep lands in N2d).
+kern_fd_table: resq 16
+fs_hdesc:      resq 16*5
+; Scratch FCB for 3Dh name parse + open (single-threaded cooperative use,
+; same pattern as selftest aux_fcb; handlers run on IOSTACK/DSKSTACK).
+hdl_fcb:       resb FCBSIZ64
 ; Debug/self-test hooks (fail-point markers, EXEC introspection).
 ; Gated behind -DDEBUG_SELFTEST (same pattern as SELFTEST_DESTRUCTIVE):
 ; default/smoke/full/lean builds omit them so release objects stay
@@ -168,12 +187,24 @@ exec_dbg_pid: resq 1
 section .text
 syscall_init:
     push rax
+    push rcx
+    push rdi
     xor rax, rax
     mov [rel SPSAVE64], rax
     mov [rel SSSAVE64], rax
     mov byte [rel THISDRV64], 0
     mov byte [rel CURDRV64], 0
     mov byte [rel NUMDRV64], 2   ; A:+B: (Phase9: SELDSK bounds, GETDRV)
+    ; N2b handle layer starts empty (BSS is not trusted zeroed).
+    cld
+    lea rdi, [rel kern_fd_table]
+    mov rcx, 16
+    rep stosq
+    lea rdi, [rel fs_hdesc]
+    mov rcx, 16*5
+    rep stosq
+    pop rdi
+    pop rcx
     pop rax
     ret
 
@@ -377,9 +408,9 @@ DISPATCH64:
     dq handler_inuse      ; 39
     dq handler_inuse      ; 3A
     dq handler_inuse      ; 3B
-    dq handler_inuse      ; 3C
-    dq handler_inuse      ; 3D
-    dq handler_inuse      ; 3E
+    dq handler_inuse      ; 3C (N2c: CREATE)
+    dq handler_open_file  ; 3D 61 AH=3Dh OPEN (N2b: read-only files)
+    dq handler_close_file ; 3E 62 AH=3Eh CLOSE (N2b)
     dq handler_read_file  ; 3F 63 AH=3Fh READ (Phase9: handle 0 stdin)
     dq handler_write_file ; 40 64 AH=40h WRITE (Phase9: handles 1/2 stdout)
     dq handler_inuse      ; 41
@@ -975,6 +1006,263 @@ handler_read_file:          ; AH=3Fh
     mov rax, 6
     stc
 .exit_rf:
+    pop r9
+    pop r8
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rcx
+    pop rbx
+    ret
+
+; ------------------------------------------------------------
+; N2b: handle file layer — AH=3Dh OPEN + AH=3Eh CLOSE (read-only).
+; PLAN.md Phase N2 slices N2b (this) / N2c (3Ch + file 3Fh/40h + 42h).
+; fds 0-2 stay reserved console handles (3Fh stdin / 40h stdout+stderr);
+; files allocate fds 3..15 from the current context's table.
+%define FD_FILE_MIN 3
+%define FD_FILE_MAX 15
+%define HDESC_N 16
+%define HDESC_QWORDS 5
+%define HDESC_STATE 0       ; qword idx: 0 free, 1 open read-only (2 = rw, N2c)
+%define HDESC_FIRST 1       ; first cluster
+%define HDESC_SIZEB 2       ; size bytes
+%define HDESC_POS 3         ; position (N2c; 0)
+%define HDESC_OWNER 4       ; owner PSP, 0 = kernel context (sweep: N2d)
+
+; fd_table_base64 — Out: RAX = 16-qword fd table for the current context:
+;   entered-child slot PSP (proc_psp[]) + fd_table, else kern_fd_table.
+;   Clobbers RAX/RBX only. Slot bounds-checked (garbage -> kern table).
+fd_table_base64:
+    mov rbx, [rel proc_current]
+    cmp rbx, 16                  ; == PROC_MAX (proc64.asm %define, not global)
+    jae .fd_kern
+    lea rax, [rel proc_psp]
+    mov rax, [rax + rbx*8]
+    test rax, rax
+    jz .fd_kern
+    lea rax, [rax + PSP64.fd_table]
+    ret
+.fd_kern:
+    lea rax, [rel kern_fd_table]
+    ret
+
+; handler_open_file — AH=3Dh OPEN handle (N2b: read-only files).
+;   Direct: RDI=mode (0 read-only; 1/2 fail until N2c), RDX=name ptr
+;           (NUL-terminated 8.3, flat root only).
+;   Trap: RAX=0x3Dmm (AL=mode, DOS 0/1/2), RDX=name; mode comes from AL
+;           iff AH==0x3D (same trap/direct split as handler_exit_process).
+;   Out: RAX=fd (3..15, DOS-ish errors below), CF 0 ok / 1 fail. Trap path
+;        also writes RAX to the SPSAVE64 rax_save slot (3Fh pattern).
+;   Fail codes (DOS-flavored): 2 not-found/bad-name, 4 table full,
+;        5 access-denied (write modes until N2c).
+;   Name rules: X: drive prefix parsed by the FCB layer (0/A: accepted);
+;        '\' '/' subdirs rejected (flat root only); wildcards rejected.
+;   Zero device writes on every path: mount is read-only on clean images
+;        and open fills only the scratch FCB + RAM tables.
+handler_open_file:
+    push rbx
+    push rcx
+    push rdx
+    push rsi
+    push rdi
+    push r8
+    push r9
+    push r10
+    push r11
+    mov r10d, 2                  ; default err: file not found
+    mov ebx, eax
+    shr ebx, 8
+    and ebx, 0xFF
+    cmp bl, 0x3D
+    jne .use_rdi_of
+    movzx edi, al                ; trap: DOS AL mode
+.use_rdi_of:
+    test rdi, rdi                ; N2b: mode 0 (read-only) only
+    jz .mode_ok_of
+    mov r10d, 5                  ; write modes -> denied until N2c
+    jmp .fail_of
+.mode_ok_of:
+    test rdx, rdx
+    jz .fail_of
+    cmp byte [rdx], 0
+    je .fail_of
+    mov rsi, rdx                 ; RDX intact: name
+    lea rdi, [rel hdl_fcb]
+    xor eax, eax                 ; AL=0: no separator skipping (DOS-strict)
+    call fs_make_fcb64
+    jc .fail_of                  ; AL=0xFF malformed
+    test al, al
+    jnz .fail_of                 ; wild flag: no ?/* for 3Dh
+    cmp byte [rsi], 0            ; parser must consume the whole string:
+    jne .fail_of                 ; '\' '/' and trailing junk stop the cursor
+                                 ; (flat root only; stricter than not-found)
+    mov al, [rel hdl_fcb + FCB64.drive]
+    cmp al, 1                    ; 0 default / 1 A: only (one volume)
+    ja .fail_of
+    call vol_ensure_mounted
+    jc .fail_of
+    lea rdi, [rel hdl_fcb]
+    lea rbp, [rel fs_vol_dpb]
+    lea rsi, [rel fs_vol_root]
+    call fs_fcb_open64
+    test rax, rax
+    jnz .fail_of                 ; not found (err already 2)
+    mov r9d, [rel hdl_fcb + FCB64.firclus]
+    mov r10, [rel hdl_fcb + FCB64.filsiz]   ; size (kept live; err stays 2)
+    test r10, r10
+    jz .empty_ok_of
+    cmp r9d, 2                   ; nonzero size needs a real first cluster;
+    jb .fail_of                  ; refuse corrupt dirents (scrub DANGLING)
+.empty_ok_of:
+    call fd_table_base64         ; RAX=table (clobbers RAX/RBX only)
+    mov r11, rax
+    mov ecx, FD_FILE_MIN         ; alloc fd slot first (no rollback needed)
+.fdscan_of:
+    cmp ecx, FD_FILE_MAX+1
+    jae .full_of
+    cmp qword [r11 + rcx*8], 0
+    je .fdfound_of
+    inc ecx
+    jmp .fdscan_of
+.full_of:
+    mov r10d, 4                  ; too many open files
+    jmp .fail_of
+.fdfound_of:                     ; ECX=fd
+    lea rbx, [rel fs_hdesc]      ; alloc description
+    xor r8d, r8d
+.dscan_of:
+    cmp r8d, HDESC_N
+    jae .full_of
+    mov rax, r8
+    imul rax, rax, HDESC_QWORDS*8
+    cmp qword [rbx + rax + HDESC_STATE*8], 0
+    je .dfound_of
+    inc r8d
+    jmp .dscan_of
+.dfound_of:                      ; R8=desc idx, ECX=fd, R9D=firstclus,
+                                 ; R10=size (live since open; scans spared it)
+    mov qword [rbx + rax + HDESC_STATE*8], 1
+    mov [rbx + rax + HDESC_FIRST*8], r9
+    mov [rbx + rax + HDESC_SIZEB*8], r10
+    mov qword [rbx + rax + HDESC_POS*8], 0
+    mov rdx, [rel proc_current]  ; owner PSP (0 = kernel context)
+    cmp rdx, 16
+    jae .owner0_of
+    lea rax, [rel proc_psp]
+    mov rdx, [rax + rdx*8]
+    jmp .owner1_of
+.owner0_of:
+    xor edx, edx
+.owner1_of:
+    lea rax, [rel fs_hdesc]      ; recompute desc addr (rax reused above)
+    mov rbx, r8
+    imul rbx, rbx, HDESC_QWORDS*8
+    mov [rax + rbx + HDESC_OWNER*8], rdx
+    lea rax, [r8 + 1]            ; table slot = 1-based desc idx
+    mov [r11 + rcx*8], rax
+    mov eax, ecx                 ; RAX=fd
+    mov rbx, [rel SPSAVE64]
+    test rbx, rbx
+    jz .noframe_of
+    mov [rbx + STKPTRS64.rax_save], rax
+.noframe_of:
+    clc
+    pop r11
+    pop r10
+    pop r9
+    pop r8
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rcx
+    pop rbx
+    ret
+.fail_of:
+    mov eax, r10d
+    mov rbx, [rel SPSAVE64]
+    test rbx, rbx
+    jz .noframe_fof
+    mov [rbx + STKPTRS64.rax_save], rax
+.noframe_fof:
+    stc
+    pop r11
+    pop r10
+    pop r9
+    pop r8
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rcx
+    pop rbx
+    ret
+
+; handler_close_file — AH=3Eh CLOSE handle (N2b).
+;   In: RBX=fd, direct and trap (BX) alike — same reg, no AH split needed.
+;   Out: RAX=0 ok / 6 invalid handle, CF accordingly; trap frame updated.
+;   Fds 0-2 (console) fail honestly; double close fails. N2b descs are
+;   read-only so no flush is needed (N2c hook: writable+dirty flush here).
+handler_close_file:
+    push rbx
+    push rcx
+    push rdx
+    push rsi
+    push rdi
+    push r8
+    push r9
+    push r10
+    push r11
+    mov ecx, ebx
+    and ecx, 0xFFFF
+    cmp ecx, FD_FILE_MIN
+    jb .fail_cf
+    cmp ecx, FD_FILE_MAX
+    ja .fail_cf
+    call fd_table_base64         ; RAX=table (clobbers RAX/RBX only)
+    mov r8, rax
+    mov rdx, [r8 + rcx*8]        ; 1-based desc idx, 0 = not open
+    test rdx, rdx
+    jz .fail_cf
+    dec edx
+    cmp edx, HDESC_N
+    jae .fail_cf                 ; table/descriptor desync (paranoia)
+    lea rax, [rel fs_hdesc]
+    imul rdx, rdx, HDESC_QWORDS*8
+    cmp qword [rax + rdx + HDESC_STATE*8], 0
+    je .fail_cf
+    mov qword [rax + rdx + HDESC_STATE*8], 0
+    mov qword [rax + rdx + HDESC_FIRST*8], 0
+    mov qword [rax + rdx + HDESC_SIZEB*8], 0
+    mov qword [rax + rdx + HDESC_POS*8], 0
+    mov qword [rax + rdx + HDESC_OWNER*8], 0
+    mov qword [r8 + rcx*8], 0
+    xor eax, eax
+    mov rbx, [rel SPSAVE64]
+    test rbx, rbx
+    jz .noframe_cf
+    mov [rbx + STKPTRS64.rax_save], rax
+.noframe_cf:
+    clc
+    pop r11
+    pop r10
+    pop r9
+    pop r8
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rcx
+    pop rbx
+    ret
+.fail_cf:
+    mov eax, 6                   ; invalid handle
+    mov rbx, [rel SPSAVE64]
+    test rbx, rbx
+    jz .noframe_fcf
+    mov [rbx + STKPTRS64.rax_save], rax
+.noframe_fcf:
+    stc
+    pop r11
+    pop r10
     pop r9
     pop r8
     pop rdi

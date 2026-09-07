@@ -25,7 +25,12 @@ IMG_SECTOR_SIZE := 512
 VOL_LBA := 512
 VOL_SECTORS := 2880
 KERNEL_LBA := 16
-KERNEL_SECTORS := 176
+# 184 (was 176): N2b handle layer (~1.5 KiB) overflowed the 176-sector slot
+# with N2c/d still to come. Extent [16,200) stays clear of ATA scratch 200
+# (adjacent, half-open: legal), FS scratch 500-511, and volume 512+.
+# 184 is the max before scratch LBA 200; beyond N2, revisit via scratch
+# relocation, not silent slot pressure (see PLAN.md N4A.3).
+KERNEL_SECTORS := 184
 LAYOUT_INC := $(BUILD)/include/layout.inc
 
 # Reject unsupported layout overrides. (Environment values are already
@@ -375,7 +380,7 @@ check-selftest-modes:
 	@! grep -Eq '^NASM_DEFS \?= .*SELFTEST_DESTRUCTIVE' Makefile || (echo "selftest-modes FAIL: default NASM_DEFS must stay smoke (no SELFTEST_DESTRUCTIVE)"; exit 1)
 	@grep -q 'SCRATCH.TXT' include/fs.inc || (echo "selftest-modes FAIL: include/fs.inc missing reserved namespace"; exit 1)
 	@grep -q 'check_volume_clean' include/fs.inc || (echo "selftest-modes FAIL: include/fs.inc must reference check_volume_clean"; exit 1)
-	@echo "Selftest modes OK: smoke (84 + 2 SKIP) default, full (86) via make full"
+	@echo "Selftest modes OK: smoke (85 + 2 SKIP) default, full (87) via make full"
 
 # Debug-hook check — source-level assertion that test/fail-point markers
 # stay out of release objects (same pattern as SELFTEST_DESTRUCTIVE).

@@ -1,12 +1,12 @@
 # Phase 1 – Boot & Testing Strategy for 64-bit Conversion
 
 > **As built (2026-09-07):** this strategy is implemented — MBR → stage2 →
-> kernel at `0x100000` boots smoke 84 + 2 SKIP (`make`) or full 86 PASS
+> kernel at `0x100000` boots smoke 85 + 2 SKIP (`make`) or full 87 PASS
 > (`make full`, destructive 71/83 in the reserved namespace with recovery)
 > + `COMMAND64` REPL on QEMU (primary) and Bochs. Concrete sizes/layout
 > below reflect the code; the step rationale is unchanged. See `README.md`
 > + `docs/19-closure-g1-g6.md` for the final state (chunked loads,
-> `KERNEL_SECTORS 176`, FAT12 volume at LBA 512+, PIC master `0x28`/slave
+> `KERNEL_SECTORS 184`, FAT12 volume at LBA 512+, PIC master `0x28`/slave
 > `0x30`). `make lean` builds a shell-only `build/dos64-lean.img`
 > (`SKIP_SELFTEST`, §7.1); tests 73–76 (§7.2) lock in negative-path
 > handling, tests 77–82 (§7.3) lock in cross-layer malformed-input
@@ -30,7 +30,7 @@ Original DOS had no MBR in repo — SCP boot loaded `IO.SYS` + `MSDOS.SYS` via u
 0x00007E00  Stage2 (~1 KiB, performs mode switch, chunked kernel loads)
 0x00070000  Kernel staging buffer (BIOS loads here, copied to 0x100000 in long mode)
 0x00090000  Initial RSP top (grows down, 16-aligned; IOSTACK/DSKSTACK are separate 4 KiB BSS stacks)
-0x00100000  Kernel entry (flat binary, 64-bit, `KERNEL_SECTORS 176` = 88 KiB max, ~172 sectors used)
+0x00100000  Kernel entry (flat binary, 64-bit, `KERNEL_SECTORS 184` = 92 KiB max, ~178 sectors used)
 0x00200000+ Heap (MCB64 chain, first-fit)
 0x00A0000–0x00BFFFF Video (B8000 text, will be driven by VGA driver)
 0x0C0000–0xFFFFF ROM
@@ -50,7 +50,7 @@ Responsibilities:
 
 Stage2 loads the kernel in chunks (≤16 sectors/LBA packet; CHS fallback
 advances ES across 64 KiB boundaries) to staging `0x70000`, then copies to
-`0x100000` in long mode (`rep movsq`, `KERNEL_SECTORS 176`).
+`0x100000` in long mode (`rep movsq`, `KERNEL_SECTORS 184`).
 
 Build: `nasm -f bin src/boot/mbr.asm -o build/mbr.bin` – check `stat -c %s =512` and last two bytes `55 AA`.
 
@@ -155,8 +155,8 @@ flags (classification: PURE / SCRATCH-DEVICE / REAL-VOLUME READ-ONLY /
 REAL-VOLUME DESTRUCTIVE — see `src/kernel/selftest64.asm` header):
 
 ```nasm
-; Smoke (default): nasm -DRUN_SELFTEST -> 84 + 2 SKIP, then shell_repl64
-; Full:  nasm -DRUN_SELFTEST -DSELFTEST_DESTRUCTIVE -> 86, then shell
+; Smoke (default): nasm -DRUN_SELFTEST -> 85 + 2 SKIP, then shell_repl64
+; Full:  nasm -DRUN_SELFTEST -DSELFTEST_DESTRUCTIVE -> 87, then shell
 ; Lean:  nasm -DSKIP_SELFTEST -> skip suite, minimal init, shell direct
 %ifdef SKIP_SELFTEST
 %undef RUN_SELFTEST
@@ -171,11 +171,11 @@ REAL-VOLUME DESTRUCTIVE — see `src/kernel/selftest64.asm` header):
 `Makefile` exposes all three (objects are kept separate so the images can coexist):
 
 ```bash
-make                    # smoke: build/dos64.img (RUN_SELFTEST, 84 + 2 SKIP + shell)
-make full               # full: build/dos64-full.img (RUN_SELFTEST+SELFTEST_DESTRUCTIVE, 86 + shell)
+make                    # smoke: build/dos64.img (RUN_SELFTEST, 85 + 2 SKIP + shell)
+make full               # full: build/dos64-full.img (RUN_SELFTEST+SELFTEST_DESTRUCTIVE, 87 + shell)
 make lean               # lean: build/dos64-lean.img (SKIP_SELFTEST, shell direct)
-make run-qemu           # boot smoke image, expect "Summary: 84 passed, 0" + "Skipped (destructive): 2"
-make run-qemu-full      # boot full image, expect "Summary: 86 passed, 0"
+make run-qemu           # boot smoke image, expect "Summary: 85 passed, 0" + "Skipped (destructive): 2"
+make run-qemu-full      # boot full image, expect "Summary: 87 passed, 0"
 make run-qemu-lean      # boot lean image, expect "Lean boot ... entering COMMAND64..."
 ```
 
@@ -275,7 +275,7 @@ read-only sampling. Each leaves its subsystem clean for the shell.
   preservation (`push`/`pop`/`flush` leave `IF` as found) and nested `cli`
   (inner calls keep `IF=0`, restore to found). Ends flushed.
 * `[82] Layout invariants` (`test_layout`): canonical values
-  (`IMG 10M`, `secsiz 512`, kernel `16+176`, volume `512+2880`, `FAT 4608`
+  (`IMG 10M`, `secsiz 512`, kernel `16+184`, volume `512+2880`, `FAT 4608`
   / `root 7168` / `iobuf 32768`) plus the same predicates `make
   check-layout` enforces — `kernel_end<=VOL_LBA`, `volume_end<=IMG_MB`,
   `FS_VOL_*` aliases, scratch `200/500/501/510/511` clear of kernel and
@@ -333,12 +333,12 @@ nasm -f bin src/boot/mbr.asm -o build/mbr.bin
 nasm -f bin src/boot/stage2.asm -o build/stage2.bin
 nasm -f elf64 src/kernel/*.asm src/drivers/*.asm src/lib/*.asm -o build/src/.../*.o
 ld -T linker.ld -o build/kernel.elf build/src/kernel/main.o ... -nostdlib  # linker places .text.start (_start) at 0x100000
-objcopy -O binary build/kernel.elf build/kernel.bin  # must fit KERNEL_SECTORS 176
+objcopy -O binary build/kernel.elf build/kernel.bin  # must fit KERNEL_SECTORS 184
 dd if=/dev/zero of=build/dos64.img bs=1M count=10
 dd if=build/mbr.bin of=build/dos64.img conv=notrunc
 dd if=build/stage2.bin of=build/dos64.img bs=512 seek=1 conv=notrunc
 dd if=build/kernel.bin of=build/dos64.img bs=512 seek=16 conv=notrunc  # or via stage2 LBA loader
-python3 tools/mkfat12.py --vol-lba 512 --vol-totsec 2880 --sector-size 512 --kernel-lba 16 --kernel-sectors 176 build/dos64.img  # stamps FAT12 volume (canonical values: Makefile disk-layout block)
+python3 tools/mkfat12.py --vol-lba 512 --vol-totsec 2880 --sector-size 512 --kernel-lba 16 --kernel-sectors 184 build/dos64.img  # stamps FAT12 volume (canonical values: Makefile disk-layout block)
 make run-qemu   # or: bochs -f bochsrc.txt -q
 ```
 
