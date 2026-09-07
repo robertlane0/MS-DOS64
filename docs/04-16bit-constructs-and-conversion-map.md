@@ -161,10 +161,10 @@ real (BIOS) → protected (GDT 32-bit) → long (PAE + paging + EFER.LME → CR0
 ## 7. Converted File Layout (Target)
 
 ```
-src/boot/mbr.asm        # 512B boot0: INT 13h LBA (chunked ≤64/packet) + CHS fallback (ES advances over 64K) → stage2 at 0x7E00, A20, GDT32
-src/boot/stage2.asm     # PAE + PML4 @0x1000/PDPT @0x2000/PD @0x3000 identity 0-8MiB (4×2MiB PS), EFER.LME, GDT64, staging 0x80000 → 0x100000 copy, KERNEL_SECTORS 176
+src/boot/mbr.asm        # 512B boot0: INT 13h LBA + CHS fallback (ES advances over 64K) → stage2 at 0x7E00, A20, GDT32
+src/boot/stage2.asm     # PAE + PML4 @0x1000/PDPT @0x2000/PD @0x3000 identity 0-8MiB (4×2MiB PS), EFER.LME, GDT64, staging 0x70000 → 0x100000 copy, KERNEL_SECTORS 176 (chunked ≤16 sectors/LBA packet)
 src/boot/gdt.asm        # GDT32 + GDT64 (code 0x9A, data 0x92, TSS if needed)
-src/kernel/main.asm     # 64-bit entry _start @0x100000 (section .text.start first): 72-test harness → shell_repl64
+src/kernel/main.asm     # 64-bit entry _start @0x100000 (section .text.start first): boot glue → selftest64.asm 83-test harness → shell_repl64
 src/kernel/shell64.asm  # interactive COMMAND64 REPL (prompt/line-edit/volume builtins/*.COM EXEC)
 src/kernel/cmd64.asm    # COMMAND64 parser/COMTAB64/builtins/batch (%1-%9)
 src/kernel/syscall64.asm # IDT INT 21h gate + DISPATCH64 (77 entries AH=00h-4Ch)
@@ -175,7 +175,7 @@ src/kernel/proc64.asm   # PSP64/env/loader(MZ64+COM)/spawn/terminate
 src/kernel/idt64.asm    # IDT 256×16B + PIC master 0x28/slave 0x30 (timer 0x28/kbd 0x29/disk 0x36)
 src/kernel/stack64.asm  # System V ABI/canary/IST reserve
 src/drivers/vga.asm     # writes 0xB8000, cursor via 0x3D4
-src/drivers/ata.asm     # PIO LBA28 (0x1F0-0x1F7), scratch LBA 200
+src/drivers/ata.asm     # PIO LBA28 (0x1F0-0x1F7), scratch LBA 200/500–511
 src/drivers/kbd.asm     # port 0x60 scancode, queue
 src/lib/string64.asm    # REP helpers for flat
 src/lib/bcd64.asm       # DIV-based BCD (AAM/AAD invalid in 64-bit)
@@ -187,7 +187,7 @@ include/mcb.inc         # MCB64 struc (40B, MCBSIZ64)
 include/regs.inc        # STKPTRS64 trap frame
 include/fs.inc          # DIRENT/BPB + FS_VOL_LBA 512 scratch defines
 include/stack.inc       # STACK_TOP64 0x90000 + ABI macros
-tools/mkfat12.py        # stamps the real FAT12 volume at LBA 512+ during make
+tools/mkfat12.py        # stamps the real FAT12 volume at LBA 512+ during make (+ check_volume_clean.py pre/post proof)
 ```
 
 All new code `bits 64` `default rel`.

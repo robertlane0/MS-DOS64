@@ -559,7 +559,7 @@ make
 make run-qemu
 make run-bochs
 ```
-Expected: 83/83 self-tests PASS on serial, then the `COMMAND64` shell prompt
+Expected (smoke `make`): 81 PASS + 2 SKIP on serial, then the `COMMAND64` shell prompt; (full `make full`): 83 PASS, then the shell prompt
 
 **Stage 2: Video Output**
 - Test character output to screen using VGA driver

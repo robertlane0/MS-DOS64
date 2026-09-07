@@ -1,12 +1,13 @@
-# Closure G1–G6 — how each gap was fixed (2026-09-05, 82/82 PASS)
+# Closure G1–G6 — how each gap was fixed (2026-09-05 → 2026-09-07, 83/83 PASS full)
 
 Companion to `docs/18-truth-gap-analysis.md` (the audit). Each section gives
 the fix location, the design decision where DOS semantics were simplified,
 and the test/transcript that proves it. Final state: clean `make`, QEMU boot
-`Summary: 82 passed, 0`, all ten `ALL TESTS PASS` banners, then the shell.
+`Summary: 83 passed, 0` (smoke: `81 passed` + `Skipped (destructive): 2`), all ten `ALL TESTS PASS` banners, then the shell.
 (The 77–82 cross-layer suite — BPB table + sentinels, pure ATA table,
 FAT-chain bounds, allocator arithmetic, queue interleave, layout invariants
-— was added 2026-09-06; see `docs/05 §7.3` for its coverage.)
+— was added 2026-09-06; see `docs/05 §7.3` for its coverage. Test 83,
+FAT12 crash-ordering, followed; see `docs/05 §7.4`.)
 
 ## G5 → done: `fat_dir_read64` is real
 `src/kernel/fat64.asm`: the no-op body is now a tail-call to the ATA-backed
@@ -107,7 +108,7 @@ Note: AGENTS.md Phase 11's "disk INT 0x0E→IRQ14" line conflates CPU `#PF`
 with the PIC vector; the code (`0x36` + slave+master EOI) is correct.
 
 ## Bootloader hardening (found while growing past 128 sectors)
-- `stage2.asm` LBA kernel load is now chunked (≤64 sectors/packet; some
+- `stage2.asm` LBA kernel load is now chunked (≤16 sectors/packet; some
   BIOSes cap single packets) and the CHS fallback advances ES across 64K
   boundaries (the old 16-bit `DI` wrapped past 64KB and would corrupt
   staging). `KERNEL_SECTORS` 128→176 (kernel LBA 16+, clear of all scratch

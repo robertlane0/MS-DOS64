@@ -1,6 +1,6 @@
 # Phase 1 – Architecture Analysis: MS-DOS 1.25 (86-DOS) Overview
 
-> Generated: 2026-08-30 · Source: MS-DOS v1.25 (MIT, Tim Paterson, Microsoft) — 5 asm files totaling **13,580 lines**.
+> Generated: 2026-08-30 · Source: MS-DOS v1.25 (MIT, Tim Paterson, Microsoft) — 7 asm files totaling **13,580 lines**.
 > Assembler: Seattle Computer Products 8086 Assembler dialect (non-NASM, `PUT`, `SEGMENT AT`, `IF` macros).
 > Target conversion: x86-64 long mode, flat addressing, BIOS MBR boot.
 
@@ -10,13 +10,13 @@
 
 | File | Lines | Role | Modern Equivalent |
 |------|------:|------|-------------------|
-| `MSDOS.ASM` (incl. `STDDOS.ASM` wrapper) | 4030 (+23) | Kernel: FAT12, FCB I/O, INT vectors, memory mgmt | `src/kernel/` |
+| `MSDOS.ASM` (incl. `STDDOS.ASM` wrapper) | 4030 (+22) | Kernel: FAT12, FCB I/O, INT vectors, memory mgmt | `src/kernel/` |
 | `IO.ASM` | 1933 | I/O System = IO.SYS: console, aux, printer, floppy drivers + `INIT` loader | `src/drivers/` + `src/boot/stage2` |
-| `COMMAND.ASM` | 2165 | COMMAND.COM: resident (handlers) + init + transient (parser + 10 builtin cmds) | `src/kernel/shell/` |
+| `COMMAND.ASM` | 2165 | COMMAND.COM: resident (handlers) + init + transient (parser + 10 builtin cmds) | `src/kernel/cmd64.asm` + `shell64.asm` |
 | `ASM.ASM` | 4005 | SCP 8086 Assembler v2.44 – self-hosting assembler (tool, not OS) | `tools/` (preserve, not port) |
 | `TRANS.ASM` | 1212 | Z80→8086 translator – tool | `tools/` |
 | `HEX2BIN.ASM` | 213 | Intel HEX→binary converter – tool | `tools/` |
-| `STDDOS.ASM` | 23 | Build wrapper: `MSVER=TRUE`, `IBM=FALSE`, `HIGHMEM=FALSE` → `INCLUDE MSDOS.ASM` | Build config |
+| `STDDOS.ASM` | 22 | Build wrapper: `MSVER=TRUE`, `IBM=FALSE`, `HIGHMEM=FALSE` → `INCLUDE MSDOS.ASM` | Build config |
 | **Total OS** | **~8,128** | Core OS | — |
 | **Total tools** | **~5,430** | Not ported to kernel | — |
 

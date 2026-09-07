@@ -82,7 +82,7 @@ are the audit trail for the last correctness pass.
 | `0x70000` | Kernel staging buffer (copied to `0x100000`; must avoid `0x90000` — BIOS `INT 13h` clobbers transfers ending there) |
 | `0x90000` | Initial `RSP` top (16-aligned); syscall `IOSTACK`/`DSKSTACK` are separate 4 KiB BSS stacks (16-aligned tops) |
 | `0xB8000` | VGA text buffer |
-| `0x100000+` | Kernel (linked flat at 1 MiB, ~64 KiB / ~129 sectors) |
+| `0x100000+` | Kernel (linked flat at 1 MiB, ~86 KiB / ~172 sectors, ≤176) |
 | `0x200000+` | Heap (`MCB64` chain, first-fit) |
 
 ## Disk layout (`build/dos64.img`, 10 MiB)
@@ -168,7 +168,7 @@ rm -f bochs.log serial.log build/dos64.img.lock && make && timeout 25 bochs -f b
 
 ```
 src/boot/      mbr.asm (A20, INT13 LBA/CHS) + stage2.asm (mode switch, chunked loads) + gdt.asm
-src/kernel/    main.asm (entry @0x100000, 83-test harness) + shell64.asm (REPL)
+src/kernel/    main.asm (entry @0x100000, boot glue) + selftest64.asm (83-test harness) + shell64.asm (REPL)
                cmd64.asm (COMMAND64 parser/builtins/exec/batch) + fat64.asm (UNPACK/PACK)
                fs64.asm (FAT12 mount/read/flush/alloc + FCB record-I/O core)
                mem64.asm (MCB64 manager) + proc64.asm (PSP64/env/loader/spawn)
@@ -177,7 +177,7 @@ src/kernel/    main.asm (entry @0x100000, 83-test harness) + shell64.asm (REPL)
 src/drivers/   vga.asm (0xB8000 text) + ata.asm (0x1F0 PIO LBA28) + kbd.asm (PS/2 0x60/0x64)
 src/lib/       string64.asm + bcd64.asm (AAM/AAD->DIV, CBW equiv.) + addr64.asm (seg:off->linear)
 include/       fcb.inc/dpb.inc/psp.inc/mcb.inc/regs.inc/fs.inc/stack.inc (64-bit structures)
-tools/         mkfat12.py (stamps the FAT12 volume during make)
+tools/         mkfat12.py (stamps the FAT12 volume during make) + check_volume_clean.py (pre/post cleanliness proof)
 MSDOS.ASM / IO.ASM / COMMAND.ASM   original MS-DOS v1.25 sources (reference only; STDDOS.ASM is the legacy wrapper — the 64-bit build uses src/ via Makefile)
 linker.ld      flat link at 0x100000 (.text.start first)   bochsrc.txt   Bochs config
 ```

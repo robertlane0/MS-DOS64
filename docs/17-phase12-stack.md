@@ -208,7 +208,7 @@ can build on the reserved `IST1/IST2` tops verified here.
 
 **Update (closure):** after this report the G1–G6 pass landed — 77-entry
 `INT 21h`, real FAT12 volume at LBA 512+ (`tools/mkfat12.py`), interactive
-`COMMAND64` REPL (`src/kernel/shell64.asm`, 72/72 PASS), PIC remap master
+`COMMAND64` REPL (`src/kernel/shell64.asm`, 83-test suite: 81 + 2 SKIP smoke, 83 full), PIC remap master
 `0x28`/slave `0x30` (timer `0x28`/kbd `0x29`/disk `0x36`), chunked kernel
 loads with `KERNEL_SECTORS 176`. See `docs/18-truth-gap-analysis.md` +
 `docs/19-closure-g1-g6.md`.

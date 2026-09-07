@@ -28,9 +28,9 @@ Original DOS had no MBR in repo — SCP boot loaded `IO.SYS` + `MSDOS.SYS` via u
 0x00001000  PML4 (4 KiB) → 0x2000 PDPT → 0x3000 PD (4×2 MiB PS pages, identity 0–8 MiB)
 0x00007C00  MBR (512B) loaded by BIOS — stage1
 0x00007E00  Stage2 (~1 KiB, performs mode switch, chunked kernel loads)
-0x00080000  Kernel staging buffer (BIOS loads here, copied to 0x100000 in long mode)
+0x00070000  Kernel staging buffer (BIOS loads here, copied to 0x100000 in long mode)
 0x00090000  Initial RSP top (grows down, 16-aligned; IOSTACK/DSKSTACK are separate 4 KiB BSS stacks)
-0x00100000  Kernel entry (flat binary, 64-bit, `KERNEL_SECTORS 176` = 88 KiB max, ~129 sectors used)
+0x00100000  Kernel entry (flat binary, 64-bit, `KERNEL_SECTORS 176` = 88 KiB max, ~172 sectors used)
 0x00200000+ Heap (MCB64 chain, first-fit)
 0x00A0000–0x00BFFFF Video (B8000 text, will be driven by VGA driver)
 0x0C0000–0xFFFFF ROM
@@ -48,8 +48,8 @@ Responsibilities:
 4. Load Stage2: use BIOS `INT 13h AH=42h` LBA extended read if available, else CHS (`AH=02h`). Stage2 at 0x7E00 (fits the 15-sector LBA 1–15 slot; ~1 KiB as built). Verify signature 0xAA55.
 5. `jmp 0:0x7E00`.
 
-Stage2 loads the kernel in chunks (≤64 sectors/LBA packet; CHS fallback
-advances ES across 64 KiB boundaries) to staging `0x80000`, then copies to
+Stage2 loads the kernel in chunks (≤16 sectors/LBA packet; CHS fallback
+advances ES across 64 KiB boundaries) to staging `0x70000`, then copies to
 `0x100000` in long mode (`rep movsq`, `KERNEL_SECTORS 176`).
 
 Build: `nasm -f bin src/boot/mbr.asm -o build/mbr.bin` – check `stat -c %s =512` and last two bytes `55 AA`.
@@ -90,13 +90,13 @@ long_entry:
   jmp 0x08:0x100000
 ```
 
-**Page-table details:** use `dq` entries with flags `P|RW` (0x3). As built: PML4 @`0x1000` → PDPT @`0x2000` → PD @`0x3000` with 4×2 MiB PS pages (`0x83`), identity 0–8 MiB — covers stage2, staging `0x80000`, stack `0x90000`, and kernel at `0x100000`.
+**Page-table details:** use `dq` entries with flags `P|RW` (0x3). As built: PML4 @`0x1000` → PDPT @`0x2000` → PD @`0x3000` with 4×2 MiB PS pages (`0x83`), identity 0–8 MiB — covers stage2, staging `0x70000`, stack `0x90000`, and kernel at `0x100000`.
 
 **GDTs:**
 
 ```nasm
 ; GDT32: null, code 0x08 (base 0, limit 0FFFFFh, 0xCF9A), data 0x10 (0xCF92)
-; GDT64: null, code 0x08 (0xAF9A long), data 0x10 (0xAF92)
+; GDT64: null, code 0x08 (0xAF9A long), data 0x10 (0xCF92)
 ```
 
 ## 5. Kernel Entry (`src/kernel/main.asm : _start`)

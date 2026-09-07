@@ -1,8 +1,9 @@
-# MS-DOS64 Truth Gap Analysis — audit baseline 2026-09-05, CLOSED 2026-09-05
+# MS-DOS64 Truth Gap Analysis — audit baseline 2026-09-05, CLOSED 2026-09-07
 
-> **Status: all six gaps below are now fixed and verified (82/82 PASS on a
+> **Status: all six gaps below are now fixed and verified (83/83 PASS full,
+> 81 + 2 SKIP smoke, on a
 > fresh QEMU boot + interactive REPL transcripts, including the 77–82
-> cross-layer suite). See
+> cross-layer suite and test 83 crash-ordering). See
 > `docs/19-closure-g1-g6.md` for the fix-by-fix evidence. This file is kept
 > as the audit trail of what was wrong.**
 

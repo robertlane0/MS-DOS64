@@ -15,7 +15,7 @@ Phase 1 (Architecture Analysis) required by `AGENTS.md:Phase 1` is **complete**.
 
 | Artifact | How Verified |
 |----------|--------------|
-| `MSDOS.ASM` 4030 lns, `IO.ASM` 1933, `COMMAND.ASM` 2165, `STDDOS.ASM` 23 wrapper | `wc -l`, `read` full files, `grep -n` sampled 300 lines each |
+| `MSDOS.ASM` 4030 lns, `IO.ASM` 1933, `COMMAND.ASM` 2165, `STDDOS.ASM` 22 wrapper | `wc -l`, `read` full files, `grep -n` sampled 300 lines each |
 | Interrupt & driver tables | `grep -n "INTBASE\|FAR PTR BIOS" ` → 13 BIOS far calls, 47 dispatch entries |
 | Memory structs FCB/DPB/STKPTRS/BDA | `grep -n "STRUC\|SEGMENT"` → 3 strucs + DOSGROUP |
 | Port I/O & hardware specifics | `grep -n "OUT\|IN "` in IO.ASM → 22 hits (0xF0,0xE0,0x10) |
