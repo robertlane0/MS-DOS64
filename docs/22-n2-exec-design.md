@@ -1,0 +1,134 @@
+# N2 — Real execution + file + argv: design + acceptance tests
+
+Status: **design only — not implemented.** N1 (cross-assemble + run,
+`docs/21-nasm-cross.md`) is the last landed tier. This doc is the build
+order for the hard prerequisite both assembler tracks need. Land and
+stabilize everything below before any N3/N4 work.
+
+Non-goals (stay cooperative like DOS): no timer preemption, no per-process
+`CR3` switch (store it in `PSP64`, switch later), no `MZ`/`PE` loading.
+
+## 0. What exists today (do not regress)
+
+- `proc_spawn64` (`src/kernel/proc64.asm:1285`): memory image → PSP (664 B)
+  + payload at `PSP+512` + 2048 B stack + 1024 B env; records 16-slot table
+  (`proc_pid/psp/entry/stack/exitcode/memsize/envptr/state`); returns
+  `(pid, psp)`. Never enters the image.
+- `handler_exec` (`src/kernel/syscall64.asm:2367`): trap wrapper, writes pid
+  to the `SPSAVE64`/`STKPTRS64` frame (`include/regs.inc`), stack-slot
+  discard (no BSS statics — `make check-debug-symbols` enforces).
+- `sh_do_exec` (`src/kernel/shell64.asm:657`): **EXEC-from-path already
+  works** — loads `<name>.COM` (≤ 4096 B via `sh_file`) from the FAT12
+  volume, stages via `mem_alloc64`, passes the shell tail
+  (`sh_tail_len` → `cmd_exec_external64` → `psp_set_cmdtail64`), prints
+  `Loaded, pid N`, then terminate+reap. The missing half is enter/return.
+- FCB file core is real (`handler_open/close/delete/create/rename`,
+  `fs_fcb_*`, `fs_vol_read_file64`, FAT+root write-through, crash ordering
+  `include/fs.inc:98-119`). Handle `3Fh`/`40h` exist but only for console
+  handles 0/1/2; `3Ch/3Dh/3Eh/42h` are `handler_inuse` stubs.
+- `PSP64.fd_table` (`include/psp.inc`: 16×qword at `+0x198`) is reserved —
+  N2 defines its semantics (below). No struct change needed.
+
+## 1. Enter/return (`proc_enter64`, N2a — first)
+
+New leaf in `proc64.asm`, called by `handler_exec` (opt-in run flag) and
+by `sh_do_exec` once tests 84–86 are green:
+
+```text
+In:  RDI = pid (or psp — pick psp, it is unambiguous), documented at call sites
+Out: RAX = child exit code, CF 0/1
+```
+
+1. Validate psp (`psp_validate64`), fetch `entry` + `stack_top` from the
+   proc table. `stack_top` is 16-aligned by construction
+   (`mem_alloc64` aligns); assert it.
+2. Save the caller on the **current (kernel) stack**: `push RBX RBP R12–R15`,
+   record `RSP` into one BSS qword `exec_caller_rsp` (functional save slot,
+   cooperative single-threaded — no reentrancy; this is not a debug hook,
+   document it next to `check-debug-symbols` so the audit stays clean).
+3. `RSP := stack_top - 8`, `push child_ret_trampoline` (so a bare `RET`
+   from a `.COM` — e.g. `TEST.COM`'s single `0xC3` — lands in the
+   trampoline with exit code 0), `RDI := psp` (argv convention §3),
+   `call entry` (near call — child `RET` also lands in the trampoline).
+4. Trampoline + `AH=4Ch` path converge: `proc_exit_current64` checks
+   `exec_caller_rsp != 0`: if set, store `AL`/`RDI`-code to
+   `proc_exitcode[slot]`, mark zombie, restore caller `RSP`/regs, clear the
+   slot, return code in `RAX`. If clear (child outliving its enter — must
+   not happen), keep today's mark-zombie behavior.
+5. Caller regs `RBX RBP R12–R15` + 16 B `RSP` alignment preserved across the
+   round trip (System V AMD64, `stack64.asm` discipline); canary intact.
+
+Sequencing (per PLAN §7 risk row): land `proc_enter64` + tests 84–86 with
+the shell still spawn-only; flip `sh_do_exec` to enter only after 84–86
+are green on QEMU **and** Bochs. No `EXEC_ENTER` ifdef needed if this order
+holds — if boot destabilizes, revert the one-line shell flip, not the leaf.
+
+## 2. Handle syscalls (N2b — second)
+
+Per-proc open-file table **is** `PSP64.fd_table` (16 entries, owner = PSP,
+freed with the proc block): `fd` = index; 0/1/2 reserved
+stdin/stdout/stderr (today's console behavior, unchanged); 3..15 files.
+Entry: `(state, firstclus, size, pos, mode)`. All metadata writes reuse the
+FCB write-through paths (`fs_fcb_create64/open/close`, `fs_vol_flush_fat64/
+flush_root64`) and the crash orderings (`include/fs.inc`: extend =
+data→FAT→root; truncate/shrink = root→FAT; delete = root→FAT; mirrors
+FAT1-then-FAT2, mount heals).
+
+- `3Dh` OPEN: `RDX` → NUL-terminated 8.3 name (flat root only, no subdirs;
+  strip any `X:` drive prefix, reject `\` paths). Read-only and read/write
+  modes. Slice 1 ships read-only + `3Eh`.
+- `3Eh` CLOSE: flush (if dirty + writable), free slot. Double-close → CF=1.
+- **Slice 1 (smallest useful end-to-end, PLAN §8.4): table + `3Dh`-ro +
+  `3Eh` + test 87a (open/close round-trip, zero writes).**
+- `3Ch` CREATE: `RDX` → name; truncate-if-exists (root→FAT order) else
+  alloc entry; returns writable fd. Reuses `SCRATCH.TXT`-namespace tests.
+- `42h` LSEEK: `BX`=fd, `CX:DX`/`RCX`=offset, `AL`=origin (0 set / 1 cur /
+  2 end); clamp `0..size` (no sparse extends); CF=1 out of range.
+- Extend `3Fh`/`40h` beyond console handles: `BX` ≥ 3 → table lookup;
+  `3Fh` short-reads at EOF (CF=0, `RAX` < count — same contract as stdin);
+  `40h` at `pos == size` extends alloc-on-write (FAT+root write-through);
+  record-granular writes stay (matching FCB semantics).
+- No new test-namespace names: handle file tests reuse `SCRATCH.TXT`
+  (pre-clean recovery + `check_volume_clean.py` already cover it).
+
+## 3. Argv/env convention (pins the N0 open item)
+
+- N2a: `RDI = PSP` on entry (also derivable as `entry - 512` for `.COM`,
+  which `samples/echo.asm` already does — both hold). Raw tail stays the
+  DOS-compatible fallback (`PSP+0xA0` len, `+0xA1` 127 B, set at spawn).
+- N2b (with `libc64`): shell tokenizes the tail into a NUL-joined argv
+  block above the child stack; `ECX = argc`, `RDX = argv` (pointer to
+  pointer-array), block freed with the proc. `ENV` (1024 B, owner = PSP,
+  `PATH=.` / `COMSPEC=COMMAND64` defaults via `env_init64`/`env_set64`)
+  is copied to the child, never aliased.
+- `MZ64` contract (`docs/20-nasm-gaps.md` §4) unchanged, plus `RDI = PSP`.
+
+## 4. Exit codes + `ERRORLEVEL`
+
+Child code travels `AL`/`RDI` (at `RET` trampoline or `AH=4Ch`) →
+`proc_exitcode[slot]` → `reap` returns it → `sh_do_exec` prints
+`Loaded, pid N` today; after the N2a flip it additionally prints
+`Exit <code>` on return (non-zero codes especially — batch use).
+Batch `%ERRORLEVEL%` query rides the `%1`–`%9` machinery
+(`src/kernel/cmd64.asm`) — N2b, after codes are stable. `ECHO.COM`
+becomes the argv round-trip test the moment enter lands (it is staged
+but builtin-shadowed today — `docs/21-…md` §3).
+
+## 5. Acceptance tests (84+, in `src/kernel/selftest64.asm`)
+
+| # | Test | Mode |
+|---|---|---|
+| 84 | spawn→enter→return round-trip: in-memory `RET` image, expect code 0; caller `RBX RBP R12–R15`/`RSP`-align/canary preserved | PURE (smoke-safe) |
+| 85 | exit-code propagation: `mov al,0x2A` + `AH=4Ch` image → reap returns `0x2A` | PURE |
+| 86 | argv echo: spawn with tail `HI`, enter tail-reader image writing to parent `AH=1Ah` DMA buffer, parent `memcmp` | PURE (memory image + DMA buffer, no device writes) |
+| 87a | slice-1 handle cycle: `3Dh`-ro open + `3Eh` close of `README.TXT`, zero writes | READ-ONLY |
+| 87b | full handle cycle: `3Ch` create + `40h` write + `42h` seek + `3Fh` read + `3Eh` close on `SCRATCH.TXT`, content verified | DESTRUCTIVE (`SELFTEST_DESTRUCTIVE`, SKIP-counted in smoke like 71/83) |
+| 88 | volume-clean invariance after 84–87: scrub 0, mirrors match, `check_volume_clean.py` pre/post clean | READ-ONLY + destructive-half |
+
+Acceptance (PLAN N2): a hand-written 10-instruction `.COM` loaded **from
+the volume by name** with args runs, writes a file via `3Dh/40h/3Eh`,
+exits with a code the shell prints; `make` + `make full` green on QEMU
+and Bochs; `make lean` unaffected. Smoke stays non-destructive
+(`81+2`-pattern extended, never volume writes outside scratch LBAs);
+`make check-serial`/`check-kbc` patterns hold (child error paths use
+bounded `serial_try_putc64` only, never spin).
