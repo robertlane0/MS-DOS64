@@ -498,8 +498,65 @@ run-bochs-lean: $(BUILD)/dos64-lean.img $(BOCHSRC_LEAN)
 	rm -f $(BUILD)/dos64-lean.img.lock bochs.log serial.log
 	bochs -f $(BOCHSRC_LEAN) -q
 
+# N1 cross-assemble samples (PLAN.md tier 1; docs/21-nasm-cross.md).
+# Samples are assembled with a NASM built from the vendored nasm/
+# submodule (exact pin, not whatever the host ships) and staged onto a
+# separate dos64-nasm.img variant. The default smoke/full/lean images are
+# untouched (still only HELLO.TXT/README.TXT/TEST.COM/DATA.BIN).
+# The submodule build is cached under build/nasm-sub (gitignored); it
+# rebuilds only when missing. `make nasm-clean` drops that cache.
+NASM_SUB_SRC := nasm
+NASM_SUB_BUILD := $(BUILD)/nasm-sub/src
+NASM_SUB_BIN := $(NASM_SUB_BUILD)/nasm
+SAMPLE_OUTDIR := $(BUILD)/nasm-samples
+SAMPLE_OUTS := $(SAMPLE_OUTDIR)/HELLO.COM $(SAMPLE_OUTDIR)/ECHO.COM $(SAMPLE_OUTDIR)/CAT.COM
+NASM_IMG := $(BUILD)/dos64-nasm.img
+BOCHSRC_NASM := $(BUILD)/bochsrc-dos64-nasm.txt
+
+$(NASM_SUB_BIN):
+	mkdir -p $(BUILD)/nasm-sub
+	cp -a $(NASM_SUB_SRC)/. $(NASM_SUB_BUILD)/
+	cd $(NASM_SUB_BUILD) && ./autogen.sh
+	cd $(NASM_SUB_BUILD) && ./configure --disable-lto --disable-debug
+	$(MAKE) -C $(NASM_SUB_BUILD) -j nasm
+
+$(SAMPLE_OUTDIR)/HELLO.COM: samples/hello.asm $(NASM_SUB_BIN) | $(BUILD)
+	mkdir -p $(SAMPLE_OUTDIR)
+	$(NASM_SUB_BIN) -f bin $< -o $@
+	@test $$(stat -c %s $@) -le 4096 || (echo "sample $@ exceeds 4096B shell staging"; exit 1)
+
+$(SAMPLE_OUTDIR)/ECHO.COM: samples/echo.asm $(NASM_SUB_BIN) | $(BUILD)
+	mkdir -p $(SAMPLE_OUTDIR)
+	$(NASM_SUB_BIN) -f bin $< -o $@
+	@test $$(stat -c %s $@) -le 4096 || (echo "sample $@ exceeds 4096B shell staging"; exit 1)
+
+$(SAMPLE_OUTDIR)/CAT.COM: samples/cat.asm $(NASM_SUB_BIN) | $(BUILD)
+	mkdir -p $(SAMPLE_OUTDIR)
+	$(NASM_SUB_BIN) -f bin $< -o $@
+	@test $$(stat -c %s $@) -le 4096 || (echo "sample $@ exceeds 4096B shell staging"; exit 1)
+
+$(NASM_IMG): $(BUILD)/mbr.bin $(BUILD)/stage2.bin $(BUILD)/kernel.bin $(SAMPLE_OUTS) check-layout check-kbc check-serial check-selftest-modes check-debug-symbols | $(BUILD)
+	dd if=/dev/zero of=$@ bs=1M count=$(IMG_MB) status=none
+	dd if=$(BUILD)/mbr.bin of=$@ conv=notrunc status=none
+	dd if=$(BUILD)/stage2.bin of=$@ bs=$(IMG_SECTOR_SIZE) seek=1 conv=notrunc status=none
+	dd if=$(BUILD)/kernel.bin of=$@ bs=$(IMG_SECTOR_SIZE) seek=$(KERNEL_LBA) conv=notrunc status=none
+	python3 -W error tools/mkfat12.py --vol-lba $(VOL_LBA) --vol-totsec $(VOL_SECTORS) --sector-size $(IMG_SECTOR_SIZE) --kernel-lba $(KERNEL_LBA) --kernel-sectors $(KERNEL_SECTORS) --extra-file HELLO.COM=$(SAMPLE_OUTDIR)/HELLO.COM --extra-file ECHO.COM=$(SAMPLE_OUTDIR)/ECHO.COM --extra-file CAT.COM=$(SAMPLE_OUTDIR)/CAT.COM $@
+	@echo "Created $@ ($$(stat -c %s $@) bytes, with N1 samples)"
+
+nasm-samples: $(NASM_IMG)
+
+run-qemu-nasm: $(NASM_IMG)
+	qemu-system-x86_64 -drive file=$(NASM_IMG),format=raw -serial stdio
+
+run-bochs-nasm: $(NASM_IMG) $(BOCHSRC_NASM)
+	rm -f $(NASM_IMG).lock bochs.log serial.log
+	bochs -f $(BOCHSRC_NASM) -q
+
+nasm-clean:
+	rm -rf $(BUILD)/nasm-sub $(SAMPLE_OUTDIR) $(NASM_IMG) $(BOCHSRC_NASM) $(NASM_IMG).lock
+
 clean:
 	rm -rf $(BUILD)/*.bin $(BUILD)/*.o $(BUILD)/*.img $(BUILD)/*.elf $(BUILD)/*.map $(BUILD)/*.lock $(BUILD)/bochsrc-*.txt
 	rm -rf $(BUILD)/src $(BUILD)/lean $(BUILD)/full $(BUILD)/include
 
-.PHONY: all lean full clean run-bochs run-bochs-full run-bochs-lean run-qemu run-qemu-lean run-qemu-full check-layout check-layout-neg check-kbc check-serial check-selftest-modes check-debug-symbols check-bochsrc
+.PHONY: all lean full clean run-bochs run-bochs-full run-bochs-lean run-qemu run-qemu-lean run-qemu-full check-layout check-layout-neg check-kbc check-serial check-selftest-modes check-debug-symbols check-bochsrc nasm-samples run-qemu-nasm run-bochs-nasm nasm-clean

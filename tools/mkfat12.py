@@ -15,6 +15,12 @@ Idempotent: rebuilds the region from scratch on every run so repeated
   TEST.COM   1 cluster   single RET (minimal EXEC/loader target)
   DATA.BIN   1 cluster   0x00..0xFF pattern
 
+Client files (N1 cross-assembled samples): `--extra-file NAME=HOSTPATH`
+appends one 8.3 file per flag (e.g. `HELLO.COM=build/nasm-samples/HELLO.COM`).
+Used by `make nasm-samples` for the dos64-nasm.img variant; the default
+`make` image carries only the four fixed files. Extra files must fit the
+remaining clusters and must not collide with fixed or reserved test names.
+
 Single source of truth: the Makefile disk-layout block is canonical. It
 generates build/include/layout.inc for the bootloader/kernel and passes
 the same numbers here explicitly on every invocation, e.g.::
@@ -31,6 +37,7 @@ read back (BPB TotSec16 + AA55) before reporting success.
 """
 import argparse
 import os
+import re
 import struct
 import sys
 
@@ -97,10 +104,53 @@ def parse_args(argv=None):
     p.add_argument("--kernel-lba", type=_int, default=None,
                    help="kernel start LBA, for overlap check (or DOS64_KERNEL_LBA)")
     p.add_argument("--kernel-sectors", type=_int, default=None,
-                   help="kernel extent in sectors, for overlap check (or DOS64_KERNEL_SECTORS)")
+                    help="kernel extent in sectors, for overlap check (or DOS64_KERNEL_SECTORS)")
+    p.add_argument("--extra-file", dest="extra_files", action="append",
+                    default=[],
+                    metavar="NAME=HOSTPATH",
+                    help="stage one client file (repeatable): 8.3 volume name "
+                         "= host path, e.g. HELLO.COM=build/nasm-samples/HELLO.COM "
+                         "(N1 samples for dos64-nasm.img; default image omits these)")
     p.add_argument("image", nargs="?", default="build/dos64.img",
-                   help="image file to stamp (default: build/dos64.img)")
+                    help="image file to stamp (default: build/dos64.img)")
     return p.parse_args(argv)
+
+
+# 8.3 client-file names (uppercased before matching; per-part charset is the
+# FAT conservative set so the in-guest FCB parser accepts them verbatim).
+_NAME_PART = r"[A-Z0-9!$#%&'()\-@^_`{}~]+"
+_EXTRA_RE = re.compile(rf"^({_NAME_PART})\.({_NAME_PART})$")
+
+# Fixed + reserved names an --extra-file must not shadow (base volume files
+# and the destructive-test namespace owned by tests 71/83).
+_FIXED_NAMES = {"HELLO   TXT", "README  TXT", "TEST    COM", "DATA    BIN"}
+_RESERVED_NAMES = {"SCRATCH TXT", "RENAMED TXT", "CRASH   TXT"}
+
+
+def _parse_extra(spec):
+    """Parse one NAME=HOSTPATH spec into (dir11, data). Fatal on misuse."""
+    if "=" not in spec:
+        sys.exit(f"mkfat12: bad --extra-file {spec!r}: want NAME=HOSTPATH "
+                 f"(e.g. HELLO.COM=build/nasm-samples/HELLO.COM)")
+    name, _, host = spec.partition("=")
+    name = name.strip().upper()
+    host = host.strip()
+    m = _EXTRA_RE.match(name)
+    if not m or len(m.group(1)) > 8 or len(m.group(2)) > 3:
+        sys.exit(f"mkfat12: bad --extra-file name {name!r}: want 8.3 "
+                 f"(1-8 + '.' + 1-3 chars)")
+    dir11 = m.group(1).ljust(8) + m.group(2).ljust(3)
+    if dir11 in _FIXED_NAMES or dir11 in _RESERVED_NAMES:
+        sys.exit(f"mkfat12: --extra-file {name!r} collides with a fixed or "
+                 f"reserved volume name")
+    try:
+        with open(host, "rb") as f:
+            data = f.read()
+    except OSError as e:
+        sys.exit(f"mkfat12: cannot read --extra-file {host!r}: {e}")
+    if not data:
+        sys.exit(f"mkfat12: --extra-file {name!r} is empty ({host})")
+    return dir11, data
 
 
 def chain_for(nclusters, start):
@@ -148,6 +198,13 @@ def main(img_path=None, argv=None):
         ("TEST    COM", 0x20, TESTCOM),
         ("DATA    BIN", 0x20, DATA),
     ]
+    seen = set()
+    for spec in args.extra_files:
+        dir11, data = _parse_extra(spec)
+        if dir11 in seen:
+            sys.exit(f"mkfat12: duplicate --extra-file {dir11!r}")
+        seen.add(dir11)
+        files.append((dir11, 0x20, data))
     # Assign clusters sequentially from 2.
     clus = 2
     layout = []
@@ -155,6 +212,13 @@ def main(img_path=None, argv=None):
         n = (len(data) + SECSIZ - 1) // SECSIZ
         layout.append((name, attr, data, chain_for(n, clus)))
         clus += n
+    maxclus = (TOTSEC - (1 + 2 * FATSZ + ROOTSEC)) + 1
+    if clus - 2 > maxclus:
+        sys.exit(f"mkfat12: volume full: {len(files)} files need {clus - 2} "
+                 f"clusters, have {maxclus}")
+    if len(files) > NROOT:
+        sys.exit(f"mkfat12: volume full: {len(files)} files exceed "
+                 f"{NROOT} root entries")
 
     vol = bytearray(TOTSEC * SECSIZ)
 

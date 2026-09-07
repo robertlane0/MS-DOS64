@@ -48,6 +48,16 @@ README_NAME = b"README  TXT"
 TESTCOM_NAME = b"TEST    COM"
 DATABIN_NAME = b"DATA    BIN"
 
+# N1 cross-assembled samples (optional: allowed but never required).
+# `make nasm-samples` stages these onto dos64-nasm.img via mkfat12.py
+# --extra-file; the default smoke/full/lean images omit them. When present
+# they must be chain-valid (checked by the generic walk below) and small
+# enough for the shell's 4 KiB staging buffer (sh_file); anything else
+# (live test names, missing base files, dangling/xlink/orphans) is dirty
+# exactly as before.
+SAMPLE_NAMES = {b"HELLO   COM", b"ECHO    COM", b"CAT     COM"}
+SAMPLE_MAX_BYTES = 4096
+
 
 def _env_int(name):
     raw = os.environ.get(name)
@@ -170,6 +180,12 @@ def main(argv=None):
     for want in (HELLO_NAME, README_NAME, TESTCOM_NAME, DATABIN_NAME):
         if want not in by_name:
             errors.append(f"non-test file {want.decode()} missing")
+    for want in SAMPLE_NAMES:
+        if want in by_name:
+            _, s = by_name[want]
+            if s < 1 or s > SAMPLE_MAX_BYTES:
+                errors.append(f"sample {want.decode()} size {s} outside "
+                              f"1..{SAMPLE_MAX_BYTES} (shell staging limit)")
 
     def read_chain(firstclus, size):
         if size == 0:
