@@ -168,36 +168,79 @@ before any assembler work. **Design + acceptance tests (84+) are done in
       caller `RBX RBP R12–R15` + 16 B `RSP` alignment per ABI. Decide
       cooperative (child `RET`/`AH=4Ch` returns to shell) vs preemptive
       (timer IRQ0 preemption — explicitly **out of scope**; stay
-      cooperative like DOS).
-- [ ] **Load from disk, not just memory.** Today EXEC takes a memory image
-      (`RDI=src`). Add `EXEC-from-path`: resolve via FAT12, load clusters
-      into the proc block, then spawn. Without this NASM cannot assemble
-      named files.
+      cooperative like DOS). (Slice N2a; shell flip in N2d.)
+- [ ] **Load from disk, not just memory.** Today the `AH=4Bh` trap takes a
+      memory image (`RDI=src`). Add `EXEC-from-path`: resolve via FAT12,
+      load clusters into the proc block, then spawn. Without this NASM
+      cannot assemble named files. (Half done: `sh_do_exec` already
+      resolves `<name>.COM` via FAT12 and stages it — the shell path
+      frontend exists. Remaining N2a decision: whether `AH=4Bh` grows a
+      path form or the shell stays the path frontend and the trap keeps
+      the memory-image form.)
 - [ ] **Handle syscalls.** Implement `3Ch` CREATE, `3Dh` OPEN, `3Eh`
       CLOSE, `42h` LSEEK on top of `fs64/fat64` (mirror FCB semantics:
       alloc-on-write, FAT+root write-through, record-granular writes).
       Keep behavior smoke-safe: new tests default to scratch-namespace
       files; extend `include/fs.inc` reserved namespace if needed.
+      (Slices N2b–N2c, `3Eh`-first; reuse `SCRATCH.TXT` — no new
+      namespace names needed.)
 - [ ] **Argv/env convention.** Shell tokenizes command tail → `argv`
       accessible to child (e.g., NUL-joined block + `argc` register +
       pointer in PSP extension or above-stack); `ENV` inheritance from
-      parent with `PATH`/`COMSPEC` defaults preserved.
+      parent with `PATH`/`COMSPEC` defaults preserved. (Convention pinned
+      in `docs/22-n2-exec-design.md` §3: N2a `RDI=PSP` + raw tail; shell
+      side lands in N2d.)
 - [ ] **Exit codes.** Propagate child `AL`/`RDI` code through zombie →
       `reap` → shell `ERRORLEVEL` analogue + `%ERRORLEVEL%`-style batch
       query (batch `%1`–`%9` machinery in `src/kernel/cmd64.asm` is the
-      model).
+      model). (N2a: code path into `proc_exitcode`; N2d: shell print +
+      `ERRORLEVEL`.)
 - [ ] **Tests.** Extend `src/kernel/selftest64.asm` (tests 84+):
       spawn→enter→return round-trip, exit-code propagation, argv echo,
       create/write/seek/read/close handle cycle in scratch namespace,
       volume-clean pre/post via `tools/check_volume_clean.py`. Smoke must
       stay non-destructive (`make` 81+2 pattern); destructive parts gated
-      behind `SELFTEST_DESTRUCTIVE` like tests 71/83.
+      behind `SELFTEST_DESTRUCTIVE` like tests 71/83. (84–86 in N2a, 87a
+      in N2b, 87b–88 in N2c.)
 
 Acceptance: a hand-written 10-instruction `.COM` loaded **from the volume
 by name** with args runs, writes a file via `3Dh/40h/3Eh`, exits with a
 code the shell can print; `make` + `make full` green on QEMU and Bochs.
 
+**Build order — N2a → N2d (the next steps; do in order, keep `make` /
+`make full` / `make lean` + the Bochs trio green after each slice):**
+
+- **N2a — enter/return, no I/O, no volume risk (do first).**
+  `src/kernel/proc64.asm`: new `proc_enter64` + `exec_caller_rsp` save
+  slot; `RET`-trampoline so bare-`RET` images (`TEST.COM`) exit 0;
+  `AH=4Ch` converges to the same restore path. `src/kernel/
+  syscall64.asm`: run flag through `handler_exec`; shell stays
+  spawn-only. `src/kernel/selftest64.asm`: tests 84 (round-trip),
+  85 (code `0x2A`), 86 (tail via DMA `memcmp`) — all PURE. Also update
+  the suite-count strings (`81 + 2` in `Makefile`/`README.md`/`AGENTS.md`
+  /`docs/`) to the new totals. Acceptance: smoke green on QEMU + Bochs
+  with zero new device writes; `check_volume_clean.py` CLEAN.
+- **N2b — handle table + `3Dh`-ro + `3Eh` (smallest useful file slice).**
+  Define `PSP64.fd_table` semantics (fds 0–2 console, 3–15 files) on top
+  of `fs_fcb_open64`/`fs_fcb_close64`; test 87a (`3Dh`-ro open + `3Eh`
+  close of `README.TXT`, zero writes, READ-ONLY). Acceptance: smoke
+  green, volume CLEAN.
+- **N2c — `3Ch` + file `3Fh`/`40h` + `42h`.** CREATE (truncate/create,
+  root→FAT order), extend `3Fh`/`40h` to fds ≥ 3 (short-read at EOF,
+  alloc-on-write at `pos == size`), LSEEK clamped to `0..size`; tests
+  87b (`SCRATCH.TXT` cycle, destructive-gated) + 88 (scrub/mirror
+  invariance). Acceptance: `make full` green on QEMU + Bochs,
+  `check_volume_clean.py` pre/post CLEAN.
+- **N2d — shell flip + exit codes (N2 acceptance).** `sh_do_exec` enters
+  and prints `Exit <code>`; `%ERRORLEVEL%` batch query; `ECHO.COM`
+  becomes the argv round-trip test (unblocks the N1 shadowing note).
+  Acceptance: the N2 acceptance paragraph above, demonstrated via
+  `printf '\rHELLO\rECHO hi\rEXIT\r' | make run-qemu-nasm`-style run.
+
 ### Phase N3 — `libc64` shim (enables C programs generally, NASM specifically)
+
+**Entry: N2d green. Milestone breakdown: `docs/23-nasm-port-milestones.md`
+(N3.1–N3.5). `hello.c` is the first C program running on DOS64.**
 
 - [ ] New `src/lib/libc64.asm` (System V ABI, 16 B alignment, callee-saved
       discipline per `src/kernel/stack64.asm`): `memcpy/memset/strcmp/
@@ -224,7 +267,10 @@ on DOS64 under QEMU; no Linux syscalls in the binary (`objdump` check).
 `docs/23-nasm-port-milestones.md` (N3.1–N3.5, N4B.1–N4B.3, N4A.1–N4A.4,
 N5.1–N5.4).**
 
-**Track B (first): native mini-assembler `ASM64.COM`.**
+**Track B (first): native mini-assembler `ASM64.COM`. Entry: N2d green
+(handle I/O + `ERRORLEVEL`); needs N2 only, so it can overlap N3. This is
+the first self-hosted assembler milestone — do not skip it even if
+full-port funding arrives early.**
 
 - [ ] Spec `docs/22-asm64-spec.md`: supported directives/instructions,
       error format (`file:line: error`), `-o`/`-l` flags, limits (source
@@ -236,7 +282,9 @@ N5.1–N5.4).**
       self-tests assemble the N1 samples and `memcmp` against
       host-`nasm` output (byte-identical for the subset).
 
-**Track A (after B is stable): full NASM port.**
+**Track A (after B is stable): full NASM port. Entry: N3.5 + N4B.3
+green; take the N4A.3 size decision (grow volume vs `dos64-tools.img`)
+first — never squeeze the 176-sector kernel slot.**
 
 - [ ] Submodule build variant: `nasm/configure` with `--disable-*`,
       keep `asm/parser/preproc`, `nasmlib` (minus `mmap/realpath/rlimit`),
@@ -293,16 +341,41 @@ bin` assembles the same corpus as host NASM 3.02 byte-identically.
 
 ## 8. Next actions (concrete, in order)
 
-1. Merge this plan; open tracking issues for N0–N2.
-2. N0: write `docs/20-nasm-gaps.md` (strace map + sizes) — unblocks all
-   estimates.
-3. N1: land cross-assemble docs + `HELLO.COM` sample (no kernel risk,
-   immediate user value).
-4. N2 prototype: `EXEC-from-path` + `call entry` + `3Eh`-first (smallest
-   useful slice), validated by one new self-test before the remaining
-   handle calls.
-5. Re-estimate N3/N4 from N2 actuals; decide Track B scope vs full-port
-   funding.
+Done:
+
+- [x] 1. Plan merged (this file); tracking lives here + `docs/20–23`.
+- [x] 2. N0: `docs/20-nasm-gaps.md` (strace map + sizes).
+- [x] 3. N1: `docs/21-nasm-cross.md` + `samples/` + `make nasm-samples`
+      (no kernel change; `build/dos64-nasm.img` demo green).
+
+Next — N2 implementation, one slice at a time (design + tests 84+ spec:
+`docs/22-n2-exec-design.md`; each slice keeps `make` / `make full` /
+`make lean` + the Bochs trio green):
+
+- [ ] 4. **N2a** enter/return (`proc_enter64`, `RET`-trampoline, `AH=4Ch`
+      convergence) + tests 84–86 (PURE) + suite-count string updates.
+- [ ] 5. **N2b** handle table + `3Dh`-ro + `3Eh` + test 87a (zero writes).
+- [ ] 6. **N2c** `3Ch` + file `3Fh`/`40h` + `42h` + tests 87b (destructive,
+      `SCRATCH.TXT`) and 88 (scrub/mirror invariance).
+- [ ] 7. **N2d** shell flip (`sh_do_exec` enters, `Exit <code>`,
+      `%ERRORLEVEL%`); N2 acceptance demo on `dos64-nasm.img`.
+
+Then, towards NASM running on DOS64 (breakdown: `docs/23-…`):
+
+- [ ] 8. **N3** `libc64` (N3.1–N3.5): heap over `48h/49h/4Ah`, `stdio64`
+      over N2 handles, `crt0`, cross-target `hello.c` demo. Entry: N2d.
+- [ ] 9. **N4B** mini-assembler `ASM64.COM` (N4B.1–N4B.3): spec, two-pass
+      `-f bin` subset in `src/tools/`, on-volume
+      `ASM64 HELLO.ASM -o HELLO.COM` demo, byte-identical round-trips.
+      Needs N2 only — may overlap N3.
+- [ ] 10. **N4A** full NASM port (N4A.1–N4A.4): submodule build variant,
+      `stdio64` backend swap, size decision first, byte-identical corpus.
+      Entry: N3.5 + N4B.3.
+- [ ] 11. **N5** integration + hardening (HELP/PATH/`ERRORLEVEL`, harness
+      round-trips, README/AGENTS/syscall-ref updates, G1–G6-style audit,
+      full regression trio).
+- [ ] 12. Re-estimate whatever remains from N2 actuals after each slice;
+      confirm Track B scope vs full-port funding at N2d.
 
 ---
 *Baseline refs: `Makefile` layout block (`IMG_MB=10, VOL_LBA=512,
