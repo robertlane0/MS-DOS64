@@ -29,12 +29,6 @@ global cmd_path_get64
 global cmd_rem64
 global cmd_pause64
 global cmd_echo64
-global cmd_date_get64
-global cmd_date_set64
-global cmd_date_parse64
-global cmd_time_get64
-global cmd_time_set64
-global cmd_time_parse64
 global cmd_dir_format64
 global cmd_type_buffer64
 global cmd_copy_buffer64
@@ -54,12 +48,6 @@ global cmd_test_exec
 global cmd_test_batch
 global cmd_test_dispatch
 global cmd_env
-global cmd_year
-global cmd_month
-global cmd_day
-global cmd_hour
-global cmd_min
-global cmd_sec
 extern vga_clear
 extern vga_print
 extern vga_putc
@@ -77,6 +65,18 @@ extern fs_dir_get_firstclus64
 extern fs_dir_get_size64
 extern fs_dir_get_attr64
 extern serial_try_putc64
+; time64 leaf module (owns software clock + RTC; cmd64 DATE/TIME delegates).
+; Layering: cmd64 -> time64 (never the reverse; see AGENTS.md source map).
+extern time_init64
+extern time_date_get64
+extern time_time_get64
+extern time_date_set64
+extern time_time_set64
+extern time_date_parse64
+extern time_time_parse64
+extern time_year
+extern time_hour
+extern time_min
 
 ; cmd_dbg_putc AL=char -> COM1, bounded best-effort (for fail-point
 ; isolation, like Phase8 markers). Serial is optional diagnostic I/O:
@@ -316,12 +316,7 @@ cmd_init64:
     lea rdx, [rel cmd_name_prompt]
     lea rcx, [rel cmd_val_prompt]
     call env_set64
-    mov word [rel cmd_year], 1983
-    mov byte [rel cmd_month], 4
-    mov byte [rel cmd_day], 1
-    mov byte [rel cmd_hour], 12
-    mov byte [rel cmd_min], 0
-    mov byte [rel cmd_sec], 0
+    call time_init64
     mov byte [rel cmd_batch_active], 0
     mov qword [rel cmd_batch_len], 0
     mov qword [rel cmd_batch_off], 0
@@ -689,10 +684,10 @@ cmd_table_lookup64:
     lea rax, [rel cmd_pause64]
     jmp .done_t
 .found_date:
-    lea rax, [rel cmd_date_get64]
+    lea rax, [rel time_date_get64]
     jmp .done_t
 .found_time:
-    lea rax, [rel cmd_time_get64]
+    lea rax, [rel time_time_get64]
     jmp .done_t
 .found_cls:
     lea rax, [rel cmd_cls64]
@@ -984,466 +979,12 @@ cmd_echo64:
     xor eax, eax
     ret
 
-; ---- DATE ----
-; cmd_date_get64 RDI=out RSI=size -> "YYYY-MM-DD" NUL, 0/1
-cmd_date_get64:
-    test rdi, rdi
-    jz .bad_dg
-    cmp rsi, 11
-    jb .bad_dg
-    push rbx
-    push r12
-    push r13
-    mov r12, rdi
-    movzx eax, word [rel cmd_year]
-    movzx r13d, byte [rel cmd_month]
-    movzx edx, byte [rel cmd_day]
-    push rdx
-    push r13
-    ; YYYY in EAX
-    mov rbx, 1000
-    xor edx, edx
-    div rbx
-    add al, '0'
-    mov [r12], al
-    mov eax, edx
-    mov ebx, 100
-    xor edx, edx
-    div ebx
-    add al, '0'
-    mov [r12+1], al
-    mov eax, edx
-    mov bl, 10
-    div bl
-    mov dl, ah
-    add al, '0'
-    mov [r12+2], al
-    add dl, '0'
-    mov [r12+3], dl
-    mov byte [r12+4], '-'
-    pop rbx
-    mov eax, ebx
-    mov bl, 10
-    div bl
-    mov dl, ah
-    add al, '0'
-    mov [r12+5], al
-    add dl, '0'
-    mov [r12+6], dl
-    mov byte [r12+7], '-'
-    pop rdx
-    mov eax, edx
-    mov bl, 10
-    div bl
-    mov dl, ah
-    add al, '0'
-    mov [r12+8], al
-    add dl, '0'
-    mov [r12+9], dl
-    mov byte [r12+10], 0
-    xor eax, eax
-    pop r13
-    pop r12
-    pop rbx
-    ret
-.bad_dg:
-    mov rax, 1
-    ret
+; ---- DATE / TIME (owned by src/kernel/time64.asm) ----
+; The software clock, validators, formatters, parsers and CMOS RTC helpers
+; moved to the time64 leaf module. cmd64 DATE/TIME paths call it via the
+; time_date_*/time_time_*/rtc_* externs above (cmd_* aliases remain in time64
+; for backward compatibility). See AGENTS.md source map for layering.
 
-; cmd_is_leap: AX=year -> RAX 1 leap else 0 (div by 4, no century rule needed for 1980-2099 except 2000 leap ok)
-cmd_is_leap:
-    push rbx
-    push rdx
-    mov ebx, eax
-    mov eax, ebx
-    xor edx, edx
-    mov ecx, 4
-    div ecx
-    test edx, edx
-    jnz .not_leap
-    mov rax, 1
-    jmp .done_leap
-.not_leap:
-    xor eax, eax
-.done_leap:
-    pop rdx
-    pop rbx
-    ret
-
-; cmd_date_days_in_month: RDI=year RSI=month -> RAX days (0 bad)
-cmd_date_days_in_month:
-    push rbx
-    push rcx
-    mov ebx, edi
-    mov ecx, esi
-    cmp cl, 1
-    je .d31
-    cmp cl, 3
-    je .d31
-    cmp cl, 5
-    je .d31
-    cmp cl, 7
-    je .d31
-    cmp cl, 8
-    je .d31
-    cmp cl, 10
-    je .d31
-    cmp cl, 12
-    je .d31
-    cmp cl, 4
-    je .d30
-    cmp cl, 6
-    je .d30
-    cmp cl, 9
-    je .d30
-    cmp cl, 11
-    je .d30
-    cmp cl, 2
-    jne .bad_m
-    mov eax, ebx
-    call cmd_is_leap
-    test rax, rax
-    jnz .d29
-    mov rax, 28
-    jmp .done_m
-.d29:
-    mov rax, 29
-    jmp .done_m
-.d31:
-    mov rax, 31
-    jmp .done_m
-.d30:
-    mov rax, 30
-    jmp .done_m
-.bad_m:
-    xor eax, eax
-.done_m:
-    pop rcx
-    pop rbx
-    ret
-
-; cmd_date_set64 RDI=year RSI=month RDX=day -> 0/1 (valid 1980-2099, month 1-12, day valid)
-cmd_date_set64:
-    cmp rdi, 1980
-    jb .bad_ds
-    cmp rdi, 2099
-    ja .bad_ds
-    cmp rsi, 1
-    jb .bad_ds
-    cmp rsi, 12
-    ja .bad_ds
-    cmp rdx, 1
-    jb .bad_ds
-    push rbx
-    push r12
-    push r13
-    push r14
-    mov r12, rdi
-    mov r13, rsi
-    mov r14, rdx
-    mov rdi, r12
-    mov rsi, r13
-    call cmd_date_days_in_month
-    test rax, rax
-    jz .bad_ds_pop
-    cmp r14, rax
-    ja .bad_ds_pop
-    mov rax, r12
-    mov [rel cmd_year], ax
-    mov rax, r13
-    mov [rel cmd_month], al
-    mov rax, r14
-    mov [rel cmd_day], al
-    xor eax, eax
-    pop r14
-    pop r13
-    pop r12
-    pop rbx
-    ret
-.bad_ds_pop:
-    pop r14
-    pop r13
-    pop r12
-    pop rbx
-    mov rax, 1
-    ret
-.bad_ds:
-    mov rax, 1
-    ret
-
-; cmd_date_parse64 RDI=str ("MM-DD-YY[YY]" or "MM/DD/YY[YY]", like INLINE/GETNUM) -> 0/1 + store
-; Accepts 1-2 digit M, sep - or /, 1-2 digit D, sep, 2 or 4 digit Y (2-digit => 1900+)
-cmd_date_parse64:
-    test rdi, rdi
-    jz .bad_dp
-    push rbx
-    push r12
-    push r13
-    push r14
-    push r15
-    mov r12, rdi
-    ; parse MM
-    call cmd_parse_num2
-    test rcx, rcx
-    jz .fail_dp
-    mov r13, rax
-    mov r12, rdx
-    mov al, [r12]
-    cmp al, '-'
-    je .sep_dp
-    cmp al, '/'
-    je .sep_dp
-    jmp .fail_dp
-.sep_dp:
-    inc r12
-    mov rdi, r12
-    call cmd_parse_num2
-    test rcx, rcx
-    jz .fail_dp
-    mov r14, rax
-    mov r12, rdx
-    mov al, [r12]
-    cmp al, '-'
-    je .sep2_dp
-    cmp al, '/'
-    je .sep2_dp
-    jmp .fail_dp
-.sep2_dp:
-    inc r12
-    mov rdi, r12
-    call cmd_parse_num4
-    test rcx, rcx
-    jz .fail_dp
-    mov r15, rax
-    cmp r15, 100
-    jae .have_year
-    add r15, 1900
-.have_year:
-    ; validate via set (year=r15, month=r13, day=r14)
-    mov rdi, r15
-    mov rsi, r13
-    mov rdx, r14
-    call cmd_date_set64
-    jmp .done_dp
-.fail_dp:
-    mov rax, 1
-    jmp .done_dp
-.bad_dp:
-    mov rax, 1
-    ret
-.done_dp:
-    pop r15
-    pop r14
-    pop r13
-    pop r12
-    pop rbx
-    ret
-
-; helper cmd_parse_num2 RDI=str -> RAX=val RDX=newptr RCX=digits(0 fail, else 1-2)
-cmd_parse_num2:
-    push rbx
-    xor eax, eax
-    xor ecx, ecx
-    mov bl, [rdi]
-    cmp bl, '0'
-    jb .fail_n2
-    cmp bl, '9'
-    ja .fail_n2
-    sub bl, '0'
-    movzx eax, bl
-    inc rcx
-    inc rdi
-    mov bl, [rdi]
-    cmp bl, '0'
-    jb .done_n2
-    cmp bl, '9'
-    ja .done_n2
-    imul eax, eax, 10
-    sub bl, '0'
-    movzx ebx, bl
-    add eax, ebx
-    inc rcx
-    inc rdi
-.done_n2:
-    mov rdx, rdi
-    pop rbx
-    ret
-.fail_n2:
-    xor ecx, ecx
-    xor eax, eax
-    mov rdx, rdi
-    pop rbx
-    ret
-
-; helper cmd_parse_num4 RDI=str -> RAX=val RDX=newptr RCX=digits(2-4 ok else 0)
-cmd_parse_num4:
-    push rbx
-    push r12
-    mov r12, rdi
-    xor ecx, ecx
-    xor eax, eax
-.loop_n4:
-    mov bl, [r12]
-    cmp bl, '0'
-    jb .end_n4
-    cmp bl, '9'
-    ja .end_n4
-    imul eax, eax, 10
-    sub bl, '0'
-    movzx ebx, bl
-    add eax, ebx
-    inc r12
-    inc rcx
-    cmp rcx, 4
-    jb .loop_n4
-.end_n4:
-    cmp rcx, 2
-    jb .fail_n4
-    mov rdx, r12
-    pop r12
-    pop rbx
-    ret
-.fail_n4:
-    xor ecx, ecx
-    xor eax, eax
-    mov rdx, rdi
-    pop r12
-    pop rbx
-    ret
-
-; ---- TIME ----
-; cmd_time_get64 RDI=out RSI=size -> "HH:MM:SS" NUL, 0/1 (needs 9)
-cmd_time_get64:
-    test rdi, rdi
-    jz .bad_tg
-    cmp rsi, 9
-    jb .bad_tg
-    push rbx
-    movzx eax, byte [rel cmd_hour]
-    mov bl, 10
-    div bl
-    add al, '0'
-    mov [rdi], al
-    add ah, '0'
-    mov [rdi+1], ah
-    mov byte [rdi+2], ':'
-    movzx eax, byte [rel cmd_min]
-    div bl
-    add al, '0'
-    mov [rdi+3], al
-    add ah, '0'
-    mov [rdi+4], ah
-    mov byte [rdi+5], ':'
-    movzx eax, byte [rel cmd_sec]
-    div bl
-    add al, '0'
-    mov [rdi+6], al
-    add ah, '0'
-    mov [rdi+7], ah
-    mov byte [rdi+8], 0
-    xor eax, eax
-    pop rbx
-    ret
-.bad_tg:
-    mov rax, 1
-    ret
-
-; cmd_time_set64 RDI=h RSI=m RDX=s -> 0/1 (h 0-23, m/s 0-59)
-cmd_time_set64:
-    cmp rdi, 23
-    ja .bad_ts
-    cmp rsi, 59
-    ja .bad_ts
-    cmp rdx, 59
-    ja .bad_ts
-    mov [rel cmd_hour], dil
-    mov [rel cmd_min], sil
-    mov [rel cmd_sec], dl
-    xor eax, eax
-    ret
-.bad_ts:
-    mov rax, 1
-    ret
-
-; cmd_time_parse64 RDI=str ("HH:MM[:SS]", like TIME INLINE) -> 0/1 + store
-cmd_time_parse64:
-    test rdi, rdi
-    jz .bad_tp
-    push rbx
-    push r12
-    push r13
-    push r14
-    mov r12, rdi
-    mov rdi, r12
-    call cmd_parse_num2
-    test rcx, rcx
-    jz .fail_tp
-    mov r13, rax
-    mov r12, rdx
-    mov al, [r12]
-    cmp al, ':'
-    jne .check_end_tp
-    inc r12
-    mov rdi, r12
-    call cmd_parse_num2
-    test rcx, rcx
-    jz .fail_tp
-    mov r14, rax
-    mov r12, rdx
-    mov al, [r12]
-    cmp al, ':'
-    jne .use_hm_tp
-    inc r12
-    mov rdi, r12
-    call cmd_parse_num2
-    test rcx, rcx
-    jz .fail_tp
-    mov rbx, rax
-    jmp .set_tp
-.use_hm_tp:
-    xor ebx, ebx
-    jmp .set_tp2
-.check_end_tp:
-    ; single hour only? Allow "HH" -> MM=SS=0 (like RET100 time may have only hour)
-    cmp al, 0
-    je .single_h
-    cmp al, 13
-    je .single_h
-    jmp .fail_tp
-.single_h:
-    xor r14d, r14d
-    xor ebx, ebx
-    jmp .set_tp2b
-.set_tp:
-    mov rdi, r13
-    mov rsi, r14
-    mov rdx, rbx
-    call cmd_time_set64
-    jmp .done_tp
-.set_tp2:
-    mov rdi, r13
-    mov rsi, r14
-    mov rdx, rbx
-    call cmd_time_set64
-    jmp .done_tp
-.set_tp2b:
-    mov rdi, r13
-    mov rsi, r14
-    mov rdx, rbx
-    call cmd_time_set64
-    jmp .done_tp
-.fail_tp:
-    mov rax, 1
-    jmp .done_tp
-.bad_tp:
-    mov rax, 1
-    ret
-.done_tp:
-    pop r14
-    pop r13
-    pop r12
-    pop rbx
-    ret
 
 ; ---- DIR / TYPE / COPY / DEL / REN ----
 ; cmd_dir_format64 RDI=dir_buf(32B entries) RSI=count RDX=out RCX=out_size R8=flags(/W) -> RAX=files or -1 bad
@@ -2724,14 +2265,14 @@ cmd_test_datetime:
     ; get defaults
     lea rdi, [rel cmd_test_out]
     mov rsi, 16
-    call cmd_date_get64
+    call time_date_get64
     test rax, rax
     jnz .fail47
     cmp byte [rel cmd_test_out+4], '-'
     jne .fail47
     lea rdi, [rel cmd_test_out]
     mov rsi, 16
-    call cmd_time_get64
+    call time_time_get64
     test rax, rax
     jnz .fail47
     cmp byte [rel cmd_test_out+2], ':'
@@ -2740,80 +2281,80 @@ cmd_test_datetime:
     mov rdi, 1984
     mov rsi, 2
     mov rdx, 29
-    call cmd_date_set64
+    call time_date_set64
     test rax, rax
     jnz .fail47
     ; invalid: 1983-02-29 (non-leap)
     mov rdi, 1983
     mov rsi, 2
     mov rdx, 29
-    call cmd_date_set64
+    call time_date_set64
     test rax, rax
     jz .fail47
     ; invalid month 13
     mov rdi, 1983
     mov rsi, 13
     mov rdx, 1
-    call cmd_date_set64
+    call time_date_set64
     test rax, rax
     jz .fail47
     ; invalid day 0
     mov rdi, 1983
     mov rsi, 1
     mov rdx, 0
-    call cmd_date_set64
+    call time_date_set64
     test rax, rax
     jz .fail47
     ; parse valid "04-01-83"
     lea rdi, [rel t47_date1]
-    call cmd_date_parse64
+    call time_date_parse64
     test rax, rax
     jnz .fail47
-    cmp word [rel cmd_year], 1983
+    cmp word [rel time_year], 1983
     jne .fail47
     ; parse "12/25/1984"
     lea rdi, [rel t47_date2]
-    call cmd_date_parse64
+    call time_date_parse64
     test rax, rax
     jnz .fail47
-    cmp word [rel cmd_year], 1984
+    cmp word [rel time_year], 1984
     jne .fail47
     ; parse bad
     lea rdi, [rel t47_date_bad]
-    call cmd_date_parse64
+    call time_date_parse64
     test rax, rax
     jz .fail47
     ; time set valid
     mov rdi, 23
     mov rsi, 59
     mov rdx, 58
-    call cmd_time_set64
+    call time_time_set64
     test rax, rax
     jnz .fail47
     ; invalid hour 24
     mov rdi, 24
     mov rsi, 0
     mov rdx, 0
-    call cmd_time_set64
+    call time_time_set64
     test rax, rax
     jz .fail47
     ; parse "12:30:45"
     lea rdi, [rel t47_time1]
-    call cmd_time_parse64
+    call time_time_parse64
     test rax, rax
     jnz .fail47
-    cmp byte [rel cmd_hour], 12
+    cmp byte [rel time_hour], 12
     jne .fail47
     ; parse "09:05"
     lea rdi, [rel t47_time2]
-    call cmd_time_parse64
+    call time_time_parse64
     test rax, rax
     jnz .fail47
-    cmp byte [rel cmd_min], 5
+    cmp byte [rel time_min], 5
     jne .fail47
     ; parse bad
     lea rdi, [rel t47_time_bad]
-    call cmd_time_parse64
+    call time_time_parse64
     test rax, rax
     jz .fail47
     xor eax, eax
@@ -3427,12 +2968,6 @@ t50_empty db 13,0
 section .bss
 alignb 16
 cmd_env: resb CMD_ENV_SIZE
-cmd_year: resw 1
-cmd_month: resb 1
-cmd_day: resb 1
-cmd_hour: resb 1
-cmd_min: resb 1
-cmd_sec: resb 1
 cmd_batch_active: resb 1
 cmd_dir_flags: resb 1
 alignb 8

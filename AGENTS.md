@@ -827,6 +827,7 @@ src/kernel/    main.asm (entry @0x100000, boot glue) + selftest64.asm (83-test h
                fs64.asm (FAT12 mount/read/flush/alloc + FCB record-I/O core)
                mem64.asm (MCB64 manager) + proc64.asm (PSP64/env/loader/spawn)
                syscall64.asm (INT 21h dispatcher, 77 entries)
+               time64.asm (timekeeping leaf: software clock + CMOS RTC + FAT pack)
                idt64.asm (IDT, PIC master 0x28/slave 0x30) + stack64.asm (ABI/canary)
 src/drivers/   vga.asm (0xB8000 text) + ata.asm (0x1F0 PIO LBA28) + kbd.asm (PS/2 0x60/0x64)
 src/lib/       string64.asm + bcd64.asm (AAM/AAD->DIV, CBW equiv.) + addr64.asm (seg:off->linear)
@@ -835,6 +836,21 @@ tools/         mkfat12.py (stamps FAT12 volume) + check_volume_clean.py (pre/pos
 MSDOS.ASM / IO.ASM / COMMAND.ASM   original v1.25 reference (STDDOS.ASM legacy wrapper; build uses src/ via Makefile)
 linker.ld      flat link at 0x100000 (.text.start first)   bochsrc.txt   Bochs config
 ```
+#### Layering: timekeeping (`time64.asm`)
+- `time64.asm` is a leaf module owning the software clock
+  (`time_year/month/day/hour/min/sec`, defaults 1983-04-01 12:00:00 via
+  `time_init64`), the validators/formatters/parsers
+  (`time_date_set64/time_time_set64`, `time_date_get64/time_time_get64`,
+  `time_date_parse64/time_time_parse64`), and all CMOS RTC access
+  (`rtc_get_date64/rtc_get_time64/rtc_set_date64/rtc_set_time64`,
+  `rtc_pack_fat_datetime`; ports `0x70/0x71`). It depends only on the
+  `bcd64` lib (`rtc_bcd_to_bin_v2`/`rtc_bin_to_bcd`).
+- Dependents: `syscall64.asm` (`INT 21h AH=2Ah–2Dh` + FAT timestamps) and
+  `cmd64.asm`/`shell64.asm` (DATE/TIME builtins + REPL RTC sync) call the
+  `time_*`/`rtc_*` APIs. The kernel ABI layer (`INT 21h`) must never extern
+  command-interpreter state; `syscall64.asm` carries no `cmd64` clock
+  externs. The `cmd_year`/`cmd_date_set64`/… symbols in `time64.asm` are
+  backward-compat aliases to the canonical `time_*` storage/entry points.
 
 ### Verify commands (removed from README)
 ```bash

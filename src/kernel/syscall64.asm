@@ -27,16 +27,20 @@ extern kbd_scancode_to_ascii
 extern kbd_init
 extern idt_set_vector64
 extern idt_get_vector64
-extern rtc_bcd_to_bin_v2
-extern rtc_bin_to_bcd
-extern cmd_date_set64
-extern cmd_time_set64
-extern cmd_year
-extern cmd_month
-extern cmd_day
-extern cmd_hour
-extern cmd_min
-extern cmd_sec
+; time64 leaf module (owns software clock + CMOS RTC; syscall date/time + FAT
+; timestamps delegate). Layering: syscall64 -> time64, never the command
+; interpreter clock (see AGENTS.md source map). No cmd64 clock externs here.
+extern rtc_get_date64
+extern rtc_get_time64
+extern rtc_set_date64
+extern rtc_set_time64
+extern rtc_pack_fat_datetime
+extern time_year
+extern time_month
+extern time_day
+extern time_hour
+extern time_min
+extern time_sec
 extern fs_mount_volume64
 extern fs_vol_dpb
 extern fs_vol_fat
@@ -125,10 +129,6 @@ global handler_blkrd
 global handler_blkwrt
 global handler_makefcb
 global handler_setdma
-global rtc_get_date64
-global rtc_get_time64
-global rtc_set_date64
-global rtc_set_time64
 
 %define MAXCOM 0x4C    ; 76 — extend for Phase6 alloc/free/resize (DOS 2.0 48h/49h/4Ah)
 %define MAXCALL 36
@@ -1177,343 +1177,12 @@ handler_list:               ; AH=05 LIST printer out DL=char (was stub)
     ret
 
 ; ------------------------------------------------------------
-; CMOS RTC (ports 0x70/0x71) — backs INT 21h AH=2Ah-2Dh.
+; CMOS RTC + software clock: owned by src/kernel/time64.asm.
+; The INT 21h date/time handlers below call the time64 rtc_* APIs and read
+; the time64 time_year/... fallback state (never cmd64/shell state).
+; See AGENTS.md source map for layering.
 ; ------------------------------------------------------------
-cmos_read:                  ; AL = reg -> AL = value
-    push rdx
-    mov dx, 0x70
-    out dx, al
-    mov dx, 0x71
-    in al, dx
-    pop rdx
-    ret
 
-cmos_write:                 ; AL = reg, AH = value
-    push rbx
-    push rdx
-    mov bl, ah
-    mov dx, 0x70
-    out dx, al
-    mov al, bl
-    mov dx, 0x71
-    out dx, al
-    pop rdx
-    pop rbx
-    ret
-
-rtc_wait_uip_clear:         ; CF 0 RTC ready, CF 1 timeout (~1s of polls)
-    push rax
-    push rcx
-    push rdx
-    mov rcx, 1000000
-.loop_uip:
-    mov al, 0x0A
-    call cmos_read
-    test al, 0x80
-    jz .ready_uip
-    dec rcx
-    jnz .loop_uip
-    stc
-    jmp .done_uip
-.ready_uip:
-    clc
-.done_uip:
-    pop rdx
-    pop rcx
-    pop rax
-    ret
-
-; rtc_get_date64 — Out: ECX=year, EDX=month, R8D=day, R9D=wday(DOS 0=Sun)
-;   RAX 0 ok / 1 fail. Clobbers R10B internally (saved).
-rtc_get_date64:
-    push rbx
-    push r10
-    call rtc_wait_uip_clear
-    jc .fail_dt
-    mov al, 0x0B
-    call cmos_read
-    mov r10b, al           ; status B: bit2=binary, bit1=24h
-    mov al, 0x09
-    call cmos_read
-    test r10b, 0x04
-    jnz .yr_bin
-    push rbx
-    call rtc_bcd_to_bin_v2
-    pop rbx
-.yr_bin:
-    movzx ecx, al
-    cmp ecx, 80
-    jb .yr_20xx
-    add ecx, 1900
-    jmp .yr_done
-.yr_20xx:
-    add ecx, 2000
-.yr_done:
-    mov al, 0x08
-    call cmos_read
-    test r10b, 0x04
-    jnz .mo_bin
-    push rbx
-    call rtc_bcd_to_bin_v2
-    pop rbx
-.mo_bin:
-    movzx edx, al
-    cmp edx, 1
-    jb .fail_dt
-    cmp edx, 12
-    ja .fail_dt
-    mov al, 0x07
-    call cmos_read
-    test r10b, 0x04
-    jnz .dy_bin
-    push rbx
-    call rtc_bcd_to_bin_v2
-    pop rbx
-.dy_bin:
-    movzx r8d, al
-    cmp r8d, 1
-    jb .fail_dt
-    cmp r8d, 31
-    ja .fail_dt
-    mov al, 0x06
-    call cmos_read
-    test r10b, 0x04
-    jnz .wd_bin
-    push rbx
-    call rtc_bcd_to_bin_v2
-    pop rbx
-.wd_bin:
-    ; CMOS 1..7 (Sun..Sat) -> DOS 0..6
-    cmp al, 1
-    jb .wd_zero
-    cmp al, 7
-    ja .wd_zero
-    dec al
-    movzx r9d, al
-    jmp .ok_dt
-.wd_zero:
-    xor r9d, r9d
-.ok_dt:
-    xor eax, eax
-    pop r10
-    pop rbx
-    ret
-.fail_dt:
-    mov rax, 1
-    pop r10
-    pop rbx
-    ret
-
-; rtc_get_time64 — Out: ECX=hour, EDX=min, R8D=sec. RAX 0 ok / 1 fail.
-rtc_get_time64:
-    push rbx
-    push r10
-    push r11
-    call rtc_wait_uip_clear
-    jc .fail_tm
-    mov al, 0x0B
-    call cmos_read
-    mov r10b, al
-    ; hour (0x04) with 12/24h handling
-    mov al, 0x04
-    call cmos_read
-    mov r11b, al
-    test r10b, 0x02        ; 24h mode?
-    jnz .hr24
-    ; 12h: bit7 = PM
-    mov al, r11b
-    and al, 0x80
-    mov ah, al             ; save PM flag in AH
-    mov al, r11b
-    and al, 0x7F
-    test r10b, 0x04
-    jnz .hr12bin
-    push rbx
-    call rtc_bcd_to_bin_v2
-    pop rbx
-.hr12bin:
-    movzx ecx, al
-    test ah, ah
-    jz .hr12am
-    cmp ecx, 12
-    jae .hr_done           ; 12 PM stays 12
-    add ecx, 12
-    jmp .hr_done
-.hr12am:
-    cmp ecx, 12
-    jne .hr_done
-    xor ecx, ecx           ; 12 AM -> 0
-    jmp .hr_done
-.hr24:
-    mov al, r11b
-    test r10b, 0x04
-    jnz .hr24bin
-    push rbx
-    call rtc_bcd_to_bin_v2
-    pop rbx
-.hr24bin:
-    movzx ecx, al
-.hr_done:
-    cmp ecx, 24
-    jae .fail_tm
-    mov al, 0x02
-    call cmos_read
-    test r10b, 0x04
-    jnz .mn_bin
-    push rbx
-    call rtc_bcd_to_bin_v2
-    pop rbx
-.mn_bin:
-    movzx edx, al
-    cmp edx, 60
-    jae .fail_tm
-    mov al, 0x00
-    call cmos_read
-    test r10b, 0x04
-    jnz .sc_bin
-    push rbx
-    call rtc_bcd_to_bin_v2
-    pop rbx
-.sc_bin:
-    movzx r8d, al
-    cmp r8d, 60
-    jae .fail_tm
-    xor eax, eax
-    pop r11
-    pop r10
-    pop rbx
-    ret
-.fail_tm:
-    mov rax, 1
-    pop r11
-    pop r10
-    pop rbx
-    ret
-
-; rtc_set_date64 — RDI=year, RSI=month, RDX=day. RAX 0 ok / 1 fail.
-;   Validates via cmd_date_set64 (also syncs the COMMAND64 software clock).
-rtc_set_date64:
-    push rbx
-    push r12
-    push r13
-    push r14
-    mov r12, rdi           ; year (callee-saved; DIV below clobbers RDX)
-    mov r13, rsi           ; month
-    mov r14, rdx           ; day
-    call cmd_date_set64
-    test rax, rax
-    jnz .fail_sd
-    mov al, 0x0B
-    call cmos_read
-    mov bl, al             ; status B: bit2=binary (RBX is pushed, safe)
-    mov rax, r12
-    mov rcx, 100
-    xor rdx, rdx
-    div rcx                ; RDX = year % 100
-    mov al, dl
-    test bl, 0x04
-    jnz .yr_bin_sd
-    call rtc_bin_to_bcd    ; preserves RBX, clobbers ECX/EDX (both dead here)
-.yr_bin_sd:
-    mov ah, al
-    mov al, 0x09
-    call cmos_write
-    mov al, r13b
-    test bl, 0x04
-    jnz .mo_bin_sd
-    call rtc_bin_to_bcd
-.mo_bin_sd:
-    mov ah, al
-    mov al, 0x08
-    call cmos_write
-    mov al, r14b
-    test bl, 0x04
-    jnz .dy_bin_sd
-    call rtc_bin_to_bcd
-.dy_bin_sd:
-    mov ah, al
-    mov al, 0x07
-    call cmos_write
-    xor eax, eax
-    jmp .done_sd
-.fail_sd:
-    mov rax, 1
-.done_sd:
-    pop r14
-    pop r13
-    pop r12
-    pop rbx
-    ret
-
-; rtc_set_time64 — RDI=hour, RSI=min, RDX=sec. RAX 0 ok / 1 fail.
-;   Validates via cmd_time_set64 (also syncs the COMMAND64 software clock).
-rtc_set_time64:
-    push rbx
-    push r12
-    push r13
-    push r14
-    mov r12, rdi
-    mov r13, rsi
-    mov r14, rdx
-    call cmd_time_set64
-    test rax, rax
-    jnz .fail_st
-    mov al, 0x0B
-    call cmos_read
-    mov bl, al
-    ; hour: convert to 12h + PM bit when the RTC runs in 12h mode.
-    ; BH carries the PM flag (RBX is pushed; rtc_bin_to_bcd preserves it
-    ; but clobbers ECX, so CL cannot be used here).
-    mov bh, 0
-    mov rax, r12
-    test bl, 0x02
-    jnz .hr_pack_st        ; 24h mode: value + BH=0 as-is
-    cmp rax, 12
-    jb .hr_am_st
-    mov bh, 0x80           ; PM
-    je .hr_pack_st         ; 12 PM stays 12
-    sub rax, 12
-    jmp .hr_pack_st
-.hr_am_st:
-    test rax, rax
-    jnz .hr_pack_st
-    mov rax, 12            ; 0 AM -> 12 AM
-    jmp .hr_pack_st
-.hr_pack_st:
-    test bl, 0x04
-    jnz .hr_bin_st
-    call rtc_bin_to_bcd
-.hr_bin_st:
-    or al, bh
-    mov ah, al
-    mov al, 0x04
-    call cmos_write
-    mov al, r13b
-    test bl, 0x04
-    jnz .mn_bin_st
-    call rtc_bin_to_bcd
-.mn_bin_st:
-    mov ah, al
-    mov al, 0x02
-    call cmos_write
-    mov al, r14b
-    test bl, 0x04
-    jnz .sc_bin_st
-    call rtc_bin_to_bcd
-.sc_bin_st:
-    mov ah, al
-    mov al, 0x00
-    call cmos_write
-    xor eax, eax
-    jmp .done_st
-.fail_st:
-    mov rax, 1
-.done_st:
-    pop r14
-    pop r13
-    pop r12
-    pop rbx
-    ret
 
 ; ------------------------------------------------------------
 ; INT 21h date/time/disk handlers (were stubs; now RTC/volume backed).
@@ -1530,11 +1199,11 @@ handler_getdate:            ; AH=2Ah -> CX=year DH=mon DL=day AL=wday
     jc .gd_fallback
     jmp .gd_fill
 .gd_fallback:
-    ; RTC unreadable: fall back to the COMMAND64 software clock so the
+    ; RTC unreadable: fall back to the time64 software clock so the
     ; call still returns a usable date (documented layering).
-    movzx ecx, word [rel cmd_year]
-    movzx edx, byte [rel cmd_month]
-    movzx r8d, byte [rel cmd_day]
+    movzx ecx, word [rel time_year]
+    movzx edx, byte [rel time_month]
+    movzx r8d, byte [rel time_day]
     xor r9d, r9d
 .gd_fill:
     mov esi, edx
@@ -1612,9 +1281,9 @@ handler_gettime:            ; AH=2Ch -> CH=hr CL=min DH=sec DL=0
     jc .gt_fallback
     jmp .gt_fill
 .gt_fallback:
-    movzx ecx, byte [rel cmd_hour]
-    movzx edx, byte [rel cmd_min]
-    movzx r8d, byte [rel cmd_sec]
+    movzx ecx, byte [rel time_hour]
+    movzx edx, byte [rel time_min]
+    movzx r8d, byte [rel time_sec]
 .gt_fill:
     mov esi, ecx
     shl esi, 8
@@ -1937,55 +1606,9 @@ fcb_frame_al:
     pop rbx
     ret
 
-; rtc_pack_fat_datetime — Out: EAX=FAT time word, EDX=FAT date word.
-;   RTC first, COMMAND64 software clock fallback (never fails in practice).
-rtc_pack_fat_datetime:
-    push rbx
-    push rcx
-    push r8
-    push r9
-    push r10
-    call rtc_get_date64              ; ECX=y EDX=m R8D=d
-    jc .sw_date_pd
-    jmp .have_date_pd
-.sw_date_pd:
-    movzx ecx, word [rel cmd_year]
-    movzx edx, byte [rel cmd_month]
-    movzx r8d, byte [rel cmd_day]
-.have_date_pd:
-    mov r10d, edx                    ; month
-    mov ebx, r8d                     ; day
-    mov eax, ecx
-    sub eax, 1980
-    shl eax, 9
-    shl r10d, 5
-    or eax, r10d
-    or eax, ebx                      ; EAX = date
-    mov r10d, eax                    ; save date
-    call rtc_get_time64              ; ECX=h EDX=min R8D=s
-    jc .sw_time_pd
-    jmp .have_time_pd
-.sw_time_pd:
-    movzx ecx, byte [rel cmd_hour]
-    movzx edx, byte [rel cmd_min]
-    movzx r8d, byte [rel cmd_sec]
-.have_time_pd:
-    mov eax, ecx
-    shl eax, 11
-    mov ebx, edx
-    shl ebx, 5
-    or eax, ebx
-    mov ebx, r8d
-    shr ebx, 1
-    and ebx, 31
-    or eax, ebx                      ; EAX = time
-    mov edx, r10d                    ; EDX = date
-    pop r10
-    pop r9
-    pop r8
-    pop rcx
-    pop rbx
-    ret
+; rtc_pack_fat_datetime lives in src/kernel/time64.asm (RTC first, time64
+; software-clock fallback). Called by the FCB create/close paths below.
+
 
 handler_open:               ; AH=0Fh OPEN FCB (was stub)
     push rbx

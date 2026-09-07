@@ -39,10 +39,25 @@ extern cmd_path_get64
 extern cmd_rem64
 extern cmd_pause64
 extern cmd_echo64
-extern cmd_date_get64
-extern cmd_time_get64
-extern cmd_date_parse64
-extern cmd_time_parse64
+; time64 leaf module (owns software clock + CMOS RTC; REPL DATE/TIME sync).
+; Layering: shell64 -> time64 for clock/RTC, -> cmd64 for parser/builtins
+; (see AGENTS.md source map). No clock state is owned here.
+extern time_date_get64
+extern time_time_get64
+extern time_date_parse64
+extern time_time_parse64
+extern time_date_set64
+extern time_time_set64
+extern time_year
+extern time_month
+extern time_day
+extern time_hour
+extern time_min
+extern time_sec
+extern rtc_get_date64
+extern rtc_get_time64
+extern rtc_set_date64
+extern rtc_set_time64
 extern cmd_del_entry64
 extern cmd_ren_entry64
 extern fs_mount_volume64
@@ -62,20 +77,8 @@ extern handler_rename
 extern handler_setdma
 extern handler_blkwrt
 extern handler_close
-extern cmd_date_set64
-extern cmd_time_set64
 extern CURDRV64
 extern pic_unmask_irq64
-extern rtc_get_date64
-extern rtc_get_time64
-extern rtc_set_date64
-extern rtc_set_time64
-extern cmd_year
-extern cmd_month
-extern cmd_day
-extern cmd_hour
-extern cmd_min
-extern cmd_sec
 
 section .bss
 alignb 16
@@ -310,7 +313,7 @@ sh_prompt_show:
     push rsi
     lea rdi, [rel sh_dtbuf]
     mov rsi, 16
-    call cmd_date_get64
+    call time_date_get64
     pop rsi
     test rax, rax
     jnz .next_pr
@@ -323,7 +326,7 @@ sh_prompt_show:
     push rsi
     lea rdi, [rel sh_dtbuf]
     mov rsi, 16
-    call cmd_time_get64
+    call time_time_get64
     pop rsi
     test rax, rax
     jnz .next_pr
@@ -859,10 +862,10 @@ sh_exec_line:
     lea rbx, [rel cmd_echo64]
     cmp rax, rbx
     je .echo_el
-    lea rbx, [rel cmd_date_get64]
+    lea rbx, [rel time_date_get64]
     cmp rax, rbx
     je .date_el
-    lea rbx, [rel cmd_time_get64]
+    lea rbx, [rel time_time_get64]
     cmp rax, rbx
     je .time_el
     jmp .ok_el
@@ -943,19 +946,19 @@ sh_exec_line:
     cmp byte [rel sh_tail], 0
     je .date_show_el
     lea rdi, [rel sh_tail]
-    call cmd_date_parse64
+    call time_date_parse64
     test rax, rax
     jnz .bad_el
     ; Sync the RTC too (REPL DATE sets both clocks, like INT 21h AH=2Bh).
-    movzx edi, word [rel cmd_year]
-    movzx esi, byte [rel cmd_month]
-    movzx edx, byte [rel cmd_day]
+    movzx edi, word [rel time_year]
+    movzx esi, byte [rel time_month]
+    movzx edx, byte [rel time_day]
     call rtc_set_date64
     jmp .ok_el
 .date_show_el:
     lea rdi, [rel sh_out]
     mov rsi, 16
-    call cmd_date_get64
+    call time_date_get64
     lea rsi, [rel sh_out]
     call sh_print
     mov rsi, sh_crlf
@@ -965,18 +968,18 @@ sh_exec_line:
     cmp byte [rel sh_tail], 0
     je .time_show_el
     lea rdi, [rel sh_tail]
-    call cmd_time_parse64
+    call time_time_parse64
     test rax, rax
     jnz .bad_el
-    movzx edi, byte [rel cmd_hour]
-    movzx esi, byte [rel cmd_min]
-    movzx edx, byte [rel cmd_sec]
+    movzx edi, byte [rel time_hour]
+    movzx esi, byte [rel time_min]
+    movzx edx, byte [rel time_sec]
     call rtc_set_time64
     jmp .ok_el
 .time_show_el:
     lea rdi, [rel sh_out]
     mov rsi, 16
-    call cmd_time_get64
+    call time_time_get64
     lea rsi, [rel sh_out]
     call sh_print
     mov rsi, sh_crlf
@@ -1022,19 +1025,19 @@ sh_exec_line:
 shell_repl64:
     call cmd_init64
     ; Sync the shell clock from the RTC so DATE/TIME show real values
-    ; (cmd_init64 defaults to 1983-04-01 12:00:00).
+    ; (time_init64 via cmd_init64 defaults to 1983-04-01 12:00:00).
     call rtc_get_date64              ; ECX=y EDX=m R8D=d
     jc .no_rtc_sync_sh
     mov edi, ecx
     mov esi, edx
     mov edx, r8d
-    call cmd_date_set64
+    call time_date_set64
     call rtc_get_time64              ; ECX=h EDX=min R8D=s
     jc .no_rtc_sync_sh
     mov edi, ecx
     mov esi, edx
     mov edx, r8d
-    call cmd_time_set64
+    call time_time_set64
 .no_rtc_sync_sh:
     call fs_mount_volume64
     lea rsi, [rel sh_banner]
