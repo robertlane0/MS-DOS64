@@ -85,8 +85,8 @@ sh_tail:    resb 128
 sh_sw:      resd 1
 sh_out:     resb 4096
 sh_file:    resb 4096
-sh_fcb:     resb 80
-sh_fcb2:    resb 80
+sh_fcb:     resb FCBSIZ64
+sh_fcb2:    resb FCBSIZ64
 sh_prompt:  resb 64
 sh_dtbuf:   resb 16
 
@@ -444,7 +444,7 @@ sh_do_type:
     call fs_make_fcb64
     cmp al, 0xFF
     je .fail_ty
-    lea rdi, [rel sh_fcb+1]      ; 11-byte name
+    lea rdi, [rel sh_fcb + FCB64.name]      ; 11-byte name
     lea rsi, [rel sh_file]
     mov rdx, 4096
     call fs_vol_read_file64
@@ -529,9 +529,9 @@ sh_do_ren:
     call fs_make_fcb64
     cmp al, 0xFF
     je .fail_rn3
-    ; new 11-byte name -> sh_fcb+16
-    lea rsi, [rel sh_fcb2+1]
-    lea rdi, [rel sh_fcb+16]
+    ; new 11-byte name -> sh_fcb + FCB64.recsiz (RENAME 2nd name overlaps recsiz)
+    lea rsi, [rel sh_fcb2 + FCB64.name]
+    lea rdi, [rel sh_fcb + FCB64.recsiz]
     mov ecx, 11
     cld
     rep movsb
@@ -577,7 +577,7 @@ sh_do_copy:
     cmp al, 0xFF
     je .fail_cp
     ; read src file -> sh_file
-    lea rdi, [rel sh_fcb+1]
+    lea rdi, [rel sh_fcb + FCB64.name]
     lea rsi, [rel sh_file]
     mov rdx, 4096
     call fs_vol_read_file64
@@ -595,12 +595,12 @@ sh_do_copy:
     add rax, 127
     shr rax, 7                   ; count
     mov rcx, rax
-    mov qword [rel sh_fcb2+65], 0
+    mov qword [rel sh_fcb2 + FCB64.rr], 0
     lea rdx, [rel sh_fcb2]
     call handler_blkwrt
     jc .fail_cp
     ; Truncate to the true byte length (block writes pad to 128B records).
-    mov [rel sh_fcb2+20], r8      ; FCB64.filsiz (close syncs it to dir)
+    mov [rel sh_fcb2 + FCB64.filsiz], r8      ; FCB64.filsiz (close syncs it to dir)
     lea rdx, [rel sh_fcb2]
     call handler_close
     jc .fail_cp
@@ -662,7 +662,7 @@ sh_do_exec:
     jmp .copy_ex
 .ext_ex:
     lea rsi, [rel sh_ext_com]
-    lea rdi, [rel sh_fcb+8]
+    lea rdi, [rel sh_fcb+8]  ; raw 11-byte name ext @8 (NOT FCB64.ext=9: no drive byte here)
     mov ecx, 3
     rep movsb
     ; stage file via mem_alloc

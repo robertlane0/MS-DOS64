@@ -2027,7 +2027,7 @@ section .bss
 test_buf_src: resb 128
 test_buf_dst: resb 128
 vol_read_buf: resb 1024
-aux_fcb: resb 80
+aux_fcb: resb FCBSIZ64
 
 section .text
 test_string_ops:
@@ -3718,7 +3718,7 @@ test_fcb_file:
     jc .fail70
     test al, al
     jnz .fail70
-    cmp dword [rel aux_fcb+16], 128   ; recsiz defaulted (FCB64.recsiz @16)
+    cmp dword [rel aux_fcb + FCB64.recsiz], 128   ; recsiz defaulted
     jne .fail70
     ; SETDMA to vol_read_buf
     lea rdx, [rel vol_read_buf]
@@ -3727,8 +3727,8 @@ test_fcb_file:
     lea rdx, [rel aux_fcb]
     call handler_filesize
     jc .fail70
-    mov rcx, [rel aux_fcb+20]         ; filsiz (FCB64.filsiz @20)
-    mov rax, [rel aux_fcb+65]         ; RR (FCB64.rr @65)
+    mov rcx, [rel aux_fcb + FCB64.filsiz]         ; filsiz
+    mov rax, [rel aux_fcb + FCB64.rr]             ; RR
     test rax, rax
     jz .fail70
     mov r9, rax
@@ -3739,7 +3739,7 @@ test_fcb_file:
     cmp r9, rcx
     jae .fail70
     ; RNDRD record 0 -> "Hello"
-    mov qword [rel aux_fcb+65], 0
+    mov qword [rel aux_fcb + FCB64.rr], 0
     lea rdx, [rel aux_fcb]
     call handler_rndrd
     jc .fail70
@@ -3748,7 +3748,7 @@ test_fcb_file:
     cmp dword [rel vol_read_buf], 'Hell'
     jne .fail70
     ; BLKRD 2 records at RR=0 (HELLO is 2 records of 128)
-    mov qword [rel aux_fcb+65], 0
+    mov qword [rel aux_fcb + FCB64.rr], 0
     mov rcx, 2
     lea rdx, [rel aux_fcb]
     call handler_blkrd
@@ -3902,7 +3902,7 @@ test_fcb_write:
     jc .fail71
     test al, al
     jnz .fail71
-    cmp dword [rel aux_fcb+20], 0      ; filsiz 0
+    cmp dword [rel aux_fcb + FCB64.filsiz], 0      ; filsiz 0
     jne .fail71
     ; Fill DMA half 2 (vol_read_buf+512) with 512B pattern 'A'+i%26
     ; (4 records of 128). NOTE: SEQ ops transfer exactly one record at
@@ -3924,28 +3924,28 @@ test_fcb_write:
     ; BLKWRT 3 records at RR=0 from DMA half 2.
     lea rdx, [rel vol_read_buf+512]
     call handler_setdma
-    mov qword [rel aux_fcb+65], 0      ; RR=0
+    mov qword [rel aux_fcb + FCB64.rr], 0      ; RR=0
     mov rcx, 3
     lea rdx, [rel aux_fcb]
     call handler_blkwrt
     jc .fail71
     cmp rcx, 3
     jne .fail71
-    cmp qword [rel aux_fcb+65], 3     ; RR advanced by block count
+    cmp qword [rel aux_fcb + FCB64.rr], 3     ; RR advanced by block count
     jne .fail71
-    cmp dword [rel aux_fcb+20], 384   ; filsiz grew
+    cmp dword [rel aux_fcb + FCB64.filsiz], 384   ; filsiz grew
     jne .fail71
     ; SEQWRT 1 record at P=3 (extent=0,nr=3) from DMA buf+896.
     lea rdx, [rel vol_read_buf+896]
     call handler_setdma
-    mov word [rel aux_fcb+12], 0      ; extent (FCB64.extent @12)
-    mov byte [rel aux_fcb+64], 3      ; nr (FCB64.nr @64)
+    mov word [rel aux_fcb + FCB64.extent], 0      ; extent
+    mov byte [rel aux_fcb + FCB64.nr], 3          ; nr
     lea rdx, [rel aux_fcb]
     call handler_seqwrt
     jc .fail71
     test al, al
     jnz .fail71
-    cmp dword [rel aux_fcb+20], 512   ; filsiz grew to 4 records
+    cmp dword [rel aux_fcb + FCB64.filsiz], 512   ; filsiz grew to 4 records
     jne .fail71
     ; Read back via BLKRD into half 1 (zeroed first).
     lea rdi, [rel vol_read_buf]
@@ -3958,14 +3958,14 @@ test_fcb_write:
     jnz .zero71
     lea rdx, [rel vol_read_buf]
     call handler_setdma
-    mov qword [rel aux_fcb+65], 0
+    mov qword [rel aux_fcb + FCB64.rr], 0
     mov rcx, 4
     lea rdx, [rel aux_fcb]
     call handler_blkrd
     jc .fail71
     cmp rcx, 4
     jne .fail71
-    cmp qword [rel aux_fcb+65], 4     ; RR advanced by block count
+    cmp qword [rel aux_fcb + FCB64.rr], 4     ; RR advanced by block count
     jne .fail71
     ; Verify 512 bytes against the pattern.
     lea rsi, [rel vol_read_buf]
@@ -3984,12 +3984,12 @@ test_fcb_write:
     dec rcx
     jnz .vfy71
     ; SETRNDREC: extent=0,nr=2 -> RR=2; RNDRD RR=2 gives 3rd record.
-    mov word [rel aux_fcb+12], 0      ; extent (FCB64.extent @12)
-    mov byte [rel aux_fcb+64], 2      ; nr (FCB64.nr @64)
+    mov word [rel aux_fcb + FCB64.extent], 0      ; extent
+    mov byte [rel aux_fcb + FCB64.nr], 2          ; nr
     lea rdx, [rel aux_fcb]
     call handler_setrndrec
     jc .fail71
-    cmp qword [rel aux_fcb+65], 2
+    cmp qword [rel aux_fcb + FCB64.rr], 2
     jne .fail71
     lea rdx, [rel aux_fcb]
     call handler_rndrd
@@ -4002,7 +4002,7 @@ test_fcb_write:
     call handler_close
     jc .fail71
     lea rsi, [rel fcb_new_renamed]
-    lea rdi, [rel aux_fcb+16]
+    lea rdi, [rel aux_fcb + FCB64.recsiz]  ; RENAME 2nd name overlaps recsiz
     mov rcx, 11
     cld
     rep movsb
@@ -6432,10 +6432,10 @@ test_fs_crash:
     jc .fail83
     cmp rax, 1
     jne .fail83
-    mov r12d, [rel aux_fcb+48]      ; save baseline firstclus
+    mov r12d, [rel aux_fcb + FCB64.firclus]      ; save baseline firstclus
     test r12d, r12d
     jz .fail83
-    cmp qword [rel aux_fcb+20], 128
+    cmp qword [rel aux_fcb + FCB64.filsiz], 128
     jne .fail83
     call fs_vol_scrub64
     test rax, rax
@@ -6502,7 +6502,7 @@ test_fs_crash:
     ; size 256 in RAM dir entry
     lea rbp, [rel fs_vol_dpb]
     lea rsi, [rel fs_vol_root]
-    lea rdi, [rel aux_fcb+1]
+    lea rdi, [rel aux_fcb + FCB64.name]
     call fs_dir_find64
     jc .fail83
     mov dword [rbx+28], 256
@@ -6528,9 +6528,9 @@ test_fs_crash:
     jc .fail83
     test rax, rax
     jnz .fail83
-    cmp qword [rel aux_fcb+20], 128 ; still old size
+    cmp qword [rel aux_fcb + FCB64.filsiz], 128 ; still old size
     jne .fail83
-    mov eax, [rel aux_fcb+48]
+    mov eax, [rel aux_fcb + FCB64.firclus]
     cmp eax, r12d                   ; still old chain head
     jne .fail83
     call fs_vol_scrub64
@@ -6596,7 +6596,7 @@ test_fs_crash:
     jnz .fail83
     lea rbp, [rel fs_vol_dpb]
     lea rsi, [rel fs_vol_root]
-    lea rdi, [rel aux_fcb+1]
+    lea rdi, [rel aux_fcb + FCB64.name]
     call fs_dir_find64
     jc .fail83
     mov dword [rbx+28], 256
@@ -6619,7 +6619,7 @@ test_fs_crash:
     lea rsi, [rel fs_vol_root]
     call fs_fcb_open64
     jc .fail83
-    cmp qword [rel aux_fcb+20], 128 ; root still old size
+    cmp qword [rel aux_fcb + FCB64.filsiz], 128 ; root still old size
     jne .fail83
     call fs_vol_scrub64             ; must have NO dangling (slack, not dangling)
     test rax, rax
@@ -6656,7 +6656,7 @@ test_fs_crash:
     jc .fail83
     cmp rax, 1
     jne .fail83
-    mov r12d, [rel aux_fcb+48]
+    mov r12d, [rel aux_fcb + FCB64.firclus]
     test r12d, r12d
     jz .fail83
     ; ---- D. FAT2 divergence: manual link + flush copy1 only ----
@@ -6787,7 +6787,7 @@ test_fs_crash:
     lea rsi, [rel fs_vol_root]
     call fs_fcb_open64
     jc .fail83
-    cmp qword [rel aux_fcb+20], 128
+    cmp qword [rel aux_fcb + FCB64.filsiz], 128
     jne .fail83
     ; ---- F. delete with FAT fault: root gone on disk, clusters leaked ----
     mov dword [rel fs_fault_inject], 1
@@ -9476,7 +9476,7 @@ layout82_fit_count equ (layout82_fit_table_end - layout82_fit_table)/16
 
 
 section .bss
-align 16
+alignb 16
 p8_env_buf: resb 1024
 p8_env_small: resb 64
 p8_outbuf: resb 64

@@ -3468,7 +3468,8 @@ fs_fcb_create64:
 
 ; ------------------------------------------------------------
 ; fs_fcb_rename64 — rename a root-dir file (dup-checked)
-;   In: RDI = FCB64 ptr (old name at +1, new 11-byte name at +16).
+;   In: RDI = FCB64 ptr (old name at FCB64.name,
+;       new 11-byte name at FCB64.recsiz overlap, DOS FCB+16 semantics).
 ;   Out: RAX 0 ok CF=0; 1/CF=1 not found or duplicate.
 ; ------------------------------------------------------------
 fs_fcb_rename64:
@@ -3488,7 +3489,7 @@ fs_fcb_rename64:
     lea rbp, [rel fs_vol_dpb]
     ; Duplicate check on the new name first.
     lea rsi, [rel fs_vol_root]
-    lea rdi, [r8 + 16]
+    lea rdi, [r8 + FCB64.recsiz]  ; RENAME 2nd name overlaps recsiz
     call fs_dir_find64
     jnc .fail_rn
     ; Find the old name.
@@ -3497,7 +3498,7 @@ fs_fcb_rename64:
     call fs_dir_find64
     jc .fail_rn
     mov r9, rbx
-    lea rsi, [r8 + 16]
+    lea rsi, [r8 + FCB64.recsiz]  ; RENAME 2nd name overlaps recsiz
     mov rdi, r9
     mov rcx, 11
     cld
@@ -3598,7 +3599,7 @@ fs_fcb_search64:
 
 ; ------------------------------------------------------------
 ; fs_make_fcb64 — parse a path string into an FCB (INT 21h AH=29h)
-;   In: RDI = FCB64 dst (80B), RSI = src ASCIIZ, AL = mode bit0:
+;   In: RDI = FCB64 dst (FCBSIZ64), RSI = src ASCIIZ, AL = mode bit0:
 ;         1 = skip leading separators first (DOS PARSEFCB flag).
 ;   Out: AL = 0 ok, 1 wildcards present, 0xFF bad drive; RSI = end ptr
 ;        (first unconsumed char), CF 0/1.

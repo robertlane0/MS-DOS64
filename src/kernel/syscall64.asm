@@ -2285,7 +2285,7 @@ handler_create:             ; AH=16h CREATE FCB (was stub)
     pop rbx
     ret
 
-handler_rename:             ; AH=17h RENAME (new name at FCB+16) (was stub)
+handler_rename:             ; AH=17h RENAME (new name at FCB64.recsiz overlap) (was stub)
     push rbx
     push rcx
     push rdx

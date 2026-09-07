@@ -24,4 +24,34 @@ struc FCB64
 endstruc
 %define FCBSIZ64 FCB64_size
 
+; Layout drift guard: selftests/shell reference FCB64 fields symbolically,
+; but a silent re-layout would corrupt on-disk behavior. Fail the build
+; if any critical offset moves. NOTE: the RENAME second 11-byte name
+; (DOS FCB+16 semantics) overlaps recsiz; rename sites use FCB64.recsiz
+; with an overlap comment so they stay symbolic yet drift-checked.
+%if FCB64.name != 1
+%error "FCB64.name drifted (want 1)"
+%endif
+%if FCB64.ext != 9
+%error "FCB64.ext drifted (want 9)"
+%endif
+%if FCB64.extent != 12
+%error "FCB64.extent drifted (want 12)"
+%endif
+%if FCB64.recsiz != 16
+%error "FCB64.recsiz drifted (want 16)"
+%endif
+%if FCB64.filsiz != 20
+%error "FCB64.filsiz drifted (want 20)"
+%endif
+%if FCB64.firclus != 48
+%error "FCB64.firclus drifted (want 48)"
+%endif
+%if FCB64.nr != 64
+%error "FCB64.nr drifted (want 64)"
+%endif
+%if FCB64.rr != 65
+%error "FCB64.rr drifted (want 65)"
+%endif
+
 %endif
