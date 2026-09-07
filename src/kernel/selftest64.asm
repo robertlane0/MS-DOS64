@@ -275,7 +275,9 @@ extern proc_get_entry64
 extern proc_next_pid
 extern proc_state
 extern proc_pid
+%ifdef DEBUG_SELFTEST
 extern exec_dbg_pid
+%endif
 extern psp_init64
 extern psp_validate64
 extern psp_set_cmdtail64
@@ -7796,8 +7798,10 @@ test_exec_dispatch:
     pop rax
     mov rax, [rel proc_next_pid]
     call print_num_vga_serial
+%ifdef DEBUG_SELFTEST
     mov rax, [rel exec_dbg_pid]
     call print_num_vga_serial
+%endif
     pop rax
     call proc_count_running64
     push rax

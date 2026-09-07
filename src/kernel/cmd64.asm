@@ -9,7 +9,9 @@ bits 64
 default rel
 %include "include/fs.inc"
 section .text
+%ifdef DEBUG_SELFTEST
 global cmd_dbg_putc
+%endif
 global cmd_init64
 global cmd_strlen64
 global cmd_toupper_buf64
@@ -81,9 +83,13 @@ extern time_min
 ; cmd_dbg_putc AL=char -> COM1, bounded best-effort (for fail-point
 ; isolation, like Phase8 markers). Serial is optional diagnostic I/O:
 ; drop on timeout (CF ignored), never hang command execution.
+; Debug-only hook: gated behind -DDEBUG_SELFTEST so release objects stay
+; symbol-clean (see `make check-debug-symbols`).
+%ifdef DEBUG_SELFTEST
 cmd_dbg_putc:
     call serial_try_putc64      ; CF ignored: drop and continue
     ret
+%endif
 %define SW_W 1
 %define SW_P 2
 %define SW_V 4

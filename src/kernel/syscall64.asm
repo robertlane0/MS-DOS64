@@ -155,10 +155,15 @@ NUMDRV64: resb 1
 VERIFY_FLAG64: resb 1
 global VERIFY_FLAG64
 srch_next_slot: resq 1
-exec_ret_pid: resq 1
-exec_ret_psp: resq 1
+; Debug/self-test hooks (fail-point markers, EXEC introspection).
+; Gated behind -DDEBUG_SELFTEST (same pattern as SELFTEST_DESTRUCTIVE):
+; default/smoke/full/lean builds omit them so release objects stay
+; symbol-clean (see `make check-debug-symbols`). Debug builds define
+; DEBUG_SELFTEST explicitly to retain the markers.
+%ifdef DEBUG_SELFTEST
 global exec_dbg_pid
 exec_dbg_pid: resq 1
+%endif
 
 section .text
 syscall_init:
@@ -2370,34 +2375,31 @@ handler_exec:
     ; RDI/RSI/RDX/RCX/R8 already hold args (push preserves values, regs unchanged)
     call proc_spawn64
     ; RAX=pid, RDX=psp
+%ifdef DEBUG_SELFTEST
     mov [rel exec_dbg_pid], rax
+%endif
     test rax, rax
     jz .fail_e
-    mov r9, rax          ; save pid
+    mov r9, rax          ; save pid (R9 orig is on the stack, safe as temp)
     mov rbx, [rel SPSAVE64]
     test rbx, rbx
     jz .no_frame_e
     mov [rbx + STKPTRS64.rax_save], rax
     mov [rbx + STKPTRS64.rbx_save], rax
 .no_frame_e:
-    mov rax, r9          ; restore pid (proc_spawn used RAX/RDX returns; pushes didn't clobber regs except RAX/RDX)
-    ; RDX already holds psp from proc_spawn? proc_spawn returns RDX=psp, but our pushes saved orig RDX.
-    ; After call, RDX=psp (return). Our push/pop of rdx will restore orig RDX on pop, losing psp!
-    ; So save psp in R9 as well before pops.
-    mov r9, rdx          ; psp (overwrites pid save; need both) -> use stack slots
-    ; Actually need both pid and psp across pops. Save to frame or static:
-    mov [rel exec_ret_pid], rax
-    mov [rel exec_ret_psp], r9
+    mov rax, r9          ; restore pid
+    ; RDX still holds psp from proc_spawn (frame code above preserves RDX).
+    ; A plain `pop rdx` would restore the orig RDX (cmdline arg) over psp,
+    ; so discard that slot instead — pid/psp survive in RAX/RDX with no
+    ; BSS statics (exec_ret_pid/psp removed; see check-debug-symbols).
     clc
     pop r9
     pop r8
     pop rdi
     pop rsi
-    pop rdx
+    add rsp, 8          ; discard saved orig RDX, keep psp in RDX
     pop rcx
     pop rbx
-    mov rax, [rel exec_ret_pid]
-    mov rdx, [rel exec_ret_psp]
     ret
 .fail_e:
     mov rbx, [rel SPSAVE64]

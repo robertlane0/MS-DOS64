@@ -572,9 +572,14 @@ stack_test_depth:
 ; stack_dbg_char — emit AL to COM1 (debug markers). Bounded best-effort:
 ; serial is optional diagnostic I/O, drop on timeout (CF ignored), never
 ; hang the stack/ABI tests waiting for UART readiness.
+; Debug-only hook (fail-point markers): gated behind -DDEBUG_SELFTEST so
+; release objects stay symbol-clean (see `make check-debug-symbols`).
+%ifdef DEBUG_SELFTEST
+global stack_dbg_char
 stack_dbg_char:
     call serial_try_putc64      ; CF ignored: drop and continue
     ret
+%endif
 
 ; Test 63: IRQ/exc stacks — IST==0 reserved, tops aligned, timer preserves
 stack_test_irq:

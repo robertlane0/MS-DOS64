@@ -75,6 +75,11 @@ NASM_ELF := $(NASM) -f elf64 -g -F dwarf -Wall -Werror -Wno-reloc-abs-word -Wno-
 #     including 71 (SCRATCH/RENAMED) + 83 (CRASH) in the reserved namespace
 #     with pre-clean recovery + post-run preservation checks (`make full`).
 #   Lean: -DSKIP_SELFTEST -> _start skips suite, minimal init, shell direct.
+#   Debug hooks (exec_dbg_pid/stack_dbg_char/cmd_dbg_putc fail-point markers):
+#     gated behind -DDEBUG_SELFTEST (same pattern as SELFTEST_DESTRUCTIVE);
+#     default/smoke/full/lean builds omit it so release objects stay
+#     symbol-clean (`make check-debug-symbols`). Opt in explicitly, e.g.
+#     `make NASM_DEFS="-DRUN_SELFTEST -DDEBUG_SELFTEST"`.
 # Override with `make NASM_DEFS=-DSKIP_SELFTEST` or `make lean` / `make full`.
 NASM_DEFS ?= -DRUN_SELFTEST
 FULL_DEFS := -DRUN_SELFTEST -DSELFTEST_DESTRUCTIVE
@@ -168,7 +173,7 @@ $(BUILD)/kernel.bin: $(BUILD)/kernel.elf | $(BUILD)
 	@echo "Kernel binary: $$(stat -c %s $@) bytes ($$(expr $$(stat -c %s $@) / 512) sectors)"
 	@test $$(stat -c %s $@) -le $$(expr $(KERNEL_SECTORS) \* $(IMG_SECTOR_SIZE)) || (echo "Kernel too large for $(KERNEL_SECTORS) sectors! Increase KERNEL_SECTORS in the Makefile disk-layout block"; exit 1)
 
-$(BUILD)/dos64.img: $(BUILD)/mbr.bin $(BUILD)/stage2.bin $(BUILD)/kernel.bin check-layout check-kbc check-serial check-selftest-modes | $(BUILD)
+$(BUILD)/dos64.img: $(BUILD)/mbr.bin $(BUILD)/stage2.bin $(BUILD)/kernel.bin check-layout check-kbc check-serial check-selftest-modes check-debug-symbols | $(BUILD)
 	dd if=/dev/zero of=$@ bs=1M count=$(IMG_MB) status=none
 	dd if=$(BUILD)/mbr.bin of=$@ conv=notrunc status=none
 	dd if=$(BUILD)/stage2.bin of=$@ bs=$(IMG_SECTOR_SIZE) seek=1 conv=notrunc status=none
@@ -185,7 +190,7 @@ $(LEAN_BUILD)/kernel.bin: $(LEAN_BUILD)/kernel.elf | $(BUILD)
 	@echo "Lean kernel binary: $$(stat -c %s $@) bytes ($$(expr $$(stat -c %s $@) / 512) sectors)"
 	@test $$(stat -c %s $@) -le $$(expr $(KERNEL_SECTORS) \* $(IMG_SECTOR_SIZE)) || (echo "Lean kernel too large for $(KERNEL_SECTORS) sectors! Increase KERNEL_SECTORS in the Makefile disk-layout block"; exit 1)
 
-$(BUILD)/dos64-lean.img: $(BUILD)/mbr.bin $(BUILD)/stage2.bin $(LEAN_BUILD)/kernel.bin check-layout check-kbc check-serial check-selftest-modes | $(BUILD)
+$(BUILD)/dos64-lean.img: $(BUILD)/mbr.bin $(BUILD)/stage2.bin $(LEAN_BUILD)/kernel.bin check-layout check-kbc check-serial check-selftest-modes check-debug-symbols | $(BUILD)
 	dd if=/dev/zero of=$@ bs=1M count=$(IMG_MB) status=none
 	dd if=$(BUILD)/mbr.bin of=$@ conv=notrunc status=none
 	dd if=$(BUILD)/stage2.bin of=$@ bs=$(IMG_SECTOR_SIZE) seek=1 conv=notrunc status=none
@@ -202,7 +207,7 @@ $(FULL_BUILD)/kernel.bin: $(FULL_BUILD)/kernel.elf | $(BUILD)
 	@echo "Full kernel binary: $$(stat -c %s $@) bytes ($$(expr $$(stat -c %s $@) / 512) sectors)"
 	@test $$(stat -c %s $@) -le $$(expr $(KERNEL_SECTORS) \* $(IMG_SECTOR_SIZE)) || (echo "Full kernel too large for $(KERNEL_SECTORS) sectors! Increase KERNEL_SECTORS in the Makefile disk-layout block"; exit 1)
 
-$(BUILD)/dos64-full.img: $(BUILD)/mbr.bin $(BUILD)/stage2.bin $(FULL_BUILD)/kernel.bin check-layout check-kbc check-serial check-selftest-modes | $(BUILD)
+$(BUILD)/dos64-full.img: $(BUILD)/mbr.bin $(BUILD)/stage2.bin $(FULL_BUILD)/kernel.bin check-layout check-kbc check-serial check-selftest-modes check-debug-symbols | $(BUILD)
 	dd if=/dev/zero of=$@ bs=1M count=$(IMG_MB) status=none
 	dd if=$(BUILD)/mbr.bin of=$@ conv=notrunc status=none
 	dd if=$(BUILD)/stage2.bin of=$@ bs=$(IMG_SECTOR_SIZE) seek=1 conv=notrunc status=none
@@ -372,6 +377,42 @@ check-selftest-modes:
 	@grep -q 'check_volume_clean' include/fs.inc || (echo "selftest-modes FAIL: include/fs.inc must reference check_volume_clean"; exit 1)
 	@echo "Selftest modes OK: smoke (81 + 2 SKIP) default, full (83) via make full"
 
+# Debug-hook check — source-level assertion that test/fail-point markers
+# stay out of release objects (same pattern as SELFTEST_DESTRUCTIVE).
+# Deterministic, host-side, no emulator: greps the same NASM sources
+# `make all` assembles. (Source-level only, like check-kbc/check-serial:
+# it never inspects built ELFs, so stale variant builds cannot false-fail
+# a single-image rebuild. After building, validate artifacts manually:
+#   nm build/kernel.elf | grep -E 'exec_dbg|stack_dbg|cmd_dbg|exec_ret'
+#   nm build/lean/kernel.elf | grep -i dbg
+# both must print nothing.)
+# Verifies:
+#   1. syscall64.asm gates exec_dbg_pid (global + BSS + handler_exec store)
+#      behind DEBUG_SELFTEST and defines/uses no exec_ret BSS statics
+#      (handler_exec preserves pid/psp via a stack-slot discard — `add rsp,8`
+#      over the saved orig-RDX slot — not via statics).
+#   2. stack64.asm gates stack_dbg_char and cmd64.asm gates cmd_dbg_putc
+#      behind DEBUG_SELFTEST; selftest64.asm gates its extern/use likewise.
+#   3. Default builds never define DEBUG_SELFTEST (NASM_DEFS/FULL_DEFS omit
+#      it; lean uses -DSKIP_SELFTEST), so smoke/full/lean all stay clean.
+# Debug builds opt in explicitly, e.g.
+#   make NASM_DEFS="-DRUN_SELFTEST -DDEBUG_SELFTEST"
+# Prerequisite of all disk images, so every `make` runs this with no
+# separate invocation.
+check-debug-symbols:
+	@grep -q 'ifdef DEBUG_SELFTEST' $(SRC_KERNEL)/syscall64.asm || (echo "debug-symbols FAIL: syscall64.asm missing DEBUG_SELFTEST gate"; exit 1)
+	@grep -q 'global exec_dbg_pid' $(SRC_KERNEL)/syscall64.asm || (echo "debug-symbols FAIL: syscall64.asm missing gated exec_dbg_pid"; exit 1)
+	@! grep -Eq 'exec_ret_(pid|psp):' $(SRC_KERNEL)/syscall64.asm || (echo "debug-symbols FAIL: syscall64.asm still defines exec_ret BSS static (use stack discard)"; exit 1)
+	@! grep -Eq '\[rel exec_ret_(pid|psp)\]' $(SRC_KERNEL)/syscall64.asm || (echo "debug-symbols FAIL: syscall64.asm still uses exec_ret static (use stack discard)"; exit 1)
+	@grep -q 'ifdef DEBUG_SELFTEST' $(SRC_KERNEL)/stack64.asm || (echo "debug-symbols FAIL: stack64.asm missing DEBUG_SELFTEST gate"; exit 1)
+	@grep -q 'stack_dbg_char' $(SRC_KERNEL)/stack64.asm || (echo "debug-symbols FAIL: stack64.asm missing gated stack_dbg_char"; exit 1)
+	@grep -q 'ifdef DEBUG_SELFTEST' $(SRC_KERNEL)/cmd64.asm || (echo "debug-symbols FAIL: cmd64.asm missing DEBUG_SELFTEST gate"; exit 1)
+	@grep -q 'cmd_dbg_putc' $(SRC_KERNEL)/cmd64.asm || (echo "debug-symbols FAIL: cmd64.asm missing gated cmd_dbg_putc"; exit 1)
+	@grep -q 'ifdef DEBUG_SELFTEST' $(SRC_KERNEL)/selftest64.asm || (echo "debug-symbols FAIL: selftest64.asm missing DEBUG_SELFTEST gate"; exit 1)
+	@! grep -Eq '^NASM_DEFS \?= .*DEBUG_SELFTEST' Makefile || (echo "debug-symbols FAIL: default NASM_DEFS must omit DEBUG_SELFTEST (release symbol-clean)"; exit 1)
+	@! grep -Eq '^FULL_DEFS := .*DEBUG_SELFTEST' Makefile || (echo "debug-symbols FAIL: FULL_DEFS must omit DEBUG_SELFTEST (full stays symbol-clean)"; exit 1)
+	@echo "Debug symbols OK: hooks gated behind -DDEBUG_SELFTEST (release symbol-clean; nm validation: no exec_dbg/stack_dbg/cmd_dbg/exec_ret)"
+
 # Bochs configs — per-variant rendering from bochsrc.txt.in.
 # Fixes the run-bochs-full wrong-image bug: the single static bochsrc.txt
 # hardcodes build/dos64.img, so the -full target built dos64-full.img but
@@ -461,4 +502,4 @@ clean:
 	rm -rf $(BUILD)/*.bin $(BUILD)/*.o $(BUILD)/*.img $(BUILD)/*.elf $(BUILD)/*.map $(BUILD)/*.lock $(BUILD)/bochsrc-*.txt
 	rm -rf $(BUILD)/src $(BUILD)/lean $(BUILD)/full $(BUILD)/include
 
-.PHONY: all lean full clean run-bochs run-bochs-full run-bochs-lean run-qemu run-qemu-lean run-qemu-full check-layout check-layout-neg check-kbc check-serial check-selftest-modes check-bochsrc
+.PHONY: all lean full clean run-bochs run-bochs-full run-bochs-lean run-qemu run-qemu-lean run-qemu-full check-layout check-layout-neg check-kbc check-serial check-selftest-modes check-debug-symbols check-bochsrc
