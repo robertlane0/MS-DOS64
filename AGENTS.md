@@ -1,7 +1,10 @@
 # AGENTS.md: Converting MS-DOS v1.25 ASM to 64-bit BIOS Bootable System
 
-> **Status (2026-09-06): implementation complete — 83/83 self-tests PASS on QEMU
-> and Bochs, then the interactive `COMMAND64` shell (`src/kernel/shell64.asm`).
+> **Status (2026-09-07): implementation complete — smoke 81 + 2 SKIP
+> (`make`, default, non-destructive) and full 83/83 PASS (`make full`,
+> destructive 71/83 in the reserved SCRATCH/RENAMED/CRASH namespace with
+> mount-time recovery) on QEMU and Bochs, then the interactive `COMMAND64`
+> shell (`src/kernel/shell64.asm`).
 > The phase plan below is kept as the build record; every checklist item is done.
 > Current entry points: `README.md` (what works / memory / disk / shell),
 > `docs/18-truth-gap-analysis.md` + `docs/19-closure-g1-g6.md` (audit trail for

@@ -1,17 +1,19 @@
 # Phase 1 – Boot & Testing Strategy for 64-bit Conversion
 
-> **As built (2026-09-06):** this strategy is implemented — MBR → stage2 →
-> kernel at `0x100000` boots 83/83 PASS + `COMMAND64` REPL on QEMU (primary)
-> and Bochs. Concrete sizes/layout below reflect the code; the step rationale
-> is unchanged. See `README.md` + `docs/19-closure-g1-g6.md` for the final
-> state (chunked loads, `KERNEL_SECTORS 176`, FAT12 volume at LBA 512+,
-> PIC master `0x28`/slave `0x30`). `make lean` builds a shell-only
-> `build/dos64-lean.img` (`SKIP_SELFTEST`, §7.1); tests 73–76 (§7.2) lock in
-> negative-path handling, tests 77–82 (§7.3) lock in cross-layer
-> malformed-input invariants (BPB table + sentinels, pure ATA table,
-> FAT-chain bounds, allocator arithmetic, queue interleave, layout), and
-> test 83 (§7.4) locks FAT12 crash-ordering (FAT-first commit, mirror
-> heal, scrub/reclaim with fault-injected remounts).
+> **As built (2026-09-07):** this strategy is implemented — MBR → stage2 →
+> kernel at `0x100000` boots smoke 81 + 2 SKIP (`make`) or full 83 PASS
+> (`make full`, destructive 71/83 in the reserved namespace with recovery)
+> + `COMMAND64` REPL on QEMU (primary) and Bochs. Concrete sizes/layout
+> below reflect the code; the step rationale is unchanged. See `README.md`
+> + `docs/19-closure-g1-g6.md` for the final state (chunked loads,
+> `KERNEL_SECTORS 176`, FAT12 volume at LBA 512+, PIC master `0x28`/slave
+> `0x30`). `make lean` builds a shell-only `build/dos64-lean.img`
+> (`SKIP_SELFTEST`, §7.1); tests 73–76 (§7.2) lock in negative-path
+> handling, tests 77–82 (§7.3) lock in cross-layer malformed-input
+> invariants (BPB table + sentinels, pure ATA table, FAT-chain bounds,
+> allocator arithmetic, queue interleave, layout), and test 83 (§7.4)
+> locks FAT12 crash-ordering (FAT-first commit, mirror heal, scrub/reclaim
+> with fault-injected remounts).
 
 ## 1. Why New Boot Chain Is Needed
 
@@ -144,31 +146,55 @@ Each stage has Bochs run:
 
 *Stage 7 – Shell.* `src/kernel/shell64.asm` REPL after the self-test suite: prompt loop over PS/2 + COM1 RX, `cmd_parse_line64` → builtins against the mounted volume + `*.COM` EXEC. QEMU `-serial stdio` drives it from a pipe.
 
-### 7.1 Build flag: full (self-test) vs lean (shell-only)
+### 7.1 Build flag: smoke (default) vs full (destructive) vs lean (shell-only)
 
-The suite is no longer inseparable from the boot path. `src/kernel/main.asm`
-wraps the test-calling block in `_start` with a build flag:
+The suite is no longer inseparable from the boot path, and destructive
+filesystem tests are no longer coupled to every normal boot.
+`src/kernel/main.asm` wraps the test-calling block in `_start` with build
+flags (classification: PURE / SCRATCH-DEVICE / REAL-VOLUME READ-ONLY /
+REAL-VOLUME DESTRUCTIVE — see `src/kernel/selftest64.asm` header):
 
 ```nasm
-; Full: nasm -DRUN_SELFTEST  -> run tests 1..N, then shell_repl64
-; Lean: nasm -DSKIP_SELFTEST -> skip suite, minimal init, shell direct
+; Smoke (default): nasm -DRUN_SELFTEST -> 81 + 2 SKIP, then shell_repl64
+; Full:  nasm -DRUN_SELFTEST -DSELFTEST_DESTRUCTIVE -> 83, then shell
+; Lean:  nasm -DSKIP_SELFTEST -> skip suite, minimal init, shell direct
 %ifdef SKIP_SELFTEST
 %undef RUN_SELFTEST
+%undef SELFTEST_DESTRUCTIVE
 %else
 %ifndef RUN_SELFTEST
-%define RUN_SELFTEST        ; plain `make` keeps the old behaviour
+%define RUN_SELFTEST
 %endif
 %endif
 ```
 
-`Makefile` exposes both (objects are kept separate so the images can coexist):
+`Makefile` exposes all three (objects are kept separate so the images can coexist):
 
 ```bash
-make                    # full: build/dos64.img (RUN_SELFTEST, 83 tests + shell)
+make                    # smoke: build/dos64.img (RUN_SELFTEST, 81 + 2 SKIP + shell)
+make full               # full: build/dos64-full.img (RUN_SELFTEST+SELFTEST_DESTRUCTIVE, 83 + shell)
 make lean               # lean: build/dos64-lean.img (SKIP_SELFTEST, shell direct)
-make run-qemu           # boot full image, expect "Summary: 83 passed, 0"
+make run-qemu           # boot smoke image, expect "Summary: 81 passed, 0" + "Skipped (destructive): 2"
+make run-qemu-full      # boot full image, expect "Summary: 83 passed, 0"
 make run-qemu-lean      # boot lean image, expect "Lean boot ... entering COMMAND64..."
 ```
+
+Smoke keeps PURE + bounded SCRATCH-DEVICE (LBA 200/500–511, zeroed after)
++ REAL-VOLUME READ-ONLY (67/70/72/76); tests 71 (`SCRATCH`/`RENAMED`) and
+83 (`CRASH`) print `SKIP (destructive, needs SELFTEST_DESTRUCTIVE)` and
+leave the volume untouched. Full runs all 83 in the reserved namespace
+(`include/fs.inc`: only 71/83 may write the volume, only those three names)
+with mount-time recovery (Test 70 `recover_test_namespace_if_dirty` +
+71/83 pre-clean delete + discard/remount + reclaim + heal + scrub) and
+post-run non-test preservation checks (`HELLO`/`README` intact, scrub
+clean, mirrors match), so an interrupted run is recovered idempotently by
+the next boot and can never destroy non-test files. `tools/check_volume_clean.py`
+proves pre/post cleanliness from the host side (directory metadata + FAT
+allocations, including deliberately dirtied runs).
+
+NOTE: `RUN_SELFTEST` (even smoke) performs bounded device writes
+(scratch-LBA patterns, optional FAT2 heal on a diverged mount). Only
+`SKIP_SELFTEST` performs zero device writes.
 
 The lean path (`_start:.lean_boot`) still performs the essential init the
 suite would otherwise have done — `mem_init64`, `proc_init64`,

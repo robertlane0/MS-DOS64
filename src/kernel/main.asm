@@ -7,6 +7,7 @@ default rel
 
 %ifdef SKIP_SELFTEST
 %undef RUN_SELFTEST
+%undef SELFTEST_DESTRUCTIVE
 %else
 %ifndef RUN_SELFTEST
 %define RUN_SELFTEST

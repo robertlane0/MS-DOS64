@@ -5,13 +5,28 @@ Microsoft MS-DOS v1.25 (MIT). It preserves DOS semantics — FAT12, FCBs,
 PSPs, `INT 21h`, `COMMAND`-style builtins — on native 64-bit code with no
 BIOS calls after the boot handoff.
 
-On boot the kernel runs a 83-check self-test suite (serial + VGA log), then
-drops into an interactive `COMMAND64` shell.
+On boot the kernel runs a self-test suite (serial + VGA log), then
+drops into an interactive `COMMAND64` shell. Two modes:
+`make` (smoke, default): 81 checks + 2 SKIP — pure, scratch-device
+(LBA 200/500–511, zeroed after) and volume read-only; destructive
+filesystem mutation (tests 71/83) is skipped so normal boots never create
+files. `make full` (destructive): all 83 checks including 71
+(`SCRATCH.TXT`/`RENAMED.TXT`) and 83 (`CRASH.TXT`) in the reserved test
+namespace with pre-clean recovery + post-run preservation checks.
+
+NOTE: `RUN_SELFTEST` (even smoke) performs bounded device writes:
+scratch-LBA patterns and optional FAT2 heal on a diverged mount. Only
+`SKIP_SELFTEST` (`make lean`) performs zero device writes. See
+`include/fs.inc` (reserved namespace), `src/kernel/selftest64.asm`
+(classification header) and `tools/check_volume_clean.py` (pre/post
+cleanliness proof).
 
 ## Status
 
 Boots on QEMU (`qemu-system-x86_64 -serial stdio`) and Bochs (256 MiB,
-`ryzen` profile). Self-tests: **83/83 PASS**, then the shell prompt.
+`ryzen` profile). Self-tests: smoke **81 PASS + 2 SKIP** (`make`),
+full **83 PASS** (`make full`, reserved namespace, recovery-verified),
+then the shell prompt.
 Per-subsystem design notes live in `docs/`; `docs/18-*.md` + `docs/19-*.md`
 are the audit trail for the last correctness pass.
 
@@ -123,8 +138,10 @@ Requires `nasm ≥ 2.15`, `ld`/`objcopy` (binutils), `python3`, and
 `qemu-system-x86_64` or Bochs.
 
 ```bash
-make            # MBR + stage2 + kernel + dos64.img (stamps FAT12 volume)
-make run-qemu   # serial stdio (recommended)
+make            # smoke: MBR + stage2 + kernel + dos64.img (81 + 2 SKIP, no volume files created)
+make full       # destructive: dos64-full.img (83, reserved SCRATCH/RENAMED/CRASH + recovery)
+make run-qemu   # serial stdio (recommended, smoke)
+make run-qemu-full  # full destructive suite
 make run-bochs  # target emulator; clears stale lock first
 make clean
 ```
@@ -133,7 +150,14 @@ Verify (QEMU is the primary proof path):
 
 ```bash
 timeout 25 qemu-system-x86_64 -drive file=build/dos64.img,format=raw -serial stdio -display none
-# tail: Summary: 83 passed, 0 failed ... MS-DOS64 shell (COMMAND64). Type HELP for commands.
+# tail: Summary: 81 passed, 0 failed ... Skipped (destructive): 2 ... MS-DOS64 shell (COMMAND64). Type HELP for commands.
+
+timeout 25 qemu-system-x86_64 -drive file=build/dos64-full.img,format=raw -serial stdio -display none
+# tail: Summary: 83 passed, 0 failed ... MS-DOS64 shell (COMMAND64).
+
+# Pre/post volume cleanliness (same contents before/after, no test files left):
+python3 tools/check_volume_clean.py --vol-lba 512 --vol-totsec 2880 --sector-size 512 --kernel-lba 16 --kernel-sectors 176 build/dos64.img
+python3 tools/check_volume_clean.py --vol-lba 512 --vol-totsec 2880 --sector-size 512 --kernel-lba 16 --kernel-sectors 176 build/dos64-full.img
 
 printf '\rDIR\rTYPE HELLO.TXT\rHELP\rEXIT\r' | timeout 25 qemu-system-x86_64 -drive file=build/dos64.img,format=raw -serial stdio -display none
 

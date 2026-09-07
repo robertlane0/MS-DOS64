@@ -2,6 +2,45 @@
 ; Provides selftest_run64: runs tests 1..83, prints PASS/FAIL + summary + phase lines.
 ; Returns RAX = failed count (0 = all pass). Called by _start in full builds.
 ; Lean builds (SKIP_SELFTEST): stub returns 0; test code excluded via RUN_SELFTEST.
+;
+; Self-test classes (see Implementation steps: pure vs scratch vs real-volume):
+;   PURE (no disk I/O, no persistent state): 1-12 (regs/strings/BCD/FAT-pack/
+;     mem-para/DMA/dispatch/addressing), 17-21 (para/coalesce/resize/protect/
+;     stress), 28-34 (PSP/env/loader/spawn), 35-42 subset (IDT/console/vectors
+;     without disk), 43-50 (cmd parser/builtins, RAM buffers only), 51-66
+;     (IDT/PIC/stacks, bounded port I/O, no volume writes), 73-82 (negative
+;     paths + pure tables, read-only volume sampling only).
+;   SCRATCH-DEVICE (bounded ATA writes to reserved LBAs outside the volume,
+;     cleaned up): 14 (LBA 200 pattern + zero restore), 25 (FS_SCRATCH 500/502
+;     + zero), 26 (FS_FILE_LBA_BASE 510 file-data scratch). Safe every boot.
+;   REAL-VOLUME READ-ONLY (mount + reads, no FAT/root/data writes): 67 (mount +
+;     HELLO/README reads), 70 (FCB open/rndread/search/close), 72 (shell DIR/
+;     TYPE/TEST dispatch), 76 (negative reads into scratch DPB). Mount may
+;     heal FAT2 from FAT1 best-effort if mirrors already diverged (recovery,
+;     not a test write on clean images).
+;   REAL-VOLUME DESTRUCTIVE (FAT/root/data-cluster writes on the live volume,
+;     reserved namespace SCRATCH.TXT/RENAMED.TXT/CRASH.TXT): 71 (FCB create/
+;     write/rename/delete round-trip) and 83 (crash-ordering with fault
+;     injection + reclaim). Gated behind SELFTEST_DESTRUCTIVE (see below).
+;     Test 69 performs one net-zero root flush (SETATTRIB same value back);
+;     it is skipped when the value already matches so the smoke suite stays
+;     read-only in steady state.
+;
+; Boot modes (NASM defines, see Makefile):
+;   -DRUN_SELFTEST alone (default `make`): smoke suite — PURE + SCRATCH-DEVICE
+;     + REAL-VOLUME READ-ONLY. Tests 71/83 print SKIP and leave the volume
+;     untouched (only mount reads + scratch-LBA I/O occur).
+;   -DRUN_SELFTEST -DSELFTEST_DESTRUCTIVE (`make full`): full suite — all 83
+;     tests including 71/83 in the reserved namespace with mount-time recovery
+;     (pre-clean delete + discard/remount + reclaim + heal + scrub) and
+;     post-run non-test preservation checks (HELLO/README intact, scrub clean,
+;     mirrors match). An interrupted destructive run is recovered idempotently
+;     by the next boot's pre-clean.
+;   -DSKIP_SELFTEST (`make lean`): no suite, straight to shell.
+; NOTE: RUN_SELFTEST (even smoke) performs bounded device writes: scratch-LBA
+;   patterns (200/500-511, zeroed after) and optional FAT2 heal on a diverged
+;   mount. Only SKIP_SELFTEST performs zero device writes. Full destructive
+;   mode additionally creates/writes/deletes reserved files on the volume.
 bits 64
 default rel
 
@@ -14,6 +53,7 @@ default rel
 
 %ifdef SKIP_SELFTEST
 %undef RUN_SELFTEST
+%undef SELFTEST_DESTRUCTIVE
 %else
 %ifndef RUN_SELFTEST
 %define RUN_SELFTEST
@@ -285,7 +325,7 @@ selftest_run64:
     push r14
     xor r12, r12          ; passed count in R12 (callee-saved, demonstrates R8-R15)
     xor r13, r13          ; failed count in R13
-    mov r14, 0            ; test index
+    xor r14, r14          ; skipped count in R14 (destructive 71/83 in smoke mode)
 
     ; ---- Test 1: Register mapping — 64-bit RAX etc. and R8-R15 ----
     mov rsi, msg_test1
@@ -1478,9 +1518,12 @@ selftest_run64:
     call serial_print64
 
     ; ---- Test 71: FCB create/write/read/rename/delete round-trip ----
+    ; DESTRUCTIVE (real-volume writes in reserved namespace SCRATCH/RENAMED).
+    ; Smoke (no SELFTEST_DESTRUCTIVE): SKIP without touching the volume.
     mov rsi, msg_test71
     call vga_print
     call serial_print64
+%ifdef SELFTEST_DESTRUCTIVE
     call test_fcb_write
     test rax, rax
     jz .t71_pass
@@ -1491,6 +1534,10 @@ selftest_run64:
     inc r12
     mov rsi, msg_pass
 .t71_done:
+%else
+    inc r14
+    mov rsi, msg_skip
+%endif
     call vga_print
     call serial_print64
 
@@ -1682,9 +1729,12 @@ selftest_run64:
     call serial_print64
 
     ; ---- Test 83: FAT12 crash-consistency (order + mirrors + scrub/reclaim) ----
+    ; DESTRUCTIVE (real-volume writes in reserved namespace CRASH.TXT).
+    ; Smoke (no SELFTEST_DESTRUCTIVE): SKIP without touching the volume.
     mov rsi, msg_test83
     call vga_print
     call serial_print64
+%ifdef SELFTEST_DESTRUCTIVE
     call test_fs_crash
     test rax, rax
     jz .t83_pass
@@ -1695,6 +1745,10 @@ selftest_run64:
     inc r12
     mov rsi, msg_pass
 .t83_done:
+%else
+    inc r14
+    mov rsi, msg_skip
+%endif
     call vga_print
     call serial_print64
 
@@ -1712,6 +1766,19 @@ selftest_run64:
     mov rsi, msg_summary3
     call vga_print
     call serial_print64
+    ; Skipped count (destructive tests in smoke mode). Zero in full mode.
+    movzx rax, r14w
+    test rax, rax
+    jz .st_no_skip
+    mov rsi, msg_summary4
+    call vga_print
+    call serial_print64
+    movzx rax, r14w
+    call print_num_vga_serial
+    mov rsi, msg_summary5
+    call vga_print
+    call serial_print64
+.st_no_skip:
 
     cmp r13, 0
     je .st_all_pass
@@ -3377,12 +3444,45 @@ test_aux_misc:
     jc .fail69
     cmp cl, 0x20          ; mkfat12 writes archive attr
     jne .fail69
-    ; set same value back (exercises write+flush with no net change)
+%ifdef SELFTEST_DESTRUCTIVE
+    ; Full mode only: exercise the SET write+flush path with a different
+    ; value then restore (net-zero overall). Smoke skips this so the
+    ; default suite stays read-only on the volume in steady state.
+    mov al, 1
+    mov cl, 0x21
+    lea rdx, [rel aux_fcb]
+    call handler_setattrib
+    jc .fail69_restore
+    xor al, al
+    lea rdx, [rel aux_fcb]
+    call handler_setattrib
+    jc .fail69_restore
+    cmp cl, 0x21
+    jne .fail69_restore
     mov al, 1
     mov cl, 0x20
     lea rdx, [rel aux_fcb]
     call handler_setattrib
     jc .fail69
+    jmp .after_set69
+.fail69_restore:
+    ; Best-effort restore to 0x20 so a failed SET round-trip cannot leave
+    ; HELLO.TXT with a dirty attr for the next boot's strict GET check.
+    push rax
+    push rcx
+    mov al, 1
+    mov cl, 0x20
+    lea rdx, [rel aux_fcb]
+    call handler_setattrib
+    pop rcx
+    pop rax
+    jmp .fail69
+.after_set69:
+%else
+    ; Smoke: skip the SET write entirely (no root-sector write every boot).
+    ; The SET path is still covered by destructive tests 71/83 (which flush
+    ; root on create/rename/delete) and by the interactive shell.
+%endif
     ; dispatch path: AH=05 LIST via syscall_dispatch64
     mov dl, 'Q'
     mov rax, 0x0500
@@ -3401,8 +3501,194 @@ test_aux_misc:
     ret
 
 ; ------------------------------------------------------------
+; recover_test_namespace_if_dirty — mount-time recovery check (smoke+full).
+; Verifies the reserved test namespace (SCRATCH/RENAMED/CRASH) during mount:
+; read-only scrub + mirror + live-name checks; writes (delete + reclaim +
+; heal) ONLY when dirty (interrupted destructive run). This is why Test 70
+; (read-only enumeration expecting exactly HELLO+README .TXT) stays stable
+; even when a previous boot died mid-71/83: the next boot heals before
+; enumerating. On a clean image this performs zero device writes (mount
+; heal is a no-op when mirrors already match).
+; Out: RAX 0 clean/recovered, 1 unrecoverable. Preserves all except RAX.
+; ------------------------------------------------------------
+recover_test_namespace_if_dirty:
+    push rbx
+    push rcx
+    push rdx
+    push rsi
+    push rdi
+    push rbp
+    push r8
+    push r9
+    push r10
+    push r11
+    push r12
+    push r13
+    push r14
+    push r15
+    mov dword [rel fs_fault_inject], 0
+    call fs_mount_volume64
+    test rax, rax
+    jnz .rec_fail
+    xor r12d, r12d                ; dirty flag 0 clean
+    ; SCRATCH live? (make+open CF=0 found => dirty)
+    lea rsi, [rel fcb_str_scratch]
+    lea rdi, [rel aux_fcb]
+    mov al, 1
+    call fs_make_fcb64
+    jc .rec_fail
+    cmp al, 0xFF
+    je .rec_fail
+    lea rdi, [rel aux_fcb]
+    lea rbp, [rel fs_vol_dpb]
+    lea rsi, [rel fs_vol_root]
+    call fs_fcb_open64
+    jnc .rec_dirty               ; found => dirty
+    ; RENAMED live?
+    lea rsi, [rel fcb_str_renamed]
+    lea rdi, [rel aux_fcb]
+    mov al, 1
+    call fs_make_fcb64
+    jc .rec_fail
+    cmp al, 0xFF
+    je .rec_fail
+    lea rdi, [rel aux_fcb]
+    lea rbp, [rel fs_vol_dpb]
+    lea rsi, [rel fs_vol_root]
+    call fs_fcb_open64
+    jnc .rec_dirty
+    ; CRASH live?
+    lea rsi, [rel fcb_str_crash]
+    lea rdi, [rel aux_fcb]
+    mov al, 1
+    call fs_make_fcb64
+    jc .rec_fail
+    cmp al, 0xFF
+    je .rec_fail
+    lea rdi, [rel aux_fcb]
+    lea rbp, [rel fs_vol_dpb]
+    lea rsi, [rel fs_vol_root]
+    call fs_fcb_open64
+    jnc .rec_dirty
+    jmp .rec_check_meta
+.rec_dirty:
+    mov r12d, 1
+.rec_check_meta:
+    ; scrub bits (RAX) must be 0; orphans (RCX) >0 => dirty (leak, recoverable)
+    call fs_vol_scrub64
+    test rax, rax
+    jnz .rec_fail                 ; DANGLING/XLINK/MIRROR bits: not recoverable here
+    jc .rec_fail
+    test rcx, rcx
+    jnz .rec_is_dirty2
+    call fs_vol_check_mirrors64
+    cmp rax, 0
+    je .rec_maybe_clean
+.rec_is_dirty2:
+    mov r12d, 1
+.rec_maybe_clean:
+    test r12d, r12d
+    jz .rec_ok                    ; clean: zero writes performed
+    ; ---- dirty: delete both+all test names (ignore missing) ----
+    lea rsi, [rel fcb_str_scratch]
+    lea rdi, [rel aux_fcb]
+    mov al, 1
+    call fs_make_fcb64
+    jc .rec_fail
+    lea rdi, [rel aux_fcb]
+    call fs_fcb_delete64          ; ignore
+    lea rsi, [rel fcb_str_renamed]
+    lea rdi, [rel aux_fcb]
+    mov al, 1
+    call fs_make_fcb64
+    jc .rec_fail
+    lea rdi, [rel aux_fcb]
+    call fs_fcb_delete64          ; ignore
+    lea rsi, [rel fcb_str_crash]
+    lea rdi, [rel aux_fcb]
+    mov al, 1
+    call fs_make_fcb64
+    jc .rec_fail
+    lea rdi, [rel aux_fcb]
+    call fs_fcb_delete64          ; ignore
+    call fs_vol_discard64
+    call fs_mount_volume64
+    test rax, rax
+    jnz .rec_fail
+    call fs_vol_reclaim_orphans64
+    jc .rec_fail
+    call fs_vol_heal_mirrors64
+    test rax, rax
+    jnz .rec_fail
+    call fs_vol_scrub64
+    test rax, rax
+    jnz .rec_fail
+    test rcx, rcx
+    jnz .rec_fail
+    jc .rec_fail
+    call fs_vol_check_mirrors64
+    cmp rax, 0
+    jne .rec_fail
+    ; verify no test names live after recovery
+    lea rsi, [rel fcb_str_scratch]
+    lea rdi, [rel aux_fcb]
+    mov al, 1
+    call fs_make_fcb64
+    jc .rec_fail
+    lea rdi, [rel aux_fcb]
+    lea rbp, [rel fs_vol_dpb]
+    lea rsi, [rel fs_vol_root]
+    call fs_fcb_open64
+    jnc .rec_fail
+    lea rsi, [rel fcb_str_renamed]
+    lea rdi, [rel aux_fcb]
+    mov al, 1
+    call fs_make_fcb64
+    jc .rec_fail
+    lea rdi, [rel aux_fcb]
+    lea rbp, [rel fs_vol_dpb]
+    lea rsi, [rel fs_vol_root]
+    call fs_fcb_open64
+    jnc .rec_fail
+    lea rsi, [rel fcb_str_crash]
+    lea rdi, [rel aux_fcb]
+    mov al, 1
+    call fs_make_fcb64
+    jc .rec_fail
+    lea rdi, [rel aux_fcb]
+    lea rbp, [rel fs_vol_dpb]
+    lea rsi, [rel fs_vol_root]
+    call fs_fcb_open64
+    jnc .rec_fail
+.rec_ok:
+    xor eax, eax
+    jmp .rec_done
+.rec_fail:
+    mov rax, 1
+.rec_done:
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop r11
+    pop r10
+    pop r9
+    pop r8
+    pop rbp
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rcx
+    pop rbx
+    ret
+
+; ------------------------------------------------------------
 ; Test 70: FCB file ops, read-only, on the real volume.
 ;   MAKEFCB/OPEN/FILESIZE/RNDRD/BLKRD/SRCHFRST/SRCHNXT/CLOSE + dispatch.
+;   Starts with mount-time recovery (see above) so an interrupted 71/83
+;   cannot break the "*.TXT == HELLO+README only" enumeration: dirty test
+;   files are reclaimed before counting. On a clean image the recovery is
+;   read-only (no writes).
 ; ------------------------------------------------------------
 test_fcb_file:
     push rbx
@@ -3413,6 +3699,9 @@ test_fcb_file:
     push r8
     push r9
     push r10
+    call recover_test_namespace_if_dirty
+    test rax, rax
+    jnz .fail70
     ; MAKEFCB "HELLO.TXT" (mode 0, no wildcards -> AL=0)
     lea rsi, [rel fcb_str_hello]
     lea rdi, [rel aux_fcb]
@@ -3526,7 +3815,17 @@ test_fcb_file:
 
 ; ------------------------------------------------------------
 ; Test 71: FCB create/write/read/rename/delete round-trip on SCRATCH.
-;   Starts with a clearing DELETE (idempotent across rebooted runs).
+;   DESTRUCTIVE: real-volume writes in the reserved test namespace
+;   (SCRATCH.TXT + RENAMED.TXT, see include/fs.inc). Only runs under
+;   SELFTEST_DESTRUCTIVE; smoke prints SKIP instead (see dispatch above).
+;   Recovery is mount-time + idempotent: pre-clean deletes both names,
+;   discards RAM (like a reboot), reclaims orphans, heals mirrors and
+;   scrubs, so an interrupted run (torn FAT/root/data windows) cannot
+;   poison the next boot. Pre- and post- phases verify non-test files
+;   (HELLO.TXT + README.TXT) are intact and the volume is scrub-clean
+;   with mirrors matching, so a failed/interrupted cycle cannot destroy
+;   non-test files. Final state is clean (both names gone, orphans 0)
+;   for the shell.
 ; ------------------------------------------------------------
 test_fcb_write:
     push rbx
@@ -3537,13 +3836,65 @@ test_fcb_write:
     push r8
     push r9
     push r10
-    ; Build SCRATCH FCB; clearing delete first (ignore result).
+    ; ---- Reserved-namespace recovery (idempotent after interrupt) ----
+    mov dword [rel fs_fault_inject], 0
+    call fs_mount_volume64
+    test rax, rax
+    jnz .fail71
+    ; clearing deletes first (ignore results: gone already is fine).
     lea rsi, [rel fcb_str_scratch]
     lea rdi, [rel aux_fcb]
     mov al, 1                          ; skip leading seps (none here)
     call handler_makefcb
     lea rdx, [rel aux_fcb]
-    call handler_delete
+    call handler_delete                ; ignore
+    lea rsi, [rel fcb_str_renamed]
+    lea rdi, [rel aux_fcb]
+    mov al, 1
+    call handler_makefcb
+    lea rdx, [rel aux_fcb]
+    call handler_delete                ; ignore
+    ; discard + remount: drop RAM caches like a reboot (heals FAT2).
+    call fs_vol_discard64
+    call fs_mount_volume64
+    test rax, rax
+    jnz .fail71
+    ; reclaim orphans leaked by a torn extend/delete (must not fail).
+    call fs_vol_reclaim_orphans64
+    jc .fail71
+    call fs_vol_heal_mirrors64
+    test rax, rax
+    jnz .fail71
+    ; scrub must be clean with 0 orphans after reclaim.
+    call fs_vol_scrub64
+    test rax, rax
+    jnz .fail71
+    test rcx, rcx
+    jnz .fail71
+    jc .fail71
+    call fs_vol_check_mirrors64
+    cmp rax, 0
+    jne .fail71
+    ; non-test preservation: HELLO + README still readable after recovery.
+    lea rdi, [rel vol_name_hello]
+    lea rsi, [rel vol_read_buf]
+    mov rdx, 1024
+    call fs_vol_read_file64
+    jc .fail71
+    cmp rax, 32
+    jb .fail71
+    lea rdi, [rel vol_name_readme]
+    lea rsi, [rel vol_read_buf]
+    mov rdx, 1024
+    call fs_vol_read_file64
+    jc .fail71
+    cmp rax, 1000
+    jne .fail71
+    ; Rebuild SCRATCH FCB (pre-clean left RENAMED in aux_fcb).
+    lea rsi, [rel fcb_str_scratch]
+    lea rdi, [rel aux_fcb]
+    mov al, 1
+    call handler_makefcb
     ; CREATE
     lea rdx, [rel aux_fcb]
     call handler_create
@@ -3684,6 +4035,36 @@ test_fcb_write:
     lea rdx, [rel aux_fcb]
     call handler_delete
     jnc .fail71
+    ; ---- Post-run: reserved namespace clean + non-test intact ----
+    ; HELLO + README must survive the destructive cycle unchanged.
+    lea rdi, [rel vol_name_hello]
+    lea rsi, [rel vol_read_buf]
+    mov rdx, 1024
+    call fs_vol_read_file64
+    jc .fail71
+    cmp rax, 32
+    jb .fail71
+    cmp dword [rel vol_read_buf], 'Hell'
+    jne .fail71
+    lea rdi, [rel vol_name_readme]
+    lea rsi, [rel vol_read_buf]
+    mov rdx, 1024
+    call fs_vol_read_file64
+    jc .fail71
+    cmp rax, 1000
+    jne .fail71
+    cmp dword [rel vol_read_buf], 'MS-D'
+    jne .fail71
+    ; Volume must be scrub-clean (orphans 0) with mirrors matching.
+    call fs_vol_scrub64
+    test rax, rax
+    jnz .fail71
+    test rcx, rcx
+    jnz .fail71
+    jc .fail71
+    call fs_vol_check_mirrors64
+    cmp rax, 0
+    jne .fail71
     xor eax, eax
     jmp .done71
 .fail71:
@@ -5904,6 +6285,9 @@ test_layout:
 
 ; ------------------------------------------------------------
 ; Test 83: FAT12 crash-consistency — FAT-first order + mirrors + scrub.
+;   DESTRUCTIVE: real-volume writes in the reserved test namespace
+;   (CRASH.TXT, see include/fs.inc). Only runs under SELFTEST_DESTRUCTIVE;
+;   smoke prints SKIP instead (see dispatch above).
 ;   Covers the write-through windows on the real volume with a SCRATCH-
 ;   like file CRASH.TXT (idempotent pre-clean: delete+reclaim+heal, so a
 ;   previous aborted run cannot poison the next boot):
@@ -5994,6 +6378,37 @@ test_fs_crash:
     call fs_vol_check_mirrors64
     cmp rax, 0
     jne .fail83
+    ; non-test preservation after recovery: HELLO + README intact.
+    ; (Uses vol_read_buf as temp; pattern refilled below.)
+    lea rdi, [rel vol_name_hello]
+    lea rsi, [rel vol_read_buf]
+    mov rdx, 1024
+    call fs_vol_read_file64
+    jc .fail83
+    cmp rax, 32
+    jb .fail83
+    lea rdi, [rel vol_name_readme]
+    lea rsi, [rel vol_read_buf]
+    mov rdx, 1024
+    call fs_vol_read_file64
+    jc .fail83
+    cmp rax, 1000
+    jne .fail83
+    ; refill DMA pattern (preservation check clobbered vol_read_buf).
+    lea rdi, [rel vol_read_buf]
+    mov rcx, 512
+    mov al, 'A'
+    mov rbx, rdi
+.refill83:
+    mov [rbx], al
+    inc rbx
+    inc al
+    cmp al, 'Z'+1
+    jne .nowrap83b
+    mov al, 'A'
+.nowrap83b:
+    dec rcx
+    jnz .refill83
     ; ---- A. baseline: create + write RR=0 (128B) ----
     lea rsi, [rel fcb_str_crash]
     lea rdi, [rel aux_fcb]
@@ -6406,6 +6821,23 @@ test_fs_crash:
     call fs_vol_reclaim_orphans64
     jc .fail83
     cmp rax, 1
+    jne .fail83
+    ; non-test preservation: destructive cycle must not harm HELLO/README.
+    lea rdi, [rel vol_name_hello]
+    lea rsi, [rel vol_read_buf]
+    mov rdx, 1024
+    call fs_vol_read_file64
+    jc .fail83
+    cmp rax, 32
+    jb .fail83
+    cmp dword [rel vol_read_buf], 'Hell'
+    jne .fail83
+    lea rdi, [rel vol_name_readme]
+    lea rsi, [rel vol_read_buf]
+    mov rdx, 1024
+    call fs_vol_read_file64
+    jc .fail83
+    cmp rax, 1000
     jne .fail83
     ; ---- final: clean (gone, orphans 0, mirrors match) ----
     call fs_vol_scrub64
@@ -8828,9 +9260,12 @@ msg_test82 db " [82] Layout invariants (same as check-layout)... ",0
 msg_test83 db " [83] FAT12 crash-order (FAT-first + mirrors/scrub)... ",0
 msg_pass db "PASS",13,10,0
 msg_fail db "FAIL",13,10,0
+msg_skip db "SKIP (destructive, needs SELFTEST_DESTRUCTIVE)",13,10,0
 msg_summary db 13,10,"Summary: ",0
 msg_summary2 db " passed, ",0
 msg_summary3 db " failed",13,10,0
+msg_summary4 db "Skipped (destructive): ",0
+msg_summary5 db " (run make full for 71+83)",13,10,0
 msg_phase3_ok db "Phase3 register conversion: ALL TESTS PASS",13,10,0
 msg_phase3_fail db "Phase3: SOME TESTS FAILED",13,10,0
 msg_phase4_ok db "Phase4 addressing transformation: ALL TESTS PASS",13,10,0

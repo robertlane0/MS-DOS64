@@ -65,11 +65,19 @@ NASM := nasm
 # intentionally shifts section starts.)
 NASM_BIN := $(NASM) -f bin -Wall -Werror -Wno-reloc-abs-word -Wno-reloc-abs-dword -Wno-reloc-abs-qword
 NASM_ELF := $(NASM) -f elf64 -g -F dwarf -Wall -Werror -Wno-reloc-abs-word -Wno-reloc-rel-dword -Wno-reloc-abs-qword -I.
-# Self-test control (docs/05 §7): default full build runs the suite.
-#   Full: -DRUN_SELFTEST (default) -> _start runs tests 1..83 then shell.
+# Self-test control (docs/05 §7): default smoke suite is non-destructive.
+#   Smoke (default): -DRUN_SELFTEST -> _start runs PURE + SCRATCH-DEVICE +
+#     REAL-VOLUME READ-ONLY (81 tests); destructive 71/83 print SKIP and leave
+#     the volume untouched. NOTE: even smoke performs bounded device writes
+#     (scratch-LBA patterns at 200/500-511, zeroed after; FAT2 heal on a
+#     diverged mount). Only SKIP_SELFTEST performs zero device writes.
+#   Full (destructive): -DRUN_SELFTEST -DSELFTEST_DESTRUCTIVE -> all 83 tests
+#     including 71 (SCRATCH/RENAMED) + 83 (CRASH) in the reserved namespace
+#     with pre-clean recovery + post-run preservation checks (`make full`).
 #   Lean: -DSKIP_SELFTEST -> _start skips suite, minimal init, shell direct.
-# Override with `make NASM_DEFS=-DSKIP_SELFTEST` or `make lean`.
+# Override with `make NASM_DEFS=-DSKIP_SELFTEST` or `make lean` / `make full`.
 NASM_DEFS ?= -DRUN_SELFTEST
+FULL_DEFS := -DRUN_SELFTEST -DSELFTEST_DESTRUCTIVE
 
 # Kernel objects: all kernel, drivers, lib .asm files -> .o
 KERNEL_SRCS := $(wildcard $(SRC_KERNEL)/*.asm) $(wildcard $(SRC_DRIVERS)/*.asm) $(wildcard $(SRC_LIB)/*.asm)
@@ -79,13 +87,20 @@ KERNEL_OBJS := $(patsubst %.asm,$(BUILD)/%.o,$(KERNEL_SRCS))
 LEAN_BUILD := $(BUILD)/lean
 LEAN_OBJS := $(patsubst %.asm,$(LEAN_BUILD)/%.o,$(KERNEL_SRCS))
 
+# Full (destructive) kernel objects (separate dir so smoke/full/lean coexist)
+FULL_BUILD := $(BUILD)/full
+FULL_OBJS := $(patsubst %.asm,$(FULL_BUILD)/%.o,$(KERNEL_SRCS))
+
 # Ensure build dirs exist for nested paths
 KERNEL_OBJ_DIRS := $(sort $(dir $(KERNEL_OBJS)))
 LEAN_OBJ_DIRS := $(sort $(dir $(LEAN_OBJS)))
+FULL_OBJ_DIRS := $(sort $(dir $(FULL_OBJS)))
 
 all: $(BUILD)/dos64.img
 
 lean: $(BUILD)/dos64-lean.img
+
+full: $(BUILD)/dos64-full.img
 
 $(BUILD):
 	mkdir -p $(BUILD)
@@ -121,6 +136,9 @@ $(KERNEL_OBJ_DIRS):
 $(LEAN_OBJ_DIRS):
 	mkdir -p $@
 
+$(FULL_OBJ_DIRS):
+	mkdir -p $@
+
 # Boot images
 $(BUILD)/mbr.bin: $(SRC_BOOT)/mbr.asm | $(BUILD)
 	$(NASM_BIN) $< -o $@
@@ -138,6 +156,9 @@ $(BUILD)/%.o: %.asm $(LAYOUT_INC) | $(KERNEL_OBJ_DIRS)
 $(LEAN_BUILD)/%.o: %.asm $(LAYOUT_INC) | $(LEAN_OBJ_DIRS)
 	$(NASM_ELF) -DSKIP_SELFTEST $< -o $@
 
+$(FULL_BUILD)/%.o: %.asm $(LAYOUT_INC) | $(FULL_OBJ_DIRS)
+	$(NASM_ELF) $(FULL_DEFS) $< -o $@
+
 $(BUILD)/kernel.elf: $(KERNEL_OBJS) linker.ld | $(BUILD)
 	ld -T linker.ld -o $@ $(BUILD)/src/kernel/main.o $(filter-out $(BUILD)/src/kernel/main.o,$(KERNEL_OBJS)) -nostdlib --fatal-warnings -Map=$(BUILD)/kernel.map || (cat $(BUILD)/kernel.map; exit 1)
 	@echo "Kernel linked: $$(stat -c %s $@) bytes, objects: $(words $(KERNEL_OBJS))"
@@ -147,7 +168,7 @@ $(BUILD)/kernel.bin: $(BUILD)/kernel.elf | $(BUILD)
 	@echo "Kernel binary: $$(stat -c %s $@) bytes ($$(expr $$(stat -c %s $@) / 512) sectors)"
 	@test $$(stat -c %s $@) -le $$(expr $(KERNEL_SECTORS) \* $(IMG_SECTOR_SIZE)) || (echo "Kernel too large for $(KERNEL_SECTORS) sectors! Increase KERNEL_SECTORS in the Makefile disk-layout block"; exit 1)
 
-$(BUILD)/dos64.img: $(BUILD)/mbr.bin $(BUILD)/stage2.bin $(BUILD)/kernel.bin check-layout check-kbc check-serial | $(BUILD)
+$(BUILD)/dos64.img: $(BUILD)/mbr.bin $(BUILD)/stage2.bin $(BUILD)/kernel.bin check-layout check-kbc check-serial check-selftest-modes | $(BUILD)
 	dd if=/dev/zero of=$@ bs=1M count=$(IMG_MB) status=none
 	dd if=$(BUILD)/mbr.bin of=$@ conv=notrunc status=none
 	dd if=$(BUILD)/stage2.bin of=$@ bs=$(IMG_SECTOR_SIZE) seek=1 conv=notrunc status=none
@@ -164,11 +185,28 @@ $(LEAN_BUILD)/kernel.bin: $(LEAN_BUILD)/kernel.elf | $(BUILD)
 	@echo "Lean kernel binary: $$(stat -c %s $@) bytes ($$(expr $$(stat -c %s $@) / 512) sectors)"
 	@test $$(stat -c %s $@) -le $$(expr $(KERNEL_SECTORS) \* $(IMG_SECTOR_SIZE)) || (echo "Lean kernel too large for $(KERNEL_SECTORS) sectors! Increase KERNEL_SECTORS in the Makefile disk-layout block"; exit 1)
 
-$(BUILD)/dos64-lean.img: $(BUILD)/mbr.bin $(BUILD)/stage2.bin $(LEAN_BUILD)/kernel.bin check-layout check-kbc check-serial | $(BUILD)
+$(BUILD)/dos64-lean.img: $(BUILD)/mbr.bin $(BUILD)/stage2.bin $(LEAN_BUILD)/kernel.bin check-layout check-kbc check-serial check-selftest-modes | $(BUILD)
 	dd if=/dev/zero of=$@ bs=1M count=$(IMG_MB) status=none
 	dd if=$(BUILD)/mbr.bin of=$@ conv=notrunc status=none
 	dd if=$(BUILD)/stage2.bin of=$@ bs=$(IMG_SECTOR_SIZE) seek=1 conv=notrunc status=none
 	dd if=$(LEAN_BUILD)/kernel.bin of=$@ bs=$(IMG_SECTOR_SIZE) seek=$(KERNEL_LBA) conv=notrunc status=none
+	python3 -W error tools/mkfat12.py --vol-lba $(VOL_LBA) --vol-totsec $(VOL_SECTORS) --sector-size $(IMG_SECTOR_SIZE) --kernel-lba $(KERNEL_LBA) --kernel-sectors $(KERNEL_SECTORS) $@
+	@echo "Created $@ ($$(stat -c %s $@) bytes)"
+
+$(FULL_BUILD)/kernel.elf: $(FULL_OBJS) linker.ld | $(BUILD)
+	ld -T linker.ld -o $@ $(FULL_BUILD)/src/kernel/main.o $(filter-out $(FULL_BUILD)/src/kernel/main.o,$(FULL_OBJS)) -nostdlib --fatal-warnings -Map=$(FULL_BUILD)/kernel.map || (cat $(FULL_BUILD)/kernel.map; exit 1)
+	@echo "Full kernel linked: $$(stat -c %s $@) bytes, objects: $(words $(FULL_OBJS))"
+
+$(FULL_BUILD)/kernel.bin: $(FULL_BUILD)/kernel.elf | $(BUILD)
+	objcopy -O binary $< $@
+	@echo "Full kernel binary: $$(stat -c %s $@) bytes ($$(expr $$(stat -c %s $@) / 512) sectors)"
+	@test $$(stat -c %s $@) -le $$(expr $(KERNEL_SECTORS) \* $(IMG_SECTOR_SIZE)) || (echo "Full kernel too large for $(KERNEL_SECTORS) sectors! Increase KERNEL_SECTORS in the Makefile disk-layout block"; exit 1)
+
+$(BUILD)/dos64-full.img: $(BUILD)/mbr.bin $(BUILD)/stage2.bin $(FULL_BUILD)/kernel.bin check-layout check-kbc check-serial check-selftest-modes | $(BUILD)
+	dd if=/dev/zero of=$@ bs=1M count=$(IMG_MB) status=none
+	dd if=$(BUILD)/mbr.bin of=$@ conv=notrunc status=none
+	dd if=$(BUILD)/stage2.bin of=$@ bs=$(IMG_SECTOR_SIZE) seek=1 conv=notrunc status=none
+	dd if=$(FULL_BUILD)/kernel.bin of=$@ bs=$(IMG_SECTOR_SIZE) seek=$(KERNEL_LBA) conv=notrunc status=none
 	python3 -W error tools/mkfat12.py --vol-lba $(VOL_LBA) --vol-totsec $(VOL_SECTORS) --sector-size $(IMG_SECTOR_SIZE) --kernel-lba $(KERNEL_LBA) --kernel-sectors $(KERNEL_SECTORS) $@
 	@echo "Created $@ ($$(stat -c %s $@) bytes)"
 
@@ -307,6 +345,33 @@ check-serial:
 	@grep -Eq 'dec[[:space:]]+rcx' $(SRC_KERNEL)/syscall64.asm || (echo "serial FAIL: syscall64.asm com1_write_char lost its bounded counter"; exit 1)
 	@echo "Serial TX OK: bounded serial_try_putc (boot) + serial_try_putc64 (kernel, drop on timeout) in mbr + stage2 + main/shell/cmd/selftest/stack"
 
+# Self-test mode check — source-level assertion that the destructive
+# filesystem tests are isolated from the default boot smoke suite.
+# Deterministic, host-side, no emulator: greps the same NASM sources
+# `make all` assembles. Verifies:
+#   1. selftest64.asm classifies PURE / SCRATCH-DEVICE / READ-ONLY /
+#      DESTRUCTIVE and documents that RUN_SELFTEST performs writes.
+#   2. Tests 71/83 dispatch is gated on SELFTEST_DESTRUCTIVE with a SKIP
+#      path (smoke leaves the volume untouched); the msg_skip + skipped
+#      summary strings exist and R14 counts skips.
+#   3. FULL_DEFS carries -DSELFTEST_DESTRUCTIVE and the full image recipe
+#      exists (`make full` -> dos64-full.img); default NASM_DEFS does NOT
+#      (plain `make` stays smoke).
+#   4. include/fs.inc reserves SCRATCH/RENAMED/CRASH and smoke never creates
+#      them (test 71 pre-clean deletes both, test 83 deletes CRASH).
+check-selftest-modes:
+	@grep -q 'SELFTEST_DESTRUCTIVE' $(SRC_KERNEL)/selftest64.asm || (echo "selftest-modes FAIL: selftest64.asm missing SELFTEST_DESTRUCTIVE gate"; exit 1)
+	@grep -q 'SCRATCH-DEVICE' $(SRC_KERNEL)/selftest64.asm || (echo "selftest-modes FAIL: missing classification header"; exit 1)
+	@grep -q 'msg_skip' $(SRC_KERNEL)/selftest64.asm || (echo "selftest-modes FAIL: missing msg_skip"; exit 1)
+	@grep -q 'Skipped (destructive)' $(SRC_KERNEL)/selftest64.asm || (echo "selftest-modes FAIL: missing skipped summary"; exit 1)
+	@test $$(grep -c 'ifdef SELFTEST_DESTRUCTIVE' $(SRC_KERNEL)/selftest64.asm) -ge 3 || (echo "selftest-modes FAIL: expected >=3 ifdef SELFTEST_DESTRUCTIVE (71+83+69)"; exit 1)
+	@grep -q 'FULL_DEFS := -DRUN_SELFTEST -DSELFTEST_DESTRUCTIVE' Makefile || (echo "selftest-modes FAIL: Makefile missing FULL_DEFS"; exit 1)
+	@grep -q 'dos64-full.img' Makefile || (echo "selftest-modes FAIL: Makefile missing full image recipe"; exit 1)
+	@! grep -Eq '^NASM_DEFS \?= .*SELFTEST_DESTRUCTIVE' Makefile || (echo "selftest-modes FAIL: default NASM_DEFS must stay smoke (no SELFTEST_DESTRUCTIVE)"; exit 1)
+	@grep -q 'SCRATCH.TXT' include/fs.inc || (echo "selftest-modes FAIL: include/fs.inc missing reserved namespace"; exit 1)
+	@grep -q 'check_volume_clean' include/fs.inc || (echo "selftest-modes FAIL: include/fs.inc must reference check_volume_clean"; exit 1)
+	@echo "Selftest modes OK: smoke (81 + 2 SKIP) default, full (83) via make full"
+
 run-bochs: $(BUILD)/dos64.img
 	rm -f $(BUILD)/dos64.img.lock bochs.log serial.log
 	bochs -f bochsrc.txt -q
@@ -317,8 +382,15 @@ run-qemu: $(BUILD)/dos64.img
 run-qemu-lean: $(BUILD)/dos64-lean.img
 	qemu-system-x86_64 -drive file=$(BUILD)/dos64-lean.img,format=raw -serial stdio
 
+run-qemu-full: $(BUILD)/dos64-full.img
+	qemu-system-x86_64 -drive file=$(BUILD)/dos64-full.img,format=raw -serial stdio
+
+run-bochs-full: $(BUILD)/dos64-full.img
+	rm -f $(BUILD)/dos64-full.img.lock bochs.log serial.log
+	bochs -f bochsrc.txt -q
+
 clean:
 	rm -rf $(BUILD)/*.bin $(BUILD)/*.o $(BUILD)/*.img $(BUILD)/*.elf $(BUILD)/*.map $(BUILD)/*.lock
-	rm -rf $(BUILD)/src $(BUILD)/lean $(BUILD)/include
+	rm -rf $(BUILD)/src $(BUILD)/lean $(BUILD)/full $(BUILD)/include
 
-.PHONY: all lean clean run-bochs run-qemu run-qemu-lean check-layout check-layout-neg check-kbc check-serial
+.PHONY: all lean full clean run-bochs run-qemu run-qemu-lean run-qemu-full run-bochs-full check-layout check-layout-neg check-kbc check-serial check-selftest-modes
