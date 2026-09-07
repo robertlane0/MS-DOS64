@@ -372,9 +372,73 @@ check-selftest-modes:
 	@grep -q 'check_volume_clean' include/fs.inc || (echo "selftest-modes FAIL: include/fs.inc must reference check_volume_clean"; exit 1)
 	@echo "Selftest modes OK: smoke (81 + 2 SKIP) default, full (83) via make full"
 
-run-bochs: $(BUILD)/dos64.img
+# Bochs configs — per-variant rendering from bochsrc.txt.in.
+# Fixes the run-bochs-full wrong-image bug: the single static bochsrc.txt
+# hardcodes build/dos64.img, so the -full target built dos64-full.img but
+# booted the smoke image. Each run-bochs* target now renders its own
+# build/bochsrc-<variant>.txt from the template with IMAGE set to its own
+# prerequisite image and boots that file. The template carries every
+# non-path setting (CHS cylinders=20 heads=16 spt=63, cpu model=ryzen);
+# only the ata0-master path differs per variant.
+BOCHSRC_IN := bochsrc.txt.in
+BOCHSRC_SMOKE := $(BUILD)/bochsrc-dos64.txt
+BOCHSRC_FULL := $(BUILD)/bochsrc-dos64-full.txt
+BOCHSRC_LEAN := $(BUILD)/bochsrc-dos64-lean.txt
+
+# Render build/bochsrc-<name>.txt from the template for IMAGE build/<name>.img.
+# IMAGE defaults to the stem mapping (build/<name>.img); an explicit
+# IMAGE=... on the command line overrides it, e.g.
+#   make $(BUILD)/bochsrc-dos64-full.txt IMAGE=$(BUILD)/dos64-full.img
+$(BUILD)/bochsrc-%.txt: $(BOCHSRC_IN) | $(BUILD)
+	sed 's:@IMAGE@:$(if $(IMAGE),$(IMAGE),$(BUILD)/$*.img):g' $< > $@.tmp
+	@! grep -q '@IMAGE@' $@.tmp || (echo "bochsrc FAIL: unsubstituted @IMAGE@ in $@"; rm -f $@.tmp; exit 1)
+	@mv $@.tmp $@
+	@echo "Generated $@ (IMAGE=$(if $(IMAGE),$(IMAGE),$(BUILD)/$*.img))"
+
+# Host check: each run-bochs* target must boot the same image it builds.
+# Deterministic, host-side, no emulator: inspects the template, the
+# rendered configs, and the Makefile wiring. Verifies:
+#   1. The template carries an @IMAGE@ placeholder (no hardcoded image path).
+#   2. Every rendered config references its own image, has no leftover
+#      placeholder, and preserves CHS (cylinders=20, heads=16, spt=63) and
+#      cpu model=ryzen exactly.
+#   3. The Makefile wires each run-bochs* target to its matching
+#      image prerequisite + rendered config, boots that config, and cleans
+#      only its own image lock.
+#   4. Rendered non-comment content matches the checked-in bochsrc.txt
+#      non-comment content except for the ata0-master path (template and
+#      legacy config cannot drift apart on CHS/CPU/serial settings).
+check-bochsrc: $(BOCHSRC_SMOKE) $(BOCHSRC_FULL) $(BOCHSRC_LEAN)
+	@grep -q '@IMAGE@' $(BOCHSRC_IN) || (echo "bochsrc FAIL: $(BOCHSRC_IN) missing @IMAGE@ placeholder"; exit 1)
+	@! grep -v '^#' $(BOCHSRC_IN) | grep -q 'build/dos64.*\.img' || (echo "bochsrc FAIL: $(BOCHSRC_IN) hardcodes an image path; use @IMAGE@"; exit 1)
+	@for pair in "dos64:$(BUILD)/dos64.img" "dos64-full:$(BUILD)/dos64-full.img" "dos64-lean:$(BUILD)/dos64-lean.img"; do \
+		name=$${pair%%:*}; img=$${pair#*:}; cfg=$(BUILD)/bochsrc-$$name.txt; \
+		test -f $$cfg || { echo "bochsrc FAIL: missing rendered $$cfg"; exit 1; }; \
+		grep -q "path=\"$$img\"" $$cfg || { echo "bochsrc FAIL: $$cfg does not reference $$img"; exit 1; }; \
+		! grep -q '@IMAGE@' $$cfg || { echo "bochsrc FAIL: $$cfg has unsubstituted @IMAGE@"; exit 1; }; \
+		grep -q 'cylinders=20, heads=16, spt=63' $$cfg || { echo "bochsrc FAIL: $$cfg lost CHS cylinders=20 heads=16 spt=63"; exit 1; }; \
+		grep -q 'cpu: model=ryzen' $$cfg || { echo "bochsrc FAIL: $$cfg lost cpu model=ryzen"; exit 1; }; \
+	done
+	@grep -Fq 'run-bochs:' Makefile || (echo "bochsrc FAIL: Makefile missing run-bochs"; exit 1)
+	@grep -q '^run-bochs:[^#]*dos64\.img' Makefile || (echo "bochsrc FAIL: run-bochs missing dos64.img prerequisite"; exit 1)
+	@grep -q '^run-bochs-full:[^#]*dos64-full\.img' Makefile || (echo "bochsrc FAIL: run-bochs-full missing dos64-full.img prerequisite"; exit 1)
+	@grep -q '^run-bochs-lean:[^#]*dos64-lean\.img' Makefile || (echo "bochsrc FAIL: run-bochs-lean missing dos64-lean.img prerequisite"; exit 1)
+	@grep -A3 '^run-bochs:' Makefile | grep -Fq 'bochs -f $$(BOCHSRC_SMOKE)' || (echo "bochsrc FAIL: run-bochs must boot $$(BOCHSRC_SMOKE)"; exit 1)
+	@grep -A3 '^run-bochs-full:' Makefile | grep -Fq 'bochs -f $$(BOCHSRC_FULL)' || (echo "bochsrc FAIL: run-bochs-full must boot $$(BOCHSRC_FULL) (not the smoke image)"; exit 1)
+	@grep -A3 '^run-bochs-lean:' Makefile | grep -Fq 'bochs -f $$(BOCHSRC_LEAN)' || (echo "bochsrc FAIL: run-bochs-lean must boot $$(BOCHSRC_LEAN)"; exit 1)
+	@grep -A2 '^run-bochs:' Makefile | grep -Fq 'rm -f $$(BUILD)/dos64.img.lock' || (echo "bochsrc FAIL: run-bochs must clean its own dos64.img.lock"; exit 1)
+	@grep -A2 '^run-bochs-full:' Makefile | grep -Fq 'rm -f $$(BUILD)/dos64-full.img.lock' || (echo "bochsrc FAIL: run-bochs-full must clean its own dos64-full.img.lock"; exit 1)
+	@grep -A2 '^run-bochs-lean:' Makefile | grep -Fq 'rm -f $$(BUILD)/dos64-lean.img.lock' || (echo "bochsrc FAIL: run-bochs-lean must clean its own dos64-lean.img.lock"; exit 1)
+	@! grep -A3 '^run-bochs-full:' Makefile | grep -Fq 'bochs -f bochsrc.txt' || (echo "bochsrc FAIL: run-bochs-full still boots static bochsrc.txt"; exit 1)
+	@for cfg in $(BOCHSRC_SMOKE) $(BOCHSRC_FULL) $(BOCHSRC_LEAN); do \
+		diff <(grep -v '^#' $(BOCHSRC_IN) | grep -v '^$$' | grep -v 'ata0-master') <(grep -v '^#' $$cfg | grep -v '^$$' | grep -v 'ata0-master') || { echo "bochsrc FAIL: $$cfg drifts from $(BOCHSRC_IN) beyond ata0-master path"; exit 1; }; \
+	done
+	@diff <(grep -v '^#' bochsrc.txt | grep -v '^$$') <(grep -v '^#' $(BOCHSRC_SMOKE) | grep -v '^$$') || (echo "bochsrc FAIL: rendered smoke $(BOCHSRC_SMOKE) drifts from checked-in bochsrc.txt beyond header comments"; exit 1)
+	@echo "Bochsrc OK: smoke/full/lean configs reference their own images, CHS 20/16/63 + cpu ryzen preserved"
+
+run-bochs: $(BUILD)/dos64.img $(BOCHSRC_SMOKE)
 	rm -f $(BUILD)/dos64.img.lock bochs.log serial.log
-	bochs -f bochsrc.txt -q
+	bochs -f $(BOCHSRC_SMOKE) -q
 
 run-qemu: $(BUILD)/dos64.img
 	qemu-system-x86_64 -drive file=$(BUILD)/dos64.img,format=raw -serial stdio
@@ -385,12 +449,16 @@ run-qemu-lean: $(BUILD)/dos64-lean.img
 run-qemu-full: $(BUILD)/dos64-full.img
 	qemu-system-x86_64 -drive file=$(BUILD)/dos64-full.img,format=raw -serial stdio
 
-run-bochs-full: $(BUILD)/dos64-full.img
+run-bochs-full: $(BUILD)/dos64-full.img $(BOCHSRC_FULL)
 	rm -f $(BUILD)/dos64-full.img.lock bochs.log serial.log
-	bochs -f bochsrc.txt -q
+	bochs -f $(BOCHSRC_FULL) -q
+
+run-bochs-lean: $(BUILD)/dos64-lean.img $(BOCHSRC_LEAN)
+	rm -f $(BUILD)/dos64-lean.img.lock bochs.log serial.log
+	bochs -f $(BOCHSRC_LEAN) -q
 
 clean:
-	rm -rf $(BUILD)/*.bin $(BUILD)/*.o $(BUILD)/*.img $(BUILD)/*.elf $(BUILD)/*.map $(BUILD)/*.lock
+	rm -rf $(BUILD)/*.bin $(BUILD)/*.o $(BUILD)/*.img $(BUILD)/*.elf $(BUILD)/*.map $(BUILD)/*.lock $(BUILD)/bochsrc-*.txt
 	rm -rf $(BUILD)/src $(BUILD)/lean $(BUILD)/full $(BUILD)/include
 
-.PHONY: all lean full clean run-bochs run-qemu run-qemu-lean run-qemu-full run-bochs-full check-layout check-layout-neg check-kbc check-serial check-selftest-modes
+.PHONY: all lean full clean run-bochs run-bochs-full run-bochs-lean run-qemu run-qemu-lean run-qemu-full check-layout check-layout-neg check-kbc check-serial check-selftest-modes check-bochsrc
