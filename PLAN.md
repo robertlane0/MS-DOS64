@@ -108,37 +108,49 @@ tier’s EXEC/argv/file work; B validates the OS primitives A will need at
 
 ### Phase N0 — Scope freeze + measurements (no code, ~days)
 
-- [ ] Pin submodule: record `nasm/` commit in this file + `AGENTS.md`
+- [x] Pin submodule: record `nasm/` commit in this file + `AGENTS.md`
       (today `nasm-3.02-50-gfbdc88565`); decide “NASM 3.02” as port baseline.
-- [ ] Inventory exact syscall surface NASM needs: `strace -e file,mmap,
+      (Done: pin recorded in `docs/20-nasm-gaps.md` §1; baseline NASM 3.02.)
+- [x] Inventory exact syscall surface NASM needs: `strace -e file,mmap,
       process,signal host-nasm -f bin hello.asm` on Linux; map each call
       to `DISPATCH64` handler or gap. Publish table in `docs/20-nasm-gaps.md`.
-- [ ] Measure: trimmed `outbin`-only host NASM size (`size nasm`), heap
+- [x] Measure: trimmed `outbin`-only host NASM size (`size nasm`), heap
       high-water (`massif`/`getrusage`), and worst-case source size that
       fits the 6 MiB spawn budget. Decides volume-growth question in N4.
-- [ ] Define `MZ64` toolchain contract in `docs/`: entry ABI (regs on
+      (Done: `docs/20-nasm-gaps.md` §3 — `size` + `getrusage ru_maxrss`;
+      no `massif` on host, `getrusage` suffices for the order of magnitude.)
+- [x] Define `MZ64` toolchain contract in `docs/`: entry ABI (regs on
       entry, stack layout, exit-code path via `AH=4Ch`/`INT 20h`), argv
       encoding in `PSP64.cmd_tail`, env pointer ownership.
+      (Done: `docs/20-nasm-gaps.md` §4; argv register pinned by N2a.)
 
 Acceptance: `docs/20-nasm-gaps.md` exists with strace→`INT 21h` map and
 size numbers; N1–N3 estimates updated.
 
 ### Phase N1 — Cross-assemble + run (docs + host tooling, no kernel change)
 
-- [ ] `docs/21-nasm-cross.md`: host `nasm -f bin prog.asm -o PROG.COM`
+- [x] `docs/21-nasm-cross.md`: host `nasm -f bin prog.asm -o PROG.COM`
       constraints for DOS64 (org/origin expectations, flat addresses,
       allowed `INT 21h` subset with examples, `MZ64` header recipe for
       >64 KiB or entry-offset programs).
-- [ ] Ship 2–3 sample programs (`TEST.COM` pattern): `HELLO.COM`
+- [x] Ship 2–3 sample programs (`TEST.COM` pattern): `HELLO.COM`
       (`AH=09h` print + `AH=4Ch` exit), `ECHO.COM` (PSP tail echo),
       `CAT.COM` (`3Fh/40h` copy). Assemble host-side, add to volume via
       `tools/mkfat12.py` client-file support, run under `make run-qemu`.
-- [ ] `make nasm-samples`: host-assembles samples with the submodule
+      (Done: `samples/*.asm` + `build/dos64-nasm.img` via `--extra-file`;
+      `ECHO.COM` is builtin-shadowed in the shell — documented in
+      `docs/21-nasm-cross.md` §3, becomes the N2 argv test.)
+- [x] `make nasm-samples`: host-assembles samples with the submodule
       `nasm/` binary and stages them into the image; `check_volume_clean.py`
       extended to allow-list them.
-- [ ] Shell: document current EXEC limits honestly (“spawns but does not
+      (Done: `make nasm-samples` builds `build/nasm-sub/src/nasm` from the
+      pinned submodule once, assembles with `-f bin`, stages onto
+      `build/dos64-nasm.img`; default smoke/full/lean images unchanged.)
+- [x] Shell: document current EXEC limits honestly (“spawns but does not
       context-switch” → samples return via кооператив? or shell `TEST`
       path only). File follow-up issues for N2 instead of papering over.
+      (Done: `docs/21-nasm-cross.md` §4; N2 follow-ups in
+      `docs/22-n2-exec-design.md`.)
 
 Acceptance: `printf 'HELLO\rEXIT\r' | make run-qemu`-style demo runs a
 host-assembled `.COM` from the volume; docs merged.
@@ -146,7 +158,8 @@ host-assembled `.COM` from the volume; docs merged.
 ### Phase N2 — Real execution + file + argv (kernel, the hard prerequisite)
 
 All items below are required by *both* options A and B. Land and stabilize
-before any assembler work.
+before any assembler work. **Design + acceptance tests (84+) are done in
+`docs/22-n2-exec-design.md`; implementation not started.**
 
 - [ ] **Enter/return.** Extend `proc_spawn64` (`src/kernel/proc64.asm`) +
       `handler_exec` (`src/kernel/syscall64.asm:2367`) with a `run` step:
@@ -206,6 +219,10 @@ Acceptance: `hello.c` (puts/fopen/fwrite/malloc) cross-built on host runs
 on DOS64 under QEMU; no Linux syscalls in the binary (`objdump` check).
 
 ### Phase N4 — Assembler delivery (two tracks)
+
+**Tier-3 milestone breakdown (fundable, not attempted in one jump):
+`docs/23-nasm-port-milestones.md` (N3.1–N3.5, N4B.1–N4B.3, N4A.1–N4A.4,
+N5.1–N5.4).**
 
 **Track B (first): native mini-assembler `ASM64.COM`.**
 
