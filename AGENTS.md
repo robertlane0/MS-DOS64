@@ -675,3 +675,180 @@ Upon completion, you should have:
    - Build and testing instructions
 5. **Test Programs**: Simple 64-bit .EXE programs demonstrating functionality
 6. **Bochs Configuration**: Ready-to-use bochsrc.txt for testing
+
+## Appendix: README detail backup (trimmed 2026-09-07)
+
+This section preserves the implementation details that used to live in
+`README.md` but were too low-level for a README. Kept here so they are not
+lost; most overlap the phase plan above but these exact values/quirks are
+authoritative.
+
+### Self-test modes and write behavior
+- `RUN_SELFTEST` (even smoke) performs bounded device writes: scratch-LBA
+  patterns at LBA 200 / 500–511 (zeroed after) and an optional FAT2 heal on
+  a diverged mount. Only `SKIP_SELFTEST` (`make lean`) performs zero device
+  writes.
+- Smoke (default `make`): PURE + SCRATCH-DEVICE + volume READ-ONLY; tests
+  71/83 print SKIP, volume files untouched. Full (`make full`,
+  `-DSELFTEST_DESTRUCTIVE`): all 83 including 71 (`SCRATCH.TXT` /
+  `RENAMED.TXT`) and 83 (`CRASH.TXT`) in the reserved test namespace with
+  pre-clean recovery + post-run preservation checks.
+- References: `include/fs.inc` (reserved `SCRATCH`/`RENAMED`/`CRASH`
+  namespace), `src/kernel/selftest64.asm` (PURE / SCRATCH-DEVICE /
+  READ-ONLY / DESTRUCTIVE classification header, `msg_skip`, `Skipped
+  (destructive)` summary, `R14` skip count, `>=3 ifdef
+  SELFTEST_DESTRUCTIVE` gates for 69/71/83), `tools/check_volume_clean.py`
+  (pre/post cleanliness proof: same contents before/after, no test files
+  left).
+- Build flags: default `NASM_DEFS ?= -DRUN_SELFTEST`; `FULL_DEFS :=
+  -DRUN_SELFTEST -DSELFTEST_DESTRUCTIVE`; lean `-DSKIP_SELFTEST` skips suite,
+  minimal init, shell direct.
+
+### Serial: bounded best-effort (VGA authoritative)
+- Every TX path uses a bounded helper that drops the char on timeout instead
+  of hanging: `serial_try_putc` in MBR/stage2, `serial_try_putc64` in the
+  kernel (`main.asm`, `SERIAL_TIMEOUT` polls, `ECX`/`CX` counter + `dec`,
+  `stc`/CF=1 drop + `clc`/CF=0 success). `serial_print64` calls it (CF
+  ignored). `shell64`/`cmd64`/`selftest64`/`stack64` call the shared helper
+  and do no direct `mov dx, 0x3FD` UART poll; AUX backend
+  (`syscall64.asm com1_write_char`) has its own `dec rcx` budget + `stc`
+  timeout, `com1_read_char` is single-shot non-blocking.
+- Boot/stage2 KBC waits are likewise bounded (`kbc_wait_timeout`, `CX`
+  counter from `KBC_TIMEOUT*`, `stc` failure branch, 3 checked sites per
+  stage, fallback: skip remaining KBC outs, re-assert fast A20, continue).
+- Effect: boot/suite/shell keep working when the UART is absent or never
+  reports THRE; a stuck UART only loses diagnostics. Normal QEMU/Bochs
+  output unchanged; missing UART reads LSR=0xFF (THRE set) so first poll
+  succeeds.
+- Limits: serial RX 1 byte deep (typing fine, paste bursts can overrun);
+  printer output goes to the COM1 capture.
+
+### Driver/ABI specifics
+- Console: VGA text `0xB8000`, 80×25, cursor/scroll/color; COM1 `0x3F8` for
+  logging + shell I/O. No `INT 10h` in long mode.
+- Disk: ATA PIO LBA28 (`0x1F0`, polling, CHS→LBA conversion). No `INT 13h`
+  in long mode. Disk IRQ only counts + EOIs; no DMA.
+- Keyboard: PS/2 `0x60`/`0x64`, 128-byte queue, US shift/caps tables; polled
+  in tests, IRQ-driven once the shell starts (IRQ1 shares the polling
+  queue). No `INT 16h` in long mode.
+- Memory: byte-based first-fit over `0x200000+` with split, prev+next
+  coalesce, in-place resize, aligned/page allocation, validation, page-table
+  `RW/NX` protection. `MCB64` 40 B (`include/mcb.inc`). `INT 21h
+  AH=48h/49h/4Ah`.
+- ABI: System V AMD64 throughout — 16-byte `RSP` alignment, `RDI RSI RDX
+  RCX R8 R9` args, callee-saved `RBX RBP R12–R15`, near `CALL/RET` only,
+  stack canaries; IST stacks reserved, IDT `IST==0` (no TSS yet).
+
+### Filesystem / process specifics
+- FAT12 engine: BPB→DPB, 12-bit chain walk, root-dir search, multi-cluster
+  read, alloc-on-write with FAT+root write-through; mounted on the real
+  on-image volume (LBA 512–3391, see below). Full FCB record I/O core
+  (sequential + random + block, `RR`-addressed); sequential position mirrors
+  `extent*128+nr` exactly for `recsiz=128`, other sizes address by `RR`.
+  DMA defaults to unset and fails honestly — set with `AH=1Ah` before FCB
+  transfers. Writes are record-granular (`COPY` truncates to exact length).
+- Processes: 664-byte PSP64 (`include/psp.inc`, 512-byte DOS-compatible
+  prefix + 64-bit extensions: R8–R15 storage, CR3, 64-bit RSP, extended
+  handle table) + environment blocks; raw-`.COM` and `MZ64` loaders via
+  `proc_spawn64` (no MZ/PE loader; EXEC spawns but does not
+  context-switch). `INT 21h AH=4Bh/4Ch`, `INT 20h` terminate.
+- Crash-ordering (test 83): FAT-first commit, mirror heal, scrub/reclaim
+  (`CRASH.TXT`).
+
+### Interrupts
+- Full 256-entry IDT (`src/kernel/idt64.asm`); CPU vectors 0–31 with
+  diagnostics (vector/error/`RIP` counters); PIC remapped master `0x28` /
+  slave `0x30` so IRQ1 no longer collides with DOS `0x21`; timer IRQ0@`0x28`,
+  keyboard IRQ1@`0x29` installed, disk IRQ14@`0x36`. Note CPU `#PF` is also
+  vector `0x0E` — do not conflate with PIC IRQ14.
+
+### INT 21h coverage (77-entry DISPATCH64, AH=00h–4Ch)
+- Consoles `01/02/06–0C`, READER/PUNCH/LIST `03/04/05`, disk reset/select
+  `0D/0E`, drive `19`, FCB files `0F–17/21–24/27–29`, pointers `1B/1C/1F`,
+  attrs `1D/1E`, NEWBASE `26`, date/time `2A–2D` (CMOS RTC), VERIFY `2E`,
+  vectors `25/35`, DMA `1A`, handles `3F/40`, alloc `48/49/4A`, EXEC/EXIT
+  `4B/4C`, plus `INT 20h` terminate. Only DOS-reserved slots stay stubbed,
+  as in DOS 1.25 itself (see `docs/19-closure-g1-g6.md` G1 table).
+
+### Memory map (as built)
+| Range | Use |
+|---|---|
+| `0x0000–0x0FFF` | IVT/BDA preserved |
+| `0x1000/0x2000/0x3000` | PML4 / PDPT / PD (identity 0–8 MiB, 4×2 MiB pages) |
+| `0x7C00–0x7DFF` | MBR load address |
+| `0x7E00+` | Stage2 load address |
+| `0x70000` | Kernel staging buffer (copied to `0x100000`; must avoid `0x90000` — BIOS `INT 13h` clobbers transfers ending there) |
+| `0x90000` | Initial `RSP` top (16-aligned); `IOSTACK`/`DSKSTACK` separate 4 KiB BSS stacks (16-aligned tops) |
+| `0xB8000` | VGA text buffer |
+| `0x100000+` | Kernel (linked flat at 1 MiB, ~86 KiB / ~172 sectors, ≤176) |
+| `0x200000+` | Heap (`MCB64` chain, first-fit) |
+
+### Disk layout (`build/dos64.img`, 10 MiB)
+- Canonical values live only in the Makefile disk-layout block
+  (`IMG_MB=10`, `IMG_SECTOR_SIZE=512`, `VOL_LBA=512`, `VOL_SECTORS=2880`,
+  `KERNEL_LBA=16`, `KERNEL_SECTORS=176`), which generates
+  `build/include/layout.inc` for bootloader/kernel and passes the same
+  numbers explicitly to `tools/mkfat12.py`. `make check-layout` (prerequisite
+  of every image build) enforces this; layout overrides on the make
+  command line are rejected.
+| LBA | Contents |
+|---|---|
+| 0 | MBR + boot signature `55 AA` |
+| 1–15 | Stage2 |
+| 16+ | Kernel binary (up to 176 sectors) |
+| 200, 500–511 | ATA/filesystem scratch (kept clear of kernel and volume) |
+| 512–3391 | Real FAT12 volume (1.44 M geometry, stamped at build by `tools/mkfat12.py`) |
+- Volume files: `HELLO.TXT` (1 cluster), `README.TXT` (2-cluster chain),
+  `TEST.COM` (single `RET`, EXEC target), `DATA.BIN` (512 B pattern).
+
+### Shell reference (removed from README)
+```
+A> DIR
+A> TYPE HELLO.TXT
+A> COPY README.TXT BACKUP.TXT
+A> DEL BACKUP.TXT
+A> REN OLD.TXT NEW.TXT
+A> DATE / TIME [MM-DD-YY / HH:MM[:SS]]
+A> CLS / VER / PROMPT / PATH / ECHO text / REM comment / PAUSE
+A> TEST            (loads TEST.COM from the volume and spawns it)
+A> HELP / EXIT
+```
+- `COMMAND64` REPL (`src/kernel/shell64.asm` interactive + `src/kernel/cmd64.asm`
+  parser/builtins/exec/batch): prompt expansion, line editing over PS/2 and
+  serial, volume-backed builtins, batch `%1`–`%9` + `%%` escapes, `*.COM`
+  via `proc_spawn64`. Drivable from a pipe under QEMU.
+- `TYPE` shows the first 4 KiB. PIT runs at the BIOS rate.
+
+### Source map (removed from README)
+```
+src/boot/      mbr.asm (A20, INT13 LBA/CHS) + stage2.asm (mode switch, chunked loads) + gdt.asm
+src/kernel/    main.asm (entry @0x100000, boot glue) + selftest64.asm (83-test harness) + shell64.asm (REPL)
+               cmd64.asm (COMMAND64 parser/builtins/exec/batch) + fat64.asm (UNPACK/PACK)
+               fs64.asm (FAT12 mount/read/flush/alloc + FCB record-I/O core)
+               mem64.asm (MCB64 manager) + proc64.asm (PSP64/env/loader/spawn)
+               syscall64.asm (INT 21h dispatcher, 77 entries)
+               idt64.asm (IDT, PIC master 0x28/slave 0x30) + stack64.asm (ABI/canary)
+src/drivers/   vga.asm (0xB8000 text) + ata.asm (0x1F0 PIO LBA28) + kbd.asm (PS/2 0x60/0x64)
+src/lib/       string64.asm + bcd64.asm (AAM/AAD->DIV, CBW equiv.) + addr64.asm (seg:off->linear)
+include/       fcb.inc/dpb.inc/psp.inc/mcb.inc/regs.inc/fs.inc/stack.inc (64-bit structures)
+tools/         mkfat12.py (stamps FAT12 volume) + check_volume_clean.py (pre/post cleanliness proof)
+MSDOS.ASM / IO.ASM / COMMAND.ASM   original v1.25 reference (STDDOS.ASM legacy wrapper; build uses src/ via Makefile)
+linker.ld      flat link at 0x100000 (.text.start first)   bochsrc.txt   Bochs config
+```
+
+### Verify commands (removed from README)
+```bash
+timeout 25 qemu-system-x86_64 -drive file=build/dos64.img,format=raw -serial stdio -display none
+# tail: Summary: 81 passed, 0 failed ... Skipped (destructive): 2 ... MS-DOS64 shell (COMMAND64). Type HELP for commands.
+timeout 25 qemu-system-x86_64 -drive file=build/dos64-full.img,format=raw -serial stdio -display none
+# tail: Summary: 83 passed, 0 failed ... MS-DOS64 shell (COMMAND64).
+python3 tools/check_volume_clean.py --vol-lba 512 --vol-totsec 2880 --sector-size 512 --kernel-lba 16 --kernel-sectors 176 build/dos64.img
+python3 tools/check_volume_clean.py --vol-lba 512 --vol-totsec 2880 --sector-size 512 --kernel-lba 16 --kernel-sectors 176 build/dos64-full.img
+printf '\rDIR\rTYPE HELLO.TXT\rHELP\rEXIT\r' | timeout 25 qemu-system-x86_64 -drive file=build/dos64.img,format=raw -serial stdio -display none
+rm -f bochs.log serial.log build/dos64.img.lock && make && timeout 25 bochs -f bochsrc.txt -q; cat serial.log
+```
+- Make targets: `make` (smoke img), `make full` (destructive full img),
+  `make lean` (no self-test img), `make run-qemu` / `run-qemu-full` /
+  `run-qemu-lean` / `run-bochs` / `run-bochs-full` (bochs targets clear stale
+  lock first), `make clean`, `make check-layout` / `check-layout-neg` /
+  `check-kbc` / `check-serial` / `check-selftest-modes`.
