@@ -91,6 +91,15 @@ cmd_dbg_putc:
 %define SW_B 0x10
 %define CMD_ENV_SIZE 1024
 %define CMD_BATCH_SIZE 1024
+; Batch-param destination capacity contract (fixed 256B dest, explicit bound).
+; cmd_batch_param_buf is 256 bytes; each of the <=10 params needs its own NUL,
+; so a char store must reserve one terminator byte (used < 255) and a NUL
+; store needs used < 256. Maximum accepted source size is 255 bytes
+; (CMD_BATCH_PARAM_SRC_MAX): dest <= src+1, so 255 chars + 1 NUL exactly fills
+; the buffer; anything longer cannot fit and fails with RAX=1.
+%define CMD_BATCH_PARAMS_MAX 10
+%define CMD_BATCH_PARAM_BUF_SIZE 256
+%define CMD_BATCH_PARAM_SRC_MAX 255
 
 ; cmd_strlen64 RDI=str -> RAX=len max 1024, null->0
 cmd_strlen64:
@@ -1918,7 +1927,19 @@ cmd_exec_external64:
     xor edx, edx
     ret
 
-; cmd_batch_open64 RDI=script RSI=len RDX=params(0 none) -> 0/1
+; cmd_batch_open64 RDI=script RSI=script_len RDX=params(0 none) RCX=params_len(0=NUL-terminated legacy, else length-delimited)
+; -> RAX 0 ok / 1 fail (script bad, params oversize/unterminated/truncated)
+; Batch-param capacity contract: dest CMD_BATCH_PARAM_BUF_SIZE=256 at
+; cmd_batch_param_buf, <=CMD_BATCH_PARAMS_MAX=10 slots (offsets, -1=empty).
+; One byte per param is reserved for its NUL: char store requires used<255,
+; NUL store requires used<256. Maximum accepted source size is
+; CMD_BATCH_PARAM_SRC_MAX=255 bytes (dest<=src+1, so 255 chars + 1 NUL exactly
+; fills the buffer; anything longer cannot fit). Length-delimited preferred:
+; pass RCX=params_len (<=255) to avoid scanning arbitrary memory for NUL;
+; RCX=0 keeps the bounded legacy NUL scan (<=256 bytes for NUL/CR/LF, else
+; fail). On param overflow/truncation returns 1 with the batch deactivated
+; (active=0, len/off=0, params=-1) and no write past dest (guard cmd_tmp_line
+; intact). Interactive shell tails are <=127 bytes, well inside this budget.
 cmd_batch_open64:
     test rdi, rdi
     jz .bad_bo
@@ -1930,9 +1951,12 @@ cmd_batch_open64:
     push r10
     push r12
     push r13
+    push r14
+    push r15
     mov r12, rdi
     mov r13, rsi
-    mov r10, rdx
+    mov r14, rdx
+    mov r15, rcx
     lea rdi, [rel cmd_batch_buf]
     mov rsi, r12
     mov rcx, r13
@@ -1941,9 +1965,6 @@ cmd_batch_open64:
     mov [rel cmd_batch_len], r13
     mov qword [rel cmd_batch_off], 0
     mov byte [rel cmd_batch_active], 1
-    mov rdx, r10
-    ; params: split RDX space-separated into 10 slots (offsets into cmd_batch_params)
-    push rbx
     lea rbx, [rel cmd_batch_params]
     mov qword [rbx], -1
     mov qword [rbx+8], -1
@@ -1955,13 +1976,25 @@ cmd_batch_open64:
     mov qword [rbx+56], -1
     mov qword [rbx+64], -1
     mov qword [rbx+72], -1
-    test rdx, rdx
+    test r14, r14
     jz .params_done
-    lea rdi, [rel cmd_batch_param_buf]
+    lea r8, [rel cmd_batch_param_buf]
+    mov rdi, r8
     xor ecx, ecx
     xor r10d, r10d
+    mov rsi, r14
+    cmp r15, 0
+    je .nul_init_bo
+    cmp r15, CMD_BATCH_PARAM_SRC_MAX
+    ja .param_overflow
+    mov r9, r15
+    jmp .param_loop
+.nul_init_bo:
+    mov r9d, CMD_BATCH_PARAM_BUF_SIZE
 .param_loop:
-    mov al, [rdx]
+    test r9, r9
+    jz .src_exhausted
+    mov al, [rsi]
     test al, al
     jz .param_end
     cmp al, 13
@@ -1980,47 +2013,90 @@ cmd_batch_open64:
     je .param_sep
     ; start new param if prev was sep and slots left
     cmp ecx, 0
-    jne .store_ch_p
-    cmp r10d, 10
+    jne .chk_dst_ch
+    cmp r10d, CMD_BATCH_PARAMS_MAX
     jae .skip_ch_p
     mov r11b, al
     mov rax, rdi
-    push rsi
-    lea rsi, [rel cmd_batch_param_buf]
-    sub rax, rsi
-    pop rsi
+    sub rax, r8
+    cmp rax, CMD_BATCH_PARAM_BUF_SIZE-1
+    jae .param_overflow
     mov [rbx + r10*8], rax
     inc r10d
     mov al, r11b
-.store_ch_p:
+.chk_dst_ch:
+    mov r11b, al
+    mov rax, rdi
+    sub rax, r8
+    cmp rax, CMD_BATCH_PARAM_BUF_SIZE-1
+    jae .param_overflow
+    mov al, r11b
     mov [rdi], al
     inc rdi
     mov ecx, 1
-    inc rdx
+    inc rsi
+    dec r9
     jmp .param_loop
 .param_sep:
     test ecx, ecx
     jz .skip_sep
+    mov rax, rdi
+    sub rax, r8
+    cmp rax, CMD_BATCH_PARAM_BUF_SIZE
+    jae .param_overflow
     mov byte [rdi], 0
     inc rdi
     xor ecx, ecx
 .skip_sep:
-    inc rdx
+    inc rsi
+    dec r9
     jmp .param_loop
 .skip_ch_p:
-    inc rdx
+    inc rsi
+    dec r9
     jmp .param_loop
+.src_exhausted:
+    cmp r15, 0
+    je .param_overflow
+    jmp .param_end
 .param_end:
     test ecx, ecx
     jz .params_done
+    mov rax, rdi
+    sub rax, r8
+    cmp rax, CMD_BATCH_PARAM_BUF_SIZE
+    jae .param_overflow
     mov byte [rdi], 0
 .params_done:
-    pop rbx
+    pop r15
+    pop r14
     pop r13
     pop r12
     pop r10
     pop rbx
     xor eax, eax
+    ret
+.param_overflow:
+    mov byte [rel cmd_batch_active], 0
+    mov qword [rel cmd_batch_len], 0
+    mov qword [rel cmd_batch_off], 0
+    mov qword [rbx], -1
+    mov qword [rbx+8], -1
+    mov qword [rbx+16], -1
+    mov qword [rbx+24], -1
+    mov qword [rbx+32], -1
+    mov qword [rbx+40], -1
+    mov qword [rbx+48], -1
+    mov qword [rbx+56], -1
+    mov qword [rbx+64], -1
+    mov qword [rbx+72], -1
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop r10
+    pop rbx
+    mov rax, 1
     ret
 .bad_bo:
     mov rax, 1
@@ -2837,10 +2913,13 @@ cmd_test_exec:
     pop rbx
     ret
 
-; [49] batch open/next/expand
+; [49] batch open/next/expand + param capacity bounds (256B dest, 255 src max)
 cmd_test_batch:
     push rbx
     push r12
+    push r13
+    push r14
+    push r15
     call cmd_init64
     test rax, rax
     jnz .fail49
@@ -2850,6 +2929,7 @@ cmd_test_batch:
     mov rsi, rax
     lea rdi, [rel t49_script]
     lea rdx, [rel t49_params]
+    xor ecx, ecx
     call cmd_batch_open64
     test rax, rax
     jnz .fail49
@@ -2896,10 +2976,308 @@ cmd_test_batch:
     call cmd_batch_expand64
     cmp rax, 4
     jne .fail49
+    ; ---- length-delimited: same params with explicit RCX=len ----
+    lea rdi, [rel t49_params]
+    call cmd_strlen64
+    mov rcx, rax
+    lea rdi, [rel t49_script]
+    call cmd_strlen64
+    mov rsi, rax
+    lea rdi, [rel t49_script]
+    lea rdx, [rel t49_params]
+    call cmd_batch_open64
+    test rax, rax
+    jnz .fail49
+    lea rdi, [rel t49_pct1]
+    lea rsi, [rel cmd_test_out]
+    mov rdx, 127
+    call cmd_batch_expand64
+    cmp rax, 4
+    jne .fail49
+    ; ---- empty string (NUL only) ----
+    lea rdi, [rel t49_script]
+    call cmd_strlen64
+    mov rsi, rax
+    lea rdi, [rel t49_script]
+    lea rdx, [rel t49_empty]
+    xor ecx, ecx
+    call cmd_batch_open64
+    test rax, rax
+    jnz .fail49
+    cmp qword [rel cmd_batch_params], -1
+    jne .fail49
+    lea rdi, [rel t49_pct1]
+    lea rsi, [rel cmd_test_out]
+    mov rdx, 127
+    call cmd_batch_expand64
+    test rax, rax
+    jnz .fail49
+    ; ---- separator-heavy ----
+    lea rdi, [rel t49_script]
+    call cmd_strlen64
+    mov rsi, rax
+    lea rdi, [rel t49_script]
+    lea rdx, [rel t49_seps]
+    xor ecx, ecx
+    call cmd_batch_open64
+    test rax, rax
+    jnz .fail49
+    cmp qword [rel cmd_batch_params], -1
+    jne .fail49
+    ; ---- exactly-full: 255 'A' + NUL (dest 256 exactly) ----
+    lea rdi, [rel cmd_tmp_line]
+    mov rcx, 256
+    mov al, 0xAA
+.fill49_guard1:
+    mov [rdi], al
+    inc rdi
+    dec rcx
+    jnz .fill49_guard1
+    lea rdi, [rel cmd_test_out]
+    mov rcx, 255
+    mov al, 'A'
+.fill49_full:
+    mov [rdi], al
+    inc rdi
+    dec rcx
+    jnz .fill49_full
+    mov byte [rdi], 0
+    lea rdi, [rel t49_script]
+    call cmd_strlen64
+    mov rsi, rax
+    lea rdi, [rel t49_script]
+    lea rdx, [rel cmd_test_out]
+    xor ecx, ecx
+    call cmd_batch_open64
+    test rax, rax
+    jnz .fail49
+    cmp qword [rel cmd_batch_params], 0
+    jne .fail49
+    cmp qword [rel cmd_batch_params+8], -1
+    jne .fail49
+    lea rdi, [rel cmd_batch_param_buf]
+    cmp byte [rdi+254], 'A'
+    jne .fail49
+    cmp byte [rdi+255], 0
+    jne .fail49
+    lea rdi, [rel cmd_tmp_line]
+    mov rcx, 16
+    mov al, 0xAA
+.chk49_guard1:
+    cmp byte [rdi], al
+    jne .fail49
+    inc rdi
+    dec rcx
+    jnz .chk49_guard1
+    ; length-delimited same 255 with RCX=255 should also succeed
+    lea rdi, [rel t49_script]
+    call cmd_strlen64
+    mov rsi, rax
+    lea rdi, [rel t49_script]
+    lea rdx, [rel cmd_test_out]
+    mov rcx, 255
+    call cmd_batch_open64
+    test rax, rax
+    jnz .fail49
+    ; ---- one-beyond: 256 'A' + NUL -> fail, active=0, guard intact ----
+    lea rdi, [rel cmd_tmp_line]
+    mov rcx, 256
+    mov al, 0xAA
+.fill49_guard2:
+    mov [rdi], al
+    inc rdi
+    dec rcx
+    jnz .fill49_guard2
+    lea rdi, [rel cmd_test_out]
+    mov rcx, 256
+    mov al, 'A'
+.fill49_over:
+    mov [rdi], al
+    inc rdi
+    dec rcx
+    jnz .fill49_over
+    mov byte [rdi], 0
+    lea rdi, [rel t49_script]
+    call cmd_strlen64
+    mov rsi, rax
+    lea rdi, [rel t49_script]
+    lea rdx, [rel cmd_test_out]
+    xor ecx, ecx
+    call cmd_batch_open64
+    test rax, rax
+    jz .fail49
+    cmp byte [rel cmd_batch_active], 0
+    jne .fail49
+    cmp qword [rel cmd_batch_params], -1
+    jne .fail49
+    lea rdi, [rel cmd_tmp_line]
+    mov rcx, 16
+    mov al, 0xAA
+.chk49_guard2:
+    cmp byte [rdi], al
+    jne .fail49
+    inc rdi
+    dec rcx
+    jnz .chk49_guard2
+    ; RCX=256 outright -> fail (exceeds 255 max source)
+    lea rdi, [rel t49_script]
+    call cmd_strlen64
+    mov rsi, rax
+    lea rdi, [rel t49_script]
+    lea rdx, [rel cmd_test_out]
+    mov rcx, 256
+    call cmd_batch_open64
+    test rax, rax
+    jz .fail49
+    cmp byte [rel cmd_batch_active], 0
+    jne .fail49
+    ; ---- ten params at max length: 10x24 'B' + spaces (249 src, 250 dest) ----
+    lea rdi, [rel cmd_tmp_line]
+    mov rcx, 256
+    mov al, 0xAA
+.fill49_guard3:
+    mov [rdi], al
+    inc rdi
+    dec rcx
+    jnz .fill49_guard3
+    lea rdi, [rel cmd_test_file]
+    mov r12d, 10
+.fill49_ten24_outer:
+    mov rcx, 24
+    mov al, 'B'
+.fill49_ten24_inner:
+    mov [rdi], al
+    inc rdi
+    dec rcx
+    jnz .fill49_ten24_inner
+    dec r12d
+    jz .fill49_ten24_done
+    mov byte [rdi], ' '
+    inc rdi
+    jmp .fill49_ten24_outer
+.fill49_ten24_done:
+    mov byte [rdi], 0
+    lea rdi, [rel t49_script]
+    call cmd_strlen64
+    mov rsi, rax
+    lea rdi, [rel t49_script]
+    lea rdx, [rel cmd_test_file]
+    xor ecx, ecx
+    call cmd_batch_open64
+    test rax, rax
+    jnz .fail49
+    cmp qword [rel cmd_batch_params], 0
+    jne .fail49
+    cmp qword [rel cmd_batch_params+72], 225
+    jne .fail49
+    lea rdi, [rel cmd_tmp_line]
+    mov rcx, 16
+    mov al, 0xAA
+.chk49_guard3:
+    cmp byte [rdi], al
+    jne .fail49
+    inc rdi
+    dec rcx
+    jnz .chk49_guard3
+    ; ---- ten overflow: 10x25 (259 src) -> fail ----
+    lea rdi, [rel cmd_tmp_line]
+    mov rcx, 256
+    mov al, 0xAA
+.fill49_guard4:
+    mov [rdi], al
+    inc rdi
+    dec rcx
+    jnz .fill49_guard4
+    lea rdi, [rel cmd_test_file]
+    mov r12d, 10
+.fill49_ten25_outer:
+    mov rcx, 25
+    mov al, 'C'
+.fill49_ten25_inner:
+    mov [rdi], al
+    inc rdi
+    dec rcx
+    jnz .fill49_ten25_inner
+    dec r12d
+    jz .fill49_ten25_done
+    mov byte [rdi], ' '
+    inc rdi
+    jmp .fill49_ten25_outer
+.fill49_ten25_done:
+    mov byte [rdi], 0
+    lea rdi, [rel t49_script]
+    call cmd_strlen64
+    mov rsi, rax
+    lea rdi, [rel t49_script]
+    lea rdx, [rel cmd_test_file]
+    xor ecx, ecx
+    call cmd_batch_open64
+    test rax, rax
+    jz .fail49
+    cmp byte [rel cmd_batch_active], 0
+    jne .fail49
+    lea rdi, [rel cmd_tmp_line]
+    mov rcx, 16
+    mov al, 0xAA
+.chk49_guard4:
+    cmp byte [rdi], al
+    jne .fail49
+    inc rdi
+    dec rcx
+    jnz .chk49_guard4
+    ; ---- long unterminated: 300 spaces, NUL at 300 (no NUL in first 256) ----
+    lea rdi, [rel cmd_tmp_line]
+    mov rcx, 256
+    mov al, 0xAA
+.fill49_guard5:
+    mov [rdi], al
+    inc rdi
+    dec rcx
+    jnz .fill49_guard5
+    lea rdi, [rel cmd_test_file]
+    mov rcx, 300
+    mov al, ' '
+.fill49_longsp:
+    mov [rdi], al
+    inc rdi
+    dec rcx
+    jnz .fill49_longsp
+    mov byte [rdi], 0
+    lea rdi, [rel t49_script]
+    call cmd_strlen64
+    mov rsi, rax
+    lea rdi, [rel t49_script]
+    lea rdx, [rel cmd_test_file]
+    xor ecx, ecx
+    call cmd_batch_open64
+    test rax, rax
+    jz .fail49
+    cmp byte [rel cmd_batch_active], 0
+    jne .fail49
+    lea rdi, [rel cmd_tmp_line]
+    mov rcx, 16
+    mov al, 0xAA
+.chk49_guard5:
+    cmp byte [rdi], al
+    jne .fail49
+    inc rdi
+    dec rcx
+    jnz .chk49_guard5
+    ; ---- RCX oversize outright: short params but RCX=256 -> fail ----
+    lea rdi, [rel t49_script]
+    call cmd_strlen64
+    mov rsi, rax
+    lea rdi, [rel t49_script]
+    lea rdx, [rel t49_params]
+    mov rcx, 256
+    call cmd_batch_open64
+    test rax, rax
+    jz .fail49
     ; bad open (too large)
     lea rdi, [rel t49_script]
     mov rsi, 5000
     xor edx, edx
+    xor ecx, ecx
     call cmd_batch_open64
     test rax, rax
     jz .fail49
@@ -2909,6 +3287,9 @@ cmd_test_batch:
 .fail49:
     mov rax, 1
 .done49:
+    pop r15
+    pop r14
+    pop r13
     pop r12
     pop rbx
     ret
@@ -3031,6 +3412,8 @@ t48_unknown db "FOOBAR",0
 t49_script db "DIR %1",13,10,"TYPE %%FILE",13,10,"REM comment",13,10,0
 times 64-($-t49_script) db 0
 t49_params db "ARG1 ARG2",0
+t49_empty db 0
+t49_seps db " ,;,= ",9,"  ",0
 t49_pct1 db "%1",0
 t49_pct2 db "%2",0
 t50_dir db "DIR",13,0
