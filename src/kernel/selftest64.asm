@@ -1,5 +1,5 @@
 ; MS-DOS64 self-test suite — extracted from main.asm so main stays boot glue.
-; Provides selftest_run64: runs tests 1..90, prints PASS/FAIL + summary + phase lines.
+; Provides selftest_run64: runs tests 1..91, prints PASS/FAIL + summary + phase lines.
 ; Returns RAX = failed count (0 = all pass). Called by _start in full builds.
 ; Lean builds (SKIP_SELFTEST): stub returns 0; test code excluded via RUN_SELFTEST.
 ;
@@ -35,7 +35,7 @@
 ;   -DRUN_SELFTEST alone (default `make`): smoke suite — PURE + SCRATCH-DEVICE
 ;     + REAL-VOLUME READ-ONLY. Tests 71/83/88/89 print SKIP and leave the
 ;     volume untouched (only mount reads + scratch-LBA I/O occur).
-;   -DRUN_SELFTEST -DSELFTEST_DESTRUCTIVE (`make full`): full suite — all 90
+;   -DRUN_SELFTEST -DSELFTEST_DESTRUCTIVE (`make full`): full suite — all 91
 ;     tests including 71/83/88/89 in the reserved namespace with mount-time
 ;     recovery
 ;     (pre-clean delete + discard/remount + reclaim + heal + scrub) and
@@ -307,6 +307,26 @@ extern handler_create_file
 extern hdl_lseek_core
 extern sh_last_exit
 extern cmd_batch_expand64
+extern memcpy
+extern memmove
+extern memset
+extern memcmp
+extern strlen
+extern strcpy
+extern strncpy
+extern strcmp
+extern strncmp
+extern strcat
+extern strchr
+extern malloc
+extern calloc
+extern realloc
+extern free
+extern putchar
+extern puts
+extern printf
+extern sprintf
+extern snprintf
 extern proc_reap64
 extern proc_free_all64
 extern handler_exec
@@ -1896,6 +1916,23 @@ selftest_run64:
     inc r12
     mov rsi, msg_pass
 .t90_done:
+    call vga_print
+    call serial_print64
+
+    ; ---- Test 91: libc core (N3.1+N3.2, PURE) ----
+    mov rsi, msg_test91
+    call vga_print
+    call serial_print64
+    call test_libc_core
+    test rax, rax
+    jz .t91_pass
+    inc r13
+    mov rsi, msg_fail
+    jmp .t91_done
+.t91_pass:
+    inc r12
+    mov rsi, msg_pass
+.t91_done:
     call vga_print
     call serial_print64
 
@@ -10338,6 +10375,370 @@ test_shell_enter:
     ret
 
 ; ------------------------------------------------------------
+; Test 91: libc core (N3.1+N3.2, PURE).
+;   String battery + malloc/calloc/realloc/free semantics (incl 16B heap
+;   alignment) + printf/sprintf/snprintf return counts and content.
+;   PURE: VGA output only (return values asserted, no capture needed).
+test_libc_core:
+    push rbx
+    push rcx
+    push rdx
+    push rsi
+    push rdi
+    push r8
+    push r9
+    push r10
+    push r11
+    push r12
+    push r13
+    push r14
+    push r15
+    call mem_reset64
+    call proc_init64
+    ; --- memcpy + memcmp ---
+    lea rdi, [rel t91_a]
+    lea rsi, [rel t91_hello]
+    mov rdx, 6
+    call memcpy
+    lea rdi, [rel t91_a]
+    lea rsi, [rel t91_hello]
+    mov rdx, 6
+    call memcmp
+    test rax, rax
+    jnz .fail91
+    ; --- memmove overlap: "abcdef" -> dst+2, n=3 -> "ababcf" ---
+    lea rdi, [rel t91_a]
+    lea rsi, [rel t91_alpha]
+    mov rdx, 7
+    call memcpy
+    lea rdi, [rel t91_a+2]
+    lea rsi, [rel t91_a]
+    mov rdx, 3
+    call memmove
+    lea rdi, [rel t91_a]
+    lea rsi, [rel t91_ababcf]
+    mov rdx, 7
+    call memcmp
+    test rax, rax
+    jnz .fail91
+    ; --- memset 16 x 0x5A ---
+    lea rdi, [rel t91_a]
+    mov esi, 0x5A
+    mov rdx, 16
+    call memset
+    cmp byte [rel t91_a], 0x5A
+    jne .fail91
+    cmp byte [rel t91_a+15], 0x5A
+    jne .fail91
+    ; --- memcmp signs: 'Z' vs 'a' ---
+    mov byte [rel t91_a], 'Z'
+    mov byte [rel t91_b], 'a'
+    lea rdi, [rel t91_a]
+    lea rsi, [rel t91_b]
+    mov rdx, 1
+    call memcmp
+    cmp rax, -1
+    jne .fail91
+    lea rdi, [rel t91_b]
+    lea rsi, [rel t91_a]
+    mov rdx, 1
+    call memcmp
+    cmp rax, 1
+    jne .fail91
+    ; --- strlen ---
+    lea rdi, [rel t91_hello]
+    call strlen
+    cmp rax, 5
+    jne .fail91
+    lea rdi, [rel t91_nul]
+    call strlen
+    test rax, rax
+    jnz .fail91
+    ; --- strcpy + strcmp ---
+    lea rdi, [rel t91_b]
+    lea rsi, [rel t91_hello]
+    call strcpy
+    lea rdi, [rel t91_b]
+    lea rsi, [rel t91_hello]
+    call strcmp
+    test rax, rax
+    jnz .fail91
+    lea rdi, [rel t91_mixed]      ; "aBc" vs "abc": 0x42 < 0x62
+    lea rsi, [rel t91_alpha]
+    call strcmp
+    cmp rax, -1
+    jne .fail91
+    ; --- strncpy: 5 of 11, no NUL, no pad past it ---
+    lea rdi, [rel t91_a]
+    mov esi, 'X'
+    mov rdx, 8
+    call memset
+    lea rdi, [rel t91_a]
+    lea rsi, [rel t91_alpha]      ; "abcdef..."
+    mov rdx, 5
+    call strncpy
+    lea rdi, [rel t91_a]
+    lea rsi, [rel t91_alpha]
+    mov rdx, 5
+    call memcmp                   ; first 5 == "abcde"
+    test rax, rax
+    jnz .fail91
+    cmp byte [rel t91_a+5], 'X'   ; untouched past n (no NUL in 5)
+    jne .fail91
+    lea rdi, [rel t91_b]
+    lea rsi, [rel t91_hi]         ; "hi"
+    mov rdx, 8
+    call strncpy                  ; "hi\0" + pads
+    cmp byte [rel t91_b+2], 0
+    jne .fail91
+    cmp byte [rel t91_b+7], 0
+    jne .fail91
+    ; --- strncmp / strcat / strchr ---
+    lea rdi, [rel t91_alpha]
+    lea rsi, [rel t91_ababcf]     ; "ab..." == "ab", differ at [2]
+    mov rdx, 2
+    call strncmp
+    test rax, rax
+    jnz .fail91
+    lea rdi, [rel t91_alpha]
+    lea rsi, [rel t91_ababcf]
+    mov rdx, 3
+    call strncmp
+    test rax, rax
+    jz .fail91
+    lea rdi, [rel t91_b]
+    lea rsi, [rel t91_hi]         ; t91_b = "hi"
+    call strcpy
+    lea rdi, [rel t91_b]
+    lea rsi, [rel t91_bang]       ; +"!" -> "hi!"
+    call strcat
+    lea rdi, [rel t91_b]
+    lea rsi, [rel t91_hi_bang]
+    call strcmp
+    test rax, rax
+    jnz .fail91
+    lea rdi, [rel t91_hello]
+    mov esi, 'l'
+    call strchr
+    lea rdx, [rel t91_hello]
+    add rdx, 2
+    cmp rax, rdx
+    jne .fail91
+    lea rdi, [rel t91_hello]
+    mov esi, 'z'
+    call strchr
+    test rax, rax
+    jnz .fail91
+    lea rdi, [rel t91_hello]
+    xor esi, esi
+    call strchr
+    lea rdx, [rel t91_hello]
+    add rdx, 5
+    cmp rax, rdx
+    jne .fail91
+    ; --- malloc/free basics + 16B alignment ---
+    mov edi, 64
+    call malloc
+    test rax, rax
+    jz .fail91
+    test rax, 15
+    jnz .fail91
+    mov r12, rax
+    mov rdi, rax
+    mov esi, 0xA5
+    mov rdx, 64
+    call memset
+    cmp byte [r12], 0xA5
+    jne .fail91
+    cmp byte [r12+63], 0xA5
+    jne .fail91
+    xor edi, edi                  ; malloc(0) -> live block
+    call malloc
+    test rax, rax
+    jz .fail91
+    mov r13, rax
+    mov rdi, rax
+    call free
+    mov rdi, r12
+    call free
+    mov rdi, r12                  ; double free: silent, heap intact
+    call free
+    xor edi, edi                  ; free(NULL): silent
+    call free
+    ; --- realloc grow preserves prefix ---
+    mov edi, 8
+    call malloc
+    test rax, rax
+    jz .fail91
+    mov r12, rax
+    mov rdi, rax
+    lea rsi, [rel t91_ABCDEFGH]
+    mov rdx, 8
+    call memcpy
+    mov rdi, r12
+    mov esi, 64
+    call realloc
+    test rax, rax
+    jz .fail91
+    mov r12, rax
+    mov rdi, rax
+    lea rsi, [rel t91_ABCDEFGH]
+    mov rdx, 8
+    call memcmp
+    test rax, rax
+    jnz .fail91
+    mov rdi, r12
+    call free
+    ; --- realloc(NULL,n) + realloc(p,0) ---
+    xor edi, edi
+    mov esi, 16
+    call realloc
+    test rax, rax
+    jz .fail91
+    mov rdi, rax
+    xor esi, esi
+    call realloc
+    test rax, rax
+    jnz .fail91
+    ; --- calloc zeroes ---
+    mov edi, 4
+    mov esi, 8
+    call calloc
+    test rax, rax
+    jz .fail91
+    mov r12, rax
+    cmp dword [r12], 0
+    jne .fail91
+    cmp dword [r12+28], 0
+    jne .fail91
+    mov rdi, r12
+    call free
+    ; --- printf return counts (VGA noise, values asserted) ---
+    lea rdi, [rel t91_hi]         ; "hi" -> 2
+    call printf
+    cmp rax, 2
+    jne .fail91
+    lea rdi, [rel t91_fmt_d]
+    mov rsi, -42                  ; r64 dest: imm32 sign-extends (mov esi
+    call printf                   ; would zero-extend to +4294967254!)
+    cmp rax, 3                    ; "-42"
+    jne .fail91
+    lea rdi, [rel t91_fmt_d]
+    mov esi, 0x80000000           ; INT32_MIN (widest %d edge) -> 11 chars
+    call printf
+    cmp rax, 11                   ; "-2147483648"
+    jne .fail91
+    lea rdi, [rel t91_fmt_u]
+    mov esi, 42
+    call printf
+    cmp rax, 2
+    jne .fail91
+    lea rdi, [rel t91_fmt_x]
+    mov esi, 0xAB
+    call printf
+    cmp rax, 2                    ; "ab"
+    jne .fail91
+    lea rdi, [rel t91_fmt_X]
+    mov esi, 0xAB
+    call printf
+    cmp rax, 2                    ; "AB"
+    jne .fail91
+    lea rdi, [rel t91_fmt_s]
+    lea rsi, [rel t91_hey]
+    call printf
+    cmp rax, 3
+    jne .fail91
+    lea rdi, [rel t91_fmt_s]
+    xor esi, esi
+    call printf
+    cmp rax, 6                    ; "(null)"
+    jne .fail91
+    lea rdi, [rel t91_fmt_c]
+    mov esi, 65
+    call printf
+    cmp rax, 1
+    jne .fail91
+    lea rdi, [rel t91_fmt_pct]
+    call printf
+    cmp rax, 1
+    jne .fail91
+    lea rdi, [rel t91_fmt_p]
+    xor esi, esi
+    call printf
+    cmp rax, 3                    ; "0x0"
+    jne .fail91
+    lea rdi, [rel t91_hi]
+    call puts
+    test rax, rax
+    jnz .fail91
+    mov edi, 'A'
+    call putchar
+    cmp rax, 'A'
+    jne .fail91
+    ; --- sprintf content + snprintf bounds (C99 would-be) ---
+    lea rdi, [rel t91_a]
+    lea rsi, [rel t91_fmt_full]
+    mov rdx, -42                  ; sign-extending form (see %d case above)
+    lea rcx, [rel t91_hey]
+    mov r8d, 0xAB
+    call sprintf
+    cmp rax, 10                   ; "-42/hey/ab"
+    jne .fail91
+    lea rdi, [rel t91_a]
+    lea rsi, [rel t91_full10]
+    mov rdx, 11
+    call memcmp
+    test rax, rax
+    jnz .fail91
+    lea rdi, [rel t91_a]
+    mov esi, 6
+    lea rdx, [rel t91_fmt_d]
+    mov rcx, -12345               ; sign-extending form (see %d case above)
+    call snprintf
+    cmp rax, 6                    ; would-be "-12345"
+    jne .fail91
+    lea rdi, [rel t91_a]
+    lea rsi, [rel t91_m1234]
+    mov rdx, 5
+    call memcmp                   ; stored "-1234"
+    test rax, rax
+    jnz .fail91
+    cmp byte [rel t91_a+5], 0     ; NUL terminator
+    jne .fail91
+    mov byte [rel t91_a], 'X'
+    lea rdi, [rel t91_a]
+    xor esi, esi                  ; n=0: writes nothing
+    lea rdx, [rel t91_fmt_d]
+    mov ecx, 42
+    call snprintf
+    cmp rax, 2
+    jne .fail91
+    cmp byte [rel t91_a], 'X'     ; untouched
+    jne .fail91
+    call mem_validate64
+    test rax, rax
+    jnz .fail91
+    xor eax, eax
+    jmp .done91
+.fail91:
+    mov rax, 1
+.done91:
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop r11
+    pop r10
+    pop r9
+    pop r8
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rcx
+    pop rbx
+    ret
+
+; ------------------------------------------------------------
 
 section .rodata
 msg_test1 db " [1] Register mapping (AX->RAX, R8-R15)... ",0
@@ -10432,6 +10833,30 @@ msg_test89 db " [89] Truncate/delete... ",0
 msg_test90 db " [90] Shell EXEC enter + ERRORLEVEL... ",0
 t90_test db "TEST",0
 t90_errsrc db "%ERRORLEVEL%",0
+msg_test91 db " [91] libc core (string/heap/printf)... ",0
+t91_hello db "hello",0
+t91_alpha db "abcdef",0
+t91_ababcf db "ababcf",0
+t91_mixed db "aBc",0
+t91_nul db 0
+t91_bang db "!",0
+t91_hi_bang db "hi!",0
+t91_ABCDEFGH db "ABCDEFGH"
+t91_hi db "hi",0
+t91_hey db "hey",0
+t91_neg42 db "-42",0
+t91_ab db "ab",0
+t91_full10 db "-42/hey/ab",0
+t91_m1234 db "-1234",0
+t91_fmt_d db "%d",0
+t91_fmt_u db "%u",0
+t91_fmt_x db "%x",0
+t91_fmt_X db "%X",0
+t91_fmt_s db "%s",0
+t91_fmt_c db "%c",0
+t91_fmt_pct db "%%",0
+t91_fmt_p db "%p",0
+t91_fmt_full db "%d/%s/%x",0
 t88_scratch db "SCRATCH.TXT",0
 t88_patch db 0xE0,0xE1,0xE2,0xE3,0xE4,0xE5,0xE6,0xE7,0xE8,0xE9
 t88_tail db "APPENDED!!",13,10
@@ -10710,6 +11135,9 @@ t87_fds: resq 13
 t88_out: resb 1024
 t88_in: resb 2048
 t88_exp: resb 1024
+; --- Test 91: libc scratch (PURE, no disk I/O) ---
+t91_a: resb 64
+t91_b: resb 64
 
 
 %else

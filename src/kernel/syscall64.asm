@@ -2910,14 +2910,16 @@ handler_alloc_mem:
     call mem_alloc64
     test rax, rax
     jz .fail_a
-    ; success: RAX = linear, set AL=0, also update trap frame if via INT21
-    ; If called via dispatch, need to write back to SPSAVE frame
+    ; success: RAX = linear intact, also update trap frame if via INT21.
+    ; If called via dispatch, need to write back to SPSAVE frame. NOTE: the
+    ; FULL address is stored (no AL=0 clear): trap callers (N3 libc malloc)
+    ; need every address bit, and CF=0 already signals success. Clearing AL
+    ; would corrupt bit 0..7 of the returned pointer for 16-aligned blocks.
     push rax
     mov rbx, [rel SPSAVE64]
     test rbx, rbx
     jz .no_frame
     mov [rbx + STKPTRS64.rax_save], rax
-    mov byte [rbx + STKPTRS64.rax_save], 0 ; AL 0 success
     ; Also store max free in RBX save for failure case? Keep RBX as is
 .no_frame:
     pop rax

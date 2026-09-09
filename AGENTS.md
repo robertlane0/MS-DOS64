@@ -1,7 +1,7 @@
 # AGENTS.md: Converting MS-DOS v1.25 ASM to 64-bit BIOS Bootable System
 
-> **Status (2026-09-07): implementation complete — smoke 86 + 4 SKIP
-> (`make`, default, non-destructive) and full 90/90 PASS (`make full`,
+> **Status (2026-09-07): implementation complete — smoke 87 + 4 SKIP
+> (`make`, default, non-destructive) and full 91/91 PASS (`make full`,
 > destructive 71/83 in the reserved SCRATCH/RENAMED/CRASH namespace with
 > mount-time recovery) on QEMU, then the interactive `COMMAND64`
 > shell (`src/kernel/shell64.asm`).
@@ -852,9 +852,9 @@ linker.ld      flat link at 0x100000 (.text.start first)
 ### Verify commands (removed from README)
 ```bash
 timeout 25 qemu-system-x86_64 -drive file=build/dos64.img,format=raw -serial stdio -display none
-# tail: Summary: 86 passed, 0 failed ... Skipped (destructive): 4 ... MS-DOS64 shell (COMMAND64). Type HELP for commands.
+# tail: Summary: 87 passed, 0 failed ... Skipped (destructive): 4 ... MS-DOS64 shell (COMMAND64). Type HELP for commands.
 timeout 25 qemu-system-x86_64 -drive file=build/dos64-full.img,format=raw -serial stdio -display none
-# tail: Summary: 90 passed, 0 failed ... MS-DOS64 shell (COMMAND64).
+# tail: Summary: 91 passed, 0 failed ... MS-DOS64 shell (COMMAND64).
 python3 tools/check_volume_clean.py --vol-lba 512 --vol-totsec 2880 --sector-size 512 --kernel-lba 16 --kernel-sectors 224 build/dos64.img
 python3 tools/check_volume_clean.py --vol-lba 512 --vol-totsec 2880 --sector-size 512 --kernel-lba 16 --kernel-sectors 224 build/dos64-full.img
 printf '\rDIR\rTYPE HELLO.TXT\rHELP\rEXIT\r' | timeout 25 qemu-system-x86_64 -drive file=build/dos64.img,format=raw -serial stdio -display none

@@ -91,8 +91,13 @@ NASM_ELF := $(NASM) -f elf64 -g -F dwarf -Wall -Werror -Wno-reloc-abs-word -Wno-
 NASM_DEFS ?= -DRUN_SELFTEST
 FULL_DEFS := -DRUN_SELFTEST -DSELFTEST_DESTRUCTIVE
 
-# Kernel objects: all kernel, drivers, lib .asm files -> .o
-KERNEL_SRCS := $(wildcard $(SRC_KERNEL)/*.asm) $(wildcard $(SRC_DRIVERS)/*.asm) $(wildcard $(SRC_LIB)/*.asm)
+# Kernel objects: all kernel, drivers, lib .asm files -> .o, plus the
+# freestanding libc core (N3: unit-tested in-harness via INT 21h, which works
+# identically from harness and child context). Listed EXPLICITLY, never by
+# wildcard: crt0.asm must never link into the kernel (duplicate _start).
+SRC_LIBC := src/libc
+LIBC_KERN_SRCS := $(SRC_LIBC)/libc64.asm
+KERNEL_SRCS := $(wildcard $(SRC_KERNEL)/*.asm) $(wildcard $(SRC_DRIVERS)/*.asm) $(wildcard $(SRC_LIB)/*.asm) $(LIBC_KERN_SRCS)
 KERNEL_OBJS := $(patsubst %.asm,$(BUILD)/%.o,$(KERNEL_SRCS))
 
 # Lean kernel objects (separate dir so full/lean can coexist)
@@ -382,7 +387,7 @@ check-selftest-modes:
 	@! grep -Eq '^NASM_DEFS \?= .*SELFTEST_DESTRUCTIVE' Makefile || (echo "selftest-modes FAIL: default NASM_DEFS must stay smoke (no SELFTEST_DESTRUCTIVE)"; exit 1)
 	@grep -q 'SCRATCH.TXT' include/fs.inc || (echo "selftest-modes FAIL: include/fs.inc missing reserved namespace"; exit 1)
 	@grep -q 'check_volume_clean' include/fs.inc || (echo "selftest-modes FAIL: include/fs.inc must reference check_volume_clean"; exit 1)
-	@echo "Selftest modes OK: smoke (86 + 4 SKIP) default, full (90) via make full"
+	@echo "Selftest modes OK: smoke (87 + 4 SKIP) default, full (91) via make full"
 
 # Debug-hook check — source-level assertion that test/fail-point markers
 # stay out of release objects (same pattern as SELFTEST_DESTRUCTIVE).
