@@ -13,6 +13,8 @@
 bits 64
 default rel
 
+%include "include/fs.inc"   ; ATA_SCRATCH_LBA (single-sourced scratch layout)
+
 %define ATA_DATA        0x1F0
 %define ATA_ERROR       0x1F1
 %define ATA_SECCNT      0x1F2
@@ -784,8 +786,9 @@ ata_test_mbr_read:
     pop rdi
     ret
 
-; Test write LBA then read back (uses safe scratch LBA 200)
-; We pick LBA 200 which is beyond kernel (kernel at 16..143 max 128 sectors) and below FS scratch 500+. Image 10M (~20480 sectors), so 200 safe.
+; Test write LBA then read back (uses safe scratch ATA_SCRATCH_LBA)
+; We pick ATA_SCRATCH_LBA (400: clear of kernel even grown, boot, FS scratch
+; 500+ and volume 512+; QEMU is LBA-only). Image 10M (~20480 sectors).
 ; (Was LBA 100, which overlapped kernel once kernel grew past 84 sectors in Phase10.)
 ata_test_write_readback:
     push rdi
@@ -804,9 +807,9 @@ ata_test_write_readback:
     inc al
     dec rcx
     jnz .fill
-    ; Write to LBA 200 (safe scratch, beyond kernel 16..143, below FS 500+)
+    ; Write to ATA_SCRATCH_LBA (safe scratch, clear of kernel/boot/FS/volume)
     lea rdi, [rel ata_test_buf]
-    mov rsi, 200
+    mov rsi, ATA_SCRATCH_LBA
     mov rdx, 1
     call ata_write_lba28
     test rax, rax
@@ -823,7 +826,7 @@ ata_test_write_readback:
     jnz .clear
     ; Read back
     lea rdi, [rel ata_test_buf]
-    mov rsi, 200
+    mov rsi, ATA_SCRATCH_LBA
     mov rdx, 1
     call ata_read_lba28
     test rax, rax
@@ -840,8 +843,7 @@ ata_test_write_readback:
     inc al
     dec rcx
     jnz .verify
-    ; Restore original? Not needed, but we wrote pattern to disk LBA100 - could leave
-    ; Optional: zero it back to avoid dirtying image for next boot? Write zeros
+    ; Zero the scratch LBA back to avoid dirtying the image for next boot
     lea rdi, [rel ata_test_buf]
     mov rcx, 512
     xor al, al
@@ -852,7 +854,7 @@ ata_test_write_readback:
     dec rcx
     jnz .zero2
     lea rdi, [rel ata_test_buf]
-    mov rsi, 200
+    mov rsi, ATA_SCRATCH_LBA
     mov rdx, 1
     call ata_write_lba28
     ; ignore result

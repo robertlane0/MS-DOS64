@@ -48,8 +48,12 @@ endstruc
 
 ; --- Phase 7 scratch LBAs on dos64.img (IMG_MB, see Makefile) ---
 ; Kernel occupies [KERNEL_LBA, KERNEL_LBA+KERNEL_SECTORS).
-; ATA Phase-5 test uses LBA 200.
+; ATA Phase-5 test uses ATA_SCRATCH_LBA (moved 200->400 by the N3-pre size
+; plan so the kernel slot could grow past 184; 400 is clear of boot (0-15),
+; kernel even at 256 extents (ends 272), FS scratch (500+) and volume (512+);
+; QEMU is LBA-only so no CHS placement constraint applies).
 ; Phase-7 FS tests use 500..511 (12 sectors) — safely beyond kernel, below end.
+%define ATA_SCRATCH_LBA  400
 %define FS_SCRATCH_LBA   500
 %define FS_SCRATCH_LBA2  501
 %define FS_FILE_LBA_BASE 510  ; file-data base when DPB firrec remapped for test [26]
@@ -73,8 +77,8 @@ endstruc
 ; --- Real on-image FAT12 volume (tools/mkfat12.py, 1.44M geometry) ---
 ; Extent [FS_VOL_LBA, FS_VOL_LBA+FS_VOL_TOTSEC): boot+BPB, 2x9 FAT,
 ; 14-sec root, data clusters 2..2848. Must stay clear of the kernel
-; extent [KERNEL_LBA, KERNEL_LBA+KERNEL_SECTORS), ATA scratch (200),
-; and FS scratch (500..511).
+; extent [KERNEL_LBA, KERNEL_LBA+KERNEL_SECTORS), ATA scratch
+; (ATA_SCRATCH_LBA), and FS scratch (500..511).
 ; Single source of truth: the Makefile disk-layout block generates
 ; build/include/layout.inc, which defines FS_VOL_LBA / FS_VOL_TOTSEC
 ; (aliases of VOL_LBA / VOL_SECTORS). Do not hardcode values here.

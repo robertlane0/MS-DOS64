@@ -25,12 +25,12 @@ IMG_SECTOR_SIZE := 512
 VOL_LBA := 512
 VOL_SECTORS := 2880
 KERNEL_LBA := 16
-# 184 (was 176): N2b handle layer (~1.5 KiB) overflowed the 176-sector slot
-# with N2c/d still to come. Extent [16,200) stays clear of ATA scratch 200
-# (adjacent, half-open: legal), FS scratch 500-511, and volume 512+.
-# 184 is the max before scratch LBA 200; beyond N2, revisit via scratch
-# relocation, not silent slot pressure (see PLAN.md N4A.3).
-KERNEL_SECTORS := 184
+# 224 (was 184): N3-pre size plan (PLAN.md item 8) — the full kernel closed
+# N2d at 183/184 sectors, so ATA scratch moved 200->400 (ATA_SCRATCH_LBA in
+# include/fs.inc) to reopen growth room. Extent [16,240) stays clear of ATA
+# scratch 400, FS scratch 500-511, and volume 512+. Never grow the slot by
+# squeezing scratch: relocate first, then bump (see PLAN.md N4A.3).
+KERNEL_SECTORS := 224
 LAYOUT_INC := $(BUILD)/include/layout.inc
 
 # Reject unsupported layout overrides. (Environment values are already

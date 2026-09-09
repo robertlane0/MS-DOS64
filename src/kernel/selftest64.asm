@@ -13,8 +13,9 @@
 ;     enter/return round-trip, exit code, argv echo — memory images only),
 ;     87 (N2b handle open/close read-only + scrub/mirror invariance).
 ;   SCRATCH-DEVICE (bounded ATA writes to reserved LBAs outside the volume,
-;     cleaned up): 14 (LBA 200 pattern + zero restore), 25 (FS_SCRATCH 500/502
-;     + zero), 26 (FS_FILE_LBA_BASE 510 file-data scratch). Safe every boot.
+;     cleaned up): 14 (ATA_SCRATCH_LBA pattern + zero restore),
+;     25 (FS_SCRATCH 500/502 + zero), 26 (FS_FILE_LBA_BASE 510 file-data
+;     scratch). Safe every boot.
 ;   REAL-VOLUME READ-ONLY (mount + reads, no FAT/root/data writes): 67 (mount +
 ;     HELLO/README reads), 70 (FCB open/rndread/search/close), 72 (shell DIR/
 ;     TYPE/TEST dispatch), 76 (negative reads into scratch DPB). Mount may
@@ -43,7 +44,7 @@
 ;     by the next boot's pre-clean.
 ;   -DSKIP_SELFTEST (`make lean`): no suite, straight to shell.
 ; NOTE: RUN_SELFTEST (even smoke) performs bounded device writes: scratch-LBA
-;   patterns (200/500-511, zeroed after) and optional FAT2 heal on a diverged
+;   patterns (400/500-511, zeroed after) and optional FAT2 heal on a diverged
 ;   mount. Only SKIP_SELFTEST performs zero device writes. Full destructive
 ;   mode additionally creates/writes/deletes reserved files on the volume.
 bits 64
@@ -6181,12 +6182,12 @@ test_queue_interleave:
 
 ; ------------------------------------------------------------
 ; Test 82: Layout invariants — same arithmetic as make check-layout.
-;   Locks the canonical disk layout ( IMG 10M, secsiz 512, kernel 16+184,
+;   Locks the canonical disk layout ( IMG 10M, secsiz 512, kernel 16+224,
 ;   volume 512+2880, FAT 4608 / root 7168 / iobuf 32768 ) and proves the
 ;   build-time predicates at runtime, pure arithmetic, no disk I/O:
-;     kernel_end=16+184<=512, volume_end=3392*512<=10M, aliases
-;     FS_VOL_LBA==VOL_LBA, scratch 200/500/501/510/511 clear of kernel
-;     [16,200) and volume [512,3392), FAT 9sec / root 14sec <=64 (ATA
+;     kernel_end=16+224<=512, volume_end=3392*512<=10M, aliases
+;     FS_VOL_LBA==VOL_LBA, scratch 400/500/501/510/511 clear of kernel
+;     [16,240) and volume [512,3392), FAT 9sec / root 14sec <=64 (ATA
 ;     1..64 contract for the mount reads). Negative tables prove the same
 ;   predicates reject off-by-one overlaps (511, 500+extents) and oversize
 ;   volumes (1M image, 20000 sectors). Deterministic, no timing.
@@ -6213,7 +6214,7 @@ test_layout:
     cmp eax, 16
     jne .fail82
     mov eax, KERNEL_SECTORS
-    cmp eax, 184
+    cmp eax, 224
     jne .fail82
     mov eax, VOL_LBA
     cmp eax, 512
@@ -6261,21 +6262,21 @@ test_layout:
     mov eax, FS_VOL_TOTSEC
     cmp eax, VOL_SECTORS
     jne .fail82
-    mov eax, 200
+    mov eax, ATA_SCRATCH_LBA
     cmp eax, KERNEL_LBA
-    jb .s200v82
+    jb .sAtav82
     mov ebx, KERNEL_LBA
     add ebx, KERNEL_SECTORS
     cmp eax, ebx
     jb .fail82
-.s200v82:
+.sAtav82:
     cmp eax, VOL_LBA
-    jb .s200ok82
+    jb .sAtaok82
     mov ebx, VOL_LBA
     add ebx, VOL_SECTORS
     cmp eax, ebx
     jb .fail82
-.s200ok82:
+.sAtaok82:
     mov eax, 500
     cmp eax, KERNEL_LBA
     jb .s500v82

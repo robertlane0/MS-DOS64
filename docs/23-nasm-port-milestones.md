@@ -32,7 +32,7 @@ libz path (→ drop), `isatty` (→ honest stub).
 |---|---|---|---|
 | N4A.1 | submodule build variant: `configure --disable-*`, keep `asm/parser/preproc`, `nasmlib` minus `mmap/realpath/rlimit`, `output/outbin.c` (+ `outelf.c` iff `MZ64` output wanted), `x86` tables pre-generated host-side (never run Perl on DOS64); patches as `nasm/dos64-*.patch` stack, not a fork | M | host cross-build of trimmed NASM succeeds |
 | N4A.2 | backend swap: `nasmlib/mmap.c`, `file.c`/`fileio.c` → `stdio64` calls; `getopt`-long subset vendored | M | trimmed NASM passes its own test subset on Linux against the shim headers |
-| N4A.3 | size solution from N0 numbers: (a) accept mini-assembler as the on-image tool, or (b) grow `VOL_SECTORS`/`IMG_MB` via the layout block + `check-layout` disk geometry, or (c) ship `NASM.COM` on `dos64-tools.img`. Never squeeze the 184-sector kernel slot | S | decision recorded + image boots |
+| N4A.3 | size solution from N0 numbers: (a) accept mini-assembler as the on-image tool, or (b) grow `VOL_SECTORS`/`IMG_MB` via the layout block + `check-layout` disk geometry, or (c) ship `NASM.COM` on `dos64-tools.img`. Never squeeze the 224-sector kernel slot | S | decision recorded + image boots |
 | N4A.4 | on-image `NASM -f bin` assembles the N1+N4B corpus byte-identically to host NASM 3.02 | L | byte-identical corpus |
 
 `NDISASM` explicitly deferred (no new syscalls; file as follow-up).

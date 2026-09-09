@@ -12,7 +12,7 @@ org 0x7E00
 
 ; Disk layout (KERNEL_LBA / KERNEL_SECTORS) is single-sourced in the
 ; Makefile disk-layout block and generated into build/include/layout.inc
-; (92 KiB = 184 sectors of shell+tests headroom). Do not hardcode here.
+; (112 KiB = 224 sectors of shell+tests+libc headroom). Do not hardcode here.
 %include "build/include/layout.inc"
 KERNEL_STAGING_SEG  equ 0x7000
 KERNEL_STAGING_OFF  equ 0x0000  ; linear 0x70000 - staging buffer in low memory
