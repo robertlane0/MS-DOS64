@@ -1,7 +1,7 @@
 # Phase 1 – Boot & Testing Strategy for 64-bit Conversion
 
 > **As built (2026-09-07):** this strategy is implemented — MBR → stage2 →
-> kernel at `0x100000` boots smoke 85 + 2 SKIP (`make`) or full 87 PASS
+> kernel at `0x100000` boots smoke 85 + 4 SKIP (`make`) or full 89 PASS
 > (`make full`, destructive 71/83 in the reserved namespace with recovery)
 > + `COMMAND64` REPL on QEMU (primary) and Bochs. Concrete sizes/layout
 > below reflect the code; the step rationale is unchanged. See `README.md`
@@ -155,8 +155,8 @@ flags (classification: PURE / SCRATCH-DEVICE / REAL-VOLUME READ-ONLY /
 REAL-VOLUME DESTRUCTIVE — see `src/kernel/selftest64.asm` header):
 
 ```nasm
-; Smoke (default): nasm -DRUN_SELFTEST -> 85 + 2 SKIP, then shell_repl64
-; Full:  nasm -DRUN_SELFTEST -DSELFTEST_DESTRUCTIVE -> 87, then shell
+; Smoke (default): nasm -DRUN_SELFTEST -> 85 + 4 SKIP, then shell_repl64
+; Full:  nasm -DRUN_SELFTEST -DSELFTEST_DESTRUCTIVE -> 89, then shell
 ; Lean:  nasm -DSKIP_SELFTEST -> skip suite, minimal init, shell direct
 %ifdef SKIP_SELFTEST
 %undef RUN_SELFTEST
@@ -171,19 +171,18 @@ REAL-VOLUME DESTRUCTIVE — see `src/kernel/selftest64.asm` header):
 `Makefile` exposes all three (objects are kept separate so the images can coexist):
 
 ```bash
-make                    # smoke: build/dos64.img (RUN_SELFTEST, 85 + 2 SKIP + shell)
-make full               # full: build/dos64-full.img (RUN_SELFTEST+SELFTEST_DESTRUCTIVE, 87 + shell)
+make                    # smoke: build/dos64.img (RUN_SELFTEST, 85 + 4 SKIP + shell)
+make full               # full: build/dos64-full.img (RUN_SELFTEST+SELFTEST_DESTRUCTIVE, 89 + shell)
 make lean               # lean: build/dos64-lean.img (SKIP_SELFTEST, shell direct)
-make run-qemu           # boot smoke image, expect "Summary: 85 passed, 0" + "Skipped (destructive): 2"
-make run-qemu-full      # boot full image, expect "Summary: 87 passed, 0"
+make run-qemu           # boot smoke image, expect "Summary: 85 passed, 0" + "Skipped (destructive): 4"
+make run-qemu-full      # boot full image, expect "Summary: 89 passed, 0"
 make run-qemu-lean      # boot lean image, expect "Lean boot ... entering COMMAND64..."
 ```
 
 Smoke keeps PURE + bounded SCRATCH-DEVICE (LBA 200/500–511, zeroed after)
-+ REAL-VOLUME READ-ONLY (67/70/72/76); tests 71 (`SCRATCH`/`RENAMED`) and
-83 (`CRASH`) print `SKIP (destructive, needs SELFTEST_DESTRUCTIVE)` and
-leave the volume untouched. Full runs all 83 in the reserved namespace
-(`include/fs.inc`: only 71/83 may write the volume, only those three names)
++ REAL-VOLUME READ-ONLY (67/70/72/76); tests 71 (`SCRATCH`/`RENAMED`), 83 (`CRASH`) and 88/89 (`SCRATCH` handle I/O) print `SKIP (destructive, needs SELFTEST_DESTRUCTIVE)` and
+leave the volume untouched. Full runs all 89 in the reserved namespace
+(`include/fs.inc`: only 71/83/88/89 may write the volume, only those three names)
 with mount-time recovery (Test 70 `recover_test_namespace_if_dirty` +
 71/83 pre-clean delete + discard/remount + reclaim + heal + scrub) and
 post-run non-test preservation checks (`HELLO`/`README` intact, scrub

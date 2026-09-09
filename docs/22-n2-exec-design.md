@@ -78,33 +78,39 @@ the shell still spawn-only; flip `sh_do_exec` to enter only after 84–86
 are green on QEMU **and** Bochs. No `EXEC_ENTER` ifdef needed if this order
 holds — if boot destabilizes, revert the one-line shell flip, not the leaf.
 
-## 2. Handle syscalls (N2b — second)
+## 2. Handle syscalls (N2b + N2c — landed)
 
-Per-proc open-file table **is** `PSP64.fd_table` (16 entries, owner = PSP,
-freed with the proc block): `fd` = index; 0/1/2 reserved
-stdin/stdout/stderr (today's console behavior, unchanged); 3..15 files.
-Entry: `(state, firstclus, size, pos, mode)`. All metadata writes reuse the
-FCB write-through paths (`fs_fcb_create64/open/close`, `fs_vol_flush_fat64/
-flush_root64`) and the crash orderings (`include/fs.inc`: extend =
-data→FAT→root; truncate/shrink = root→FAT; delete = root→FAT; mirrors
-FAT1-then-FAT2, mount heals).
+Per-context open-file table: `fd` = index into `PSP64.fd_table` when a
+child is entered, else the kernel `kern_fd_table` (shell/harness); 0/1/2
+reserved stdin/stdout/stderr (console behavior unchanged); files at 3..15
+map 1-based into a 16-entry RAM description table. Each description embeds
+a full `FCB64` (13 qwords: state, 80B FCB, pos, owner PSP) so the FCB
+engine operates directly — no sync protocol. All metadata writes reuse the
+FCB write-through paths and the crash orderings (`include/fs.inc`: extend
+= data→FAT→root; truncate/shrink = root→FAT; delete = root→FAT; mirrors
+FAT1-then-FAT2, mount heals). Trap/direct split: `3Dh`/`42h` take the mode
+/origin from `AL` on trap, `RDI` direct (dedicated trap wrappers keep
+direct calls unambiguous); `3Ch`/`3Eh`/`3Fh`/`40h` use identical regs on
+both paths. DOS-flavored fail codes (2/4/5/6/1/25).
 
-- `3Dh` OPEN: `RDX` → NUL-terminated 8.3 name (flat root only, no subdirs;
-  strip any `X:` drive prefix, reject `\` paths). Read-only and read/write
-  modes. Slice 1 ships read-only + `3Eh`.
-- `3Eh` CLOSE: flush (if dirty + writable), free slot. Double-close → CF=1.
-- **Slice 1 (smallest useful end-to-end, PLAN §8.4): table + `3Dh`-ro +
-  `3Eh` + test 87 (open/close round-trip, zero writes) — landed in N2b.**
-- `3Ch` CREATE: `RDX` → name; truncate-if-exists (root→FAT order) else
-  alloc entry; returns writable fd. Reuses `SCRATCH.TXT`-namespace tests.
-- `42h` LSEEK: `BX`=fd, `CX:DX`/`RCX`=offset, `AL`=origin (0 set / 1 cur /
-  2 end); clamp `0..size` (no sparse extends); CF=1 out of range.
-- Extend `3Fh`/`40h` beyond console handles: `BX` ≥ 3 → table lookup;
-  `3Fh` short-reads at EOF (CF=0, `RAX` < count — same contract as stdin);
-  `40h` at `pos == size` extends alloc-on-write (FAT+root write-through);
-  record-granular writes stay (matching FCB semantics).
+- `3Dh` OPEN (N2b): `RDX` → NUL-terminated 8.3 name, flat root only
+  (`X:` parsed, 0/A: accepted; partial parses and wildcards rejected).
+  Mode 0 read-only; modes 1/2 denied until a read/write need exists.
+- `3Eh` CLOSE (N2b): free slot + descriptor (writes already flushed at op
+  end, so no close-time flush; dir timestamps deferred to N2d).
+  Double-close → CF=1.
+- `3Ch` CREATE (N2c): `RDX` → name (CX attrs ignored, always archive);
+  truncate-if-exists (root-first) else alloc; writable fd (state 2).
+- `42h` LSEEK (N2c): `BX`=fd, `RCX`=signed offset, origin 0/1/2; result
+  clamped to `0..size` (no sparse extends — documented DOS deviation);
+  pure RAM, no disk I/O.
+- File `3Fh`/`40h` (N2c): `BX` ≥ 3 → table lookup; byte-exact through
+  `fs_fcb_io64` with `recsiz=1` (pos == recno, O(n·clusters) per call —
+  fine at handle-I/O sizes); `3Fh` short-reads at EOF (CF=0); `40h`
+  extends alloc-on-write with zero-filled clusters; ro-desc writes denied;
+  hard mid-op failures restore pre-op firclus/filsiz (reclaimable orphans).
 - No new test-namespace names: handle file tests reuse `SCRATCH.TXT`
-  (pre-clean recovery + `check_volume_clean.py` already cover it).
+  (boot recovery + `check_volume_clean.py` already cover it).
 
 ## 3. Argv/env convention (pins the N0 open item)
 

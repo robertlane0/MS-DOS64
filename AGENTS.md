@@ -1,7 +1,7 @@
 # AGENTS.md: Converting MS-DOS v1.25 ASM to 64-bit BIOS Bootable System
 
-> **Status (2026-09-07): implementation complete — smoke 85 + 2 SKIP
-> (`make`, default, non-destructive) and full 87/87 PASS (`make full`,
+> **Status (2026-09-07): implementation complete — smoke 85 + 4 SKIP
+> (`make`, default, non-destructive) and full 89/89 PASS (`make full`,
 > destructive 71/83 in the reserved SCRATCH/RENAMED/CRASH namespace with
 > mount-time recovery) on QEMU and Bochs, then the interactive `COMMAND64`
 > shell (`src/kernel/shell64.asm`).
@@ -10,6 +10,10 @@
 > N2b (slice 5) landed: handle `3Dh` OPEN (read-only) + `3Eh` CLOSE over
 > a per-context fd table (`PSP64.fd_table`, test 87 READ-ONLY); kernel slot
 > grew `176→184` sectors (extent `[16,200)`, test 82 locks it).
+> N2c (slice 6) landed: `3Ch` CREATE + file `3Fh`/`40h` (byte-exact via
+> `fs_fcb_io64` `recsiz=1`, FAT-first commit) + `42h` LSEEK (0..size, no
+> sparse); tests 88 (cycle) + 89 (truncate/delete) DESTRUCTIVE in the
+> `SCRATCH.TXT` namespace; descs now embed the FCB (13 qwords).
 > The phase plan below is kept as the build record; every checklist item is done.
 > Current entry points: `README.md` (what works / memory / disk / shell),
 > `docs/18-truth-gap-analysis.md` + `docs/19-closure-g1-g6.md` (audit trail for
@@ -563,7 +567,7 @@ make
 make run-qemu
 make run-bochs
 ```
-Expected (smoke `make`): 81 PASS + 2 SKIP on serial, then the `COMMAND64` shell prompt; (full `make full`): 83 PASS, then the shell prompt
+Expected (smoke `make`): 85 PASS + 4 SKIP on serial, then the `COMMAND64` shell prompt; (full `make full`): 89 PASS, then the shell prompt
 
 **Stage 2: Video Output**
 - Test character output to screen using VGA driver
@@ -859,9 +863,9 @@ linker.ld      flat link at 0x100000 (.text.start first)   bochsrc.txt   Bochs c
 ### Verify commands (removed from README)
 ```bash
 timeout 25 qemu-system-x86_64 -drive file=build/dos64.img,format=raw -serial stdio -display none
-# tail: Summary: 85 passed, 0 failed ... Skipped (destructive): 2 ... MS-DOS64 shell (COMMAND64). Type HELP for commands.
+# tail: Summary: 85 passed, 0 failed ... Skipped (destructive): 4 ... MS-DOS64 shell (COMMAND64). Type HELP for commands.
 timeout 25 qemu-system-x86_64 -drive file=build/dos64-full.img,format=raw -serial stdio -display none
-# tail: Summary: 87 passed, 0 failed ... MS-DOS64 shell (COMMAND64).
+# tail: Summary: 89 passed, 0 failed ... MS-DOS64 shell (COMMAND64).
 python3 tools/check_volume_clean.py --vol-lba 512 --vol-totsec 2880 --sector-size 512 --kernel-lba 16 --kernel-sectors 184 build/dos64.img
 python3 tools/check_volume_clean.py --vol-lba 512 --vol-totsec 2880 --sector-size 512 --kernel-lba 16 --kernel-sectors 184 build/dos64-full.img
 printf '\rDIR\rTYPE HELLO.TXT\rHELP\rEXIT\r' | timeout 25 qemu-system-x86_64 -drive file=build/dos64.img,format=raw -serial stdio -display none

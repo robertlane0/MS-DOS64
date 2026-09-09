@@ -1,5 +1,5 @@
 ; MS-DOS64 self-test suite — extracted from main.asm so main stays boot glue.
-; Provides selftest_run64: runs tests 1..87, prints PASS/FAIL + summary + phase lines.
+; Provides selftest_run64: runs tests 1..89, prints PASS/FAIL + summary + phase lines.
 ; Returns RAX = failed count (0 = all pass). Called by _start in full builds.
 ; Lean builds (SKIP_SELFTEST): stub returns 0; test code excluded via RUN_SELFTEST.
 ;
@@ -22,18 +22,21 @@
 ;     not a test write on clean images).
 ;   REAL-VOLUME DESTRUCTIVE (FAT/root/data-cluster writes on the live volume,
 ;     reserved namespace SCRATCH.TXT/RENAMED.TXT/CRASH.TXT): 71 (FCB create/
-;     write/rename/delete round-trip) and 83 (crash-ordering with fault
-;     injection + reclaim). Gated behind SELFTEST_DESTRUCTIVE (see below).
+;     write/rename/delete round-trip), 83 (crash-ordering with fault
+;     injection + reclaim), 88 (handle create/write/seek/read cycle) and 89
+;     (handle truncate/delete lifecycle). Gated behind SELFTEST_DESTRUCTIVE
+;     (see below).
 ;     Test 69 performs one net-zero root flush (SETATTRIB same value back);
 ;     it is skipped when the value already matches so the smoke suite stays
 ;     read-only in steady state.
 ;
 ; Boot modes (NASM defines, see Makefile):
 ;   -DRUN_SELFTEST alone (default `make`): smoke suite — PURE + SCRATCH-DEVICE
-;     + REAL-VOLUME READ-ONLY. Tests 71/83 print SKIP and leave the volume
-;     untouched (only mount reads + scratch-LBA I/O occur).
-;   -DRUN_SELFTEST -DSELFTEST_DESTRUCTIVE (`make full`): full suite — all 87
-;     tests including 71/83 in the reserved namespace with mount-time recovery
+;     + REAL-VOLUME READ-ONLY. Tests 71/83/88/89 print SKIP and leave the
+;     volume untouched (only mount reads + scratch-LBA I/O occur).
+;   -DRUN_SELFTEST -DSELFTEST_DESTRUCTIVE (`make full`): full suite — all 89
+;     tests including 71/83/88/89 in the reserved namespace with mount-time
+;     recovery
 ;     (pre-clean delete + discard/remount + reclaim + heal + scrub) and
 ;     post-run non-test preservation checks (HELLO/README intact, scrub clean,
 ;     mirrors match). An interrupted destructive run is recovered idempotently
@@ -297,7 +300,10 @@ extern proc_terminate64
 extern proc_exit_current64
 extern proc_enter64
 extern handler_open_file
+extern hdl_open_core
 extern handler_close_file
+extern handler_create_file
+extern hdl_lseek_core
 extern proc_reap64
 extern proc_free_all64
 extern handler_exec
@@ -332,7 +338,7 @@ selftest_run64:
     push r14
     xor r12, r12          ; passed count in R12 (callee-saved, demonstrates R8-R15)
     xor r13, r13          ; failed count in R13
-    xor r14, r14          ; skipped count in R14 (destructive 71/83 in smoke mode)
+    xor r14, r14          ; skipped count in R14 (71/83/88/89 SKIP in smoke mode)
 
     ; ---- Test 1: Register mapping — 64-bit RAX etc. and R8-R15 ----
     mov rsi, msg_test1
@@ -1824,6 +1830,52 @@ selftest_run64:
     inc r12
     mov rsi, msg_pass
 .t87_done:
+    call vga_print
+    call serial_print64
+
+    ; ---- Test 88: handle create/write/seek/read cycle (N2c) ----
+    ; DESTRUCTIVE (real-volume writes in reserved namespace SCRATCH.TXT).
+    ; Smoke (no SELFTEST_DESTRUCTIVE): SKIP without touching the volume.
+    mov rsi, msg_test88
+    call vga_print
+    call serial_print64
+%ifdef SELFTEST_DESTRUCTIVE
+    call test_handle_cycle
+    test rax, rax
+    jz .t88_pass
+    inc r13
+    mov rsi, msg_fail
+    jmp .t88_done
+.t88_pass:
+    inc r12
+    mov rsi, msg_pass
+.t88_done:
+%else
+    inc r14
+    mov rsi, msg_skip
+%endif
+    call vga_print
+    call serial_print64
+
+    ; ---- Test 89: truncate/delete lifecycle (N2c, DESTRUCTIVE) ----
+    mov rsi, msg_test89
+    call vga_print
+    call serial_print64
+%ifdef SELFTEST_DESTRUCTIVE
+    call test_handle_truncdel
+    test rax, rax
+    jz .t89_pass
+    inc r13
+    mov rsi, msg_fail
+    jmp .t89_done
+.t89_pass:
+    inc r12
+    mov rsi, msg_pass
+.t89_done:
+%else
+    inc r14
+    mov rsi, msg_skip
+%endif
     call vga_print
     call serial_print64
 
@@ -9569,7 +9621,7 @@ test_open_close:
     ; open README.TXT mode 0 -> fd in 3..15
     xor edi, edi
     lea rdx, [rel t87_readme]
-    call handler_open_file
+    call hdl_open_core
     jc .fail87
     cmp rax, 3
     jb .fail87
@@ -9579,7 +9631,7 @@ test_open_close:
     ; open again -> distinct fd
     xor edi, edi
     lea rdx, [rel t87_readme]
-    call handler_open_file
+    call hdl_open_core
     jc .fail87
     cmp rax, r15
     je .fail87
@@ -9602,27 +9654,27 @@ test_open_close:
     ; negatives: missing / write modes / wild / subdir / empty
     xor edi, edi
     lea rdx, [rel t87_nope]
-    call handler_open_file
+    call hdl_open_core
     jnc .fail87
     mov edi, 1
     lea rdx, [rel t87_readme]
-    call handler_open_file
+    call hdl_open_core
     jnc .fail87
     mov edi, 2
     lea rdx, [rel t87_readme]
-    call handler_open_file
+    call hdl_open_core
     jnc .fail87
     xor edi, edi
     lea rdx, [rel t87_wild]
-    call handler_open_file
+    call hdl_open_core
     jnc .fail87
     xor edi, edi
     lea rdx, [rel t87_sub]
-    call handler_open_file
+    call hdl_open_core
     jnc .fail87
     xor edi, edi
     lea rdx, [rel t87_empty]
-    call handler_open_file
+    call hdl_open_core
     jnc .fail87
     ; close fd1/fd2; double-close + console/low/high fds must fail
     mov rbx, r15
@@ -9654,7 +9706,7 @@ test_open_close:
     jae .fullok87
     xor edi, edi
     lea rdx, [rel t87_readme]
-    call handler_open_file
+    call hdl_open_core
     jc .fail87
     cmp rax, r14
     jne .fail87
@@ -9665,7 +9717,7 @@ test_open_close:
 .fullok87:
     xor edi, edi
     lea rdx, [rel t87_readme]
-    call handler_open_file
+    call hdl_open_core
     jnc .fail87
     ; close all 13
     lea r15, [rel t87_fds]
@@ -9700,6 +9752,492 @@ test_open_close:
 .fail87:
     mov rax, 1
 .done87:
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop r11
+    pop r10
+    pop r9
+    pop r8
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rcx
+    pop rbx
+    ret
+
+; ------------------------------------------------------------
+; Test 88: handle create/write/seek/read cycle (N2c, DESTRUCTIVE).
+;   3Ch create SCRATCH.TXT, trap + direct 40h/3Fh/42h I/O, 1000B pattern
+;   across a 2-cluster chain, slice/overwrite/append/EOF behavior, close,
+;   reopen persistence, delete. Gated behind SELFTEST_DESTRUCTIVE; the
+;   dispatch block SKIP-counts it in smoke like 71/83.
+; ------------------------------------------------------------
+test_handle_cycle:
+    push rbx
+    push rcx
+    push rdx
+    push rsi
+    push rdi
+    push r8
+    push r9
+    push r10
+    push r11
+    push r12
+    push r13
+    push r14
+    push r15
+    call mem_reset64
+    call proc_init64
+    ; clean-volume snapshot (71/83 end clean or skipped; 70 recovered)
+    call fs_vol_scrub64
+    test rax, rax
+    jnz .fail88
+    mov r12, rax              ; scrub bits (0)
+    mov r13, rcx              ; orphans
+    call fs_vol_check_mirrors64
+    test rax, rax
+    jnz .fail88
+    mov r14, rax              ; mirrors (0)
+    ; build 1000B pattern: byte[i] = i & 0xFF
+    lea rdi, [rel t88_out]
+    xor eax, eax
+.fill88:
+    cmp eax, 1000
+    jae .filled88
+    mov [rdi + rax], al
+    inc eax
+    jmp .fill88
+.filled88:
+    ; create SCRATCH.TXT -> writable fd
+    lea rdx, [rel t88_scratch]
+    call handler_create_file
+    jc .fail88
+    cmp rax, 3
+    jb .fail88
+    cmp rax, 15
+    ja .fail88
+    mov r15, rax              ; fd
+    ; trap I/O first (DISPATCH[3F/40/42] + frame writeback on file descs):
+    ; trap-write 10 patch bytes at 0, trap-read back, compare
+    mov rax, 0x4000
+    mov rbx, r15
+    mov rcx, 10
+    lea rdx, [rel t88_patch]
+    int 0x21
+    jc .fail88
+    cmp rax, 10
+    jne .fail88
+    mov rax, 0x4200           ; trap-seek origin 0 -> 0
+    mov rbx, r15
+    xor ecx, ecx
+    int 0x21
+    jc .fail88
+    test rax, rax
+    jnz .fail88
+    mov rax, 0x3F00
+    mov rbx, r15
+    mov rcx, 10
+    lea rdx, [rel t88_in]
+    int 0x21
+    jc .fail88
+    cmp rax, 10
+    jne .fail88
+    lea rsi, [rel t88_patch]
+    lea rdi, [rel t88_in]
+    mov rcx, 10
+    cld
+    repe cmpsb
+    jne .fail88
+    ; main pattern: seek 0, write 1000B (2 clusters), read back, compare
+    mov rbx, r15
+    xor ecx, ecx
+    xor edi, edi
+    call hdl_lseek_core
+    jc .fail88
+    mov rbx, r15
+    lea rdx, [rel t88_out]
+    mov rcx, 1000
+    call handler_write_file
+    jc .fail88
+    cmp rax, 1000
+    jne .fail88
+    mov rbx, r15
+    xor ecx, ecx
+    xor edi, edi
+    call hdl_lseek_core
+    jc .fail88
+    mov rbx, r15
+    lea rdx, [rel t88_in]
+    mov rcx, 1000
+    call handler_read_file
+    jc .fail88
+    cmp rax, 1000
+    jne .fail88
+    lea rsi, [rel t88_out]
+    lea rdi, [rel t88_in]
+    mov rcx, 1000
+    cld
+    repe cmpsb
+    jne .fail88
+    ; slice [500,600): seek 500, read 100, compare
+    mov rbx, r15
+    mov rcx, 500
+    xor edi, edi
+    call hdl_lseek_core
+    jc .fail88
+    cmp rax, 500
+    jne .fail88
+    mov rbx, r15
+    lea rdx, [rel t88_in]
+    mov rcx, 100
+    call handler_read_file
+    jc .fail88
+    cmp rax, 100
+    jne .fail88
+    lea rsi, [rel t88_out+500]
+    lea rdi, [rel t88_in]
+    mov rcx, 100
+    cld
+    repe cmpsb
+    jne .fail88
+    ; relative seeks: cur -100 from 600 -> 500; end+0 -> 1000; end-1000 -> 0
+    mov rbx, r15
+    mov rcx, -100
+    mov edi, 1
+    call hdl_lseek_core
+    jc .fail88
+    cmp rax, 500
+    jne .fail88
+    mov rbx, r15
+    xor ecx, ecx
+    mov edi, 2
+    call hdl_lseek_core
+    jc .fail88
+    cmp rax, 1000
+    jne .fail88
+    mov rbx, r15
+    mov rcx, -1000
+    mov edi, 2
+    call hdl_lseek_core
+    jc .fail88
+    test rax, rax
+    jnz .fail88
+    ; out-of-range + bad origin must fail (no sparse extends)
+    mov rbx, r15
+    mov rcx, 1001
+    xor edi, edi
+    call hdl_lseek_core
+    jnc .fail88
+    mov rbx, r15
+    mov rcx, -1
+    xor edi, edi
+    call hdl_lseek_core
+    jnc .fail88
+    mov rbx, r15
+    xor ecx, ecx
+    mov edi, 3
+    call hdl_lseek_core
+    jnc .fail88
+    ; overwrite [100,110): seek 100, write patch, read back, compare
+    mov rbx, r15
+    mov rcx, 100
+    xor edi, edi
+    call hdl_lseek_core
+    jc .fail88
+    mov rbx, r15
+    lea rdx, [rel t88_patch]
+    mov rcx, 10
+    call handler_write_file
+    jc .fail88
+    cmp rax, 10
+    jne .fail88
+    mov rbx, r15
+    mov rcx, 100
+    xor edi, edi
+    call hdl_lseek_core
+    jc .fail88
+    mov rbx, r15
+    lea rdx, [rel t88_in]
+    mov rcx, 10
+    call handler_read_file
+    jc .fail88
+    cmp rax, 10
+    jne .fail88
+    lea rsi, [rel t88_patch]
+    lea rdi, [rel t88_in]
+    mov rcx, 10
+    cld
+    repe cmpsb
+    jne .fail88
+    ; expected image: out copy + patch@100 (+ tail@1000 after append)
+    cld
+    lea rsi, [rel t88_out]
+    lea rdi, [rel t88_exp]
+    mov rcx, 1000
+    rep movsb
+    lea rsi, [rel t88_patch]
+    lea rdi, [rel t88_exp+100]
+    mov rcx, 10
+    rep movsb
+    ; append 12B at end: seek end -> 1000, write tail -> size 1012
+    mov rbx, r15
+    xor ecx, ecx
+    mov edi, 2
+    call hdl_lseek_core
+    jc .fail88
+    cmp rax, 1000
+    jne .fail88
+    mov rbx, r15
+    lea rdx, [rel t88_tail]
+    mov rcx, 12
+    call handler_write_file
+    jc .fail88
+    cmp rax, 12
+    jne .fail88
+    lea rsi, [rel t88_tail]
+    lea rdi, [rel t88_exp+1000]
+    mov rcx, 12
+    cld
+    rep movsb
+    ; full read 1012 vs expected
+    mov rbx, r15
+    xor ecx, ecx
+    xor edi, edi
+    call hdl_lseek_core
+    jc .fail88
+    mov rbx, r15
+    lea rdx, [rel t88_in]
+    mov rcx, 1012
+    call handler_read_file
+    jc .fail88
+    cmp rax, 1012
+    jne .fail88
+    lea rsi, [rel t88_exp]
+    lea rdi, [rel t88_in]
+    mov rcx, 1012
+    cld
+    repe cmpsb
+    jne .fail88
+    ; read at EOF: seek 1012, read 10 -> 0 bytes, CF=0
+    mov rbx, r15
+    mov rcx, 1012
+    xor edi, edi
+    call hdl_lseek_core
+    jc .fail88
+    mov rbx, r15
+    lea rdx, [rel t88_in]
+    mov rcx, 10
+    call handler_read_file
+    jc .fail88
+    test rax, rax
+    jnz .fail88
+    ; close, reopen read-only (persistence), read, compare, close
+    mov rbx, r15
+    call handler_close_file
+    jc .fail88
+    xor edi, edi
+    lea rdx, [rel t88_scratch]
+    call hdl_open_core
+    jc .fail88
+    mov r15, rax
+    mov rbx, r15
+    lea rdx, [rel t88_in]
+    mov rcx, 1012
+    call handler_read_file
+    jc .fail88
+    cmp rax, 1012
+    jne .fail88
+    lea rsi, [rel t88_exp]
+    lea rdi, [rel t88_in]
+    mov rcx, 1012
+    cld
+    repe cmpsb
+    jne .fail88
+    mov rbx, r15
+    call handler_close_file
+    jc .fail88
+    ; delete, prove gone, prove volume clean
+    lea rdi, [rel aux_fcb]
+    lea rsi, [rel t88_scratch]
+    mov al, 1
+    call fs_make_fcb64
+    cmp al, 0xFF
+    je .fail88
+    lea rdx, [rel aux_fcb]
+    call handler_delete
+    jc .fail88
+    xor edi, edi
+    lea rdx, [rel t88_scratch]
+    call hdl_open_core
+    jnc .fail88
+    call fs_vol_scrub64
+    cmp rax, r12
+    jne .fail88
+    cmp rcx, r13
+    jne .fail88
+    call fs_vol_check_mirrors64
+    cmp rax, r14
+    jne .fail88
+    call mem_validate64
+    test rax, rax
+    jnz .fail88
+    xor eax, eax
+    jmp .done88
+.fail88:
+    mov rax, 1
+.done88:
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop r11
+    pop r10
+    pop r9
+    pop r8
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rcx
+    pop rbx
+    ret
+
+; ------------------------------------------------------------
+; Test 89: truncate/delete lifecycle (N2c, DESTRUCTIVE).
+;   Write a 2-cluster file, re-CREATE (truncate must free the tail and
+;   zero the size), small write/read, delete; reopen must fail and the
+;   orphan count must stay 0 throughout (chain-free proof). Gated behind
+;   SELFTEST_DESTRUCTIVE like 71/83.
+; ------------------------------------------------------------
+test_handle_truncdel:
+    push rbx
+    push rcx
+    push rdx
+    push rsi
+    push rdi
+    push r8
+    push r9
+    push r10
+    push r11
+    push r12
+    push r13
+    push r14
+    push r15
+    call mem_reset64
+    call proc_init64
+    call fs_vol_scrub64
+    test rax, rax
+    jnz .fail89
+    mov r12, rax
+    mov r13, rcx
+    call fs_vol_check_mirrors64
+    test rax, rax
+    jnz .fail89
+    mov r14, rax
+    ; pattern (independent refill; BSS persists but tests stay standalone)
+    lea rdi, [rel t88_out]
+    xor eax, eax
+.fill89:
+    cmp eax, 1000
+    jae .filled89
+    mov [rdi + rax], al
+    inc eax
+    jmp .fill89
+.filled89:
+    ; create + write 1000B (2 clusters live afterwards)
+    lea rdx, [rel t88_scratch]
+    call handler_create_file
+    jc .fail89
+    mov r15, rax
+    mov rbx, r15
+    lea rdx, [rel t88_out]
+    mov rcx, 1000
+    call handler_write_file
+    jc .fail89
+    cmp rax, 1000
+    jne .fail89
+    mov rbx, r15
+    call handler_close_file
+    jc .fail89
+    ; re-CREATE (truncate): end-seek must read back 0, reads give 0
+    lea rdx, [rel t88_scratch]
+    call handler_create_file
+    jc .fail89
+    mov r15, rax
+    mov rbx, r15
+    xor ecx, ecx
+    mov edi, 2
+    call hdl_lseek_core
+    jc .fail89
+    test rax, rax                ; size truncated to 0
+    jnz .fail89
+    mov rbx, r15
+    lea rdx, [rel t88_in]
+    mov rcx, 10
+    call handler_read_file
+    jc .fail89
+    test rax, rax
+    jnz .fail89
+    ; small write/read on the truncated file
+    mov rbx, r15
+    lea rdx, [rel t88_out]
+    mov rcx, 5
+    call handler_write_file
+    jc .fail89
+    cmp rax, 5
+    jne .fail89
+    mov rbx, r15
+    xor ecx, ecx
+    xor edi, edi
+    call hdl_lseek_core
+    jc .fail89
+    mov rbx, r15
+    lea rdx, [rel t88_in]
+    mov rcx, 5
+    call handler_read_file
+    jc .fail89
+    cmp rax, 5
+    jne .fail89
+    lea rsi, [rel t88_out]
+    lea rdi, [rel t88_in]
+    mov rcx, 5
+    cld
+    repe cmpsb
+    jne .fail89
+    mov rbx, r15
+    call handler_close_file
+    jc .fail89
+    ; delete; reopen must fail; volume must show no orphans (tail freed)
+    lea rdi, [rel aux_fcb]
+    lea rsi, [rel t88_scratch]
+    mov al, 1
+    call fs_make_fcb64
+    cmp al, 0xFF
+    je .fail89
+    lea rdx, [rel aux_fcb]
+    call handler_delete
+    jc .fail89
+    xor edi, edi
+    lea rdx, [rel t88_scratch]
+    call hdl_open_core
+    jnc .fail89
+    call fs_vol_scrub64
+    cmp rax, r12
+    jne .fail89
+    cmp rcx, r13
+    jne .fail89
+    call fs_vol_check_mirrors64
+    cmp rax, r14
+    jne .fail89
+    call mem_validate64
+    test rax, rax
+    jnz .fail89
+    xor eax, eax
+    jmp .done89
+.fail89:
+    mov rax, 1
+.done89:
     pop r15
     pop r14
     pop r13
@@ -9805,6 +10343,11 @@ msg_test84 db " [84] Enter/return round-trip (RET + preserve)... ",0
 msg_test85 db " [85] Exit code via INT 0x21 AH=4Ch... ",0
 msg_test86 db " [86] Argv echo via PSP tail (enter)... ",0
 msg_test87 db " [87] Handle open/close ro + trap + bounds... ",0
+msg_test88 db " [88] Handle create/write/seek/read cycle... ",0
+msg_test89 db " [89] Truncate/delete lifecycle + invariance... ",0
+t88_scratch db "SCRATCH.TXT",0
+t88_patch db 0xE0,0xE1,0xE2,0xE3,0xE4,0xE5,0xE6,0xE7,0xE8,0xE9
+t88_tail db "APPENDED!!",13,10
 t87_readme db "README.TXT",0
 t87_nope db "NOPE.TXT",0
 t87_wild db "*.TXT",0
@@ -9836,7 +10379,7 @@ msg_summary db 13,10,"Summary: ",0
 msg_summary2 db " passed, ",0
 msg_summary3 db " failed",13,10,0
 msg_summary4 db "Skipped (destructive): ",0
-msg_summary5 db " (run make full for 71+83)",13,10,0
+msg_summary5 db " (run make full for 71+83+88+89)",13,10,0
 msg_phase3_ok db "Phase3 register conversion: ALL TESTS PASS",13,10,0
 msg_phase3_fail db "Phase3: SOME TESTS FAILED",13,10,0
 msg_phase4_ok db "Phase4 addressing transformation: ALL TESTS PASS",13,10,0
@@ -10076,6 +10619,10 @@ t86_img: resb 64
 t86_out: resb 16
 ; --- Test 87: fd spill area (13-entry fill order check) ---
 t87_fds: resq 13
+; --- Tests 88-89: handle I/O buffers (DESTRUCTIVE, SCRATCH.TXT) ---
+t88_out: resb 1024
+t88_in: resb 2048
+t88_exp: resb 1024
 
 
 %else

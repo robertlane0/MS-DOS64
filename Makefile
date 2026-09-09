@@ -72,13 +72,15 @@ NASM_BIN := $(NASM) -f bin -Wall -Werror -Wno-reloc-abs-word -Wno-reloc-abs-dwor
 NASM_ELF := $(NASM) -f elf64 -g -F dwarf -Wall -Werror -Wno-reloc-abs-word -Wno-reloc-rel-dword -Wno-reloc-abs-qword -I.
 # Self-test control (docs/05 §7): default smoke suite is non-destructive.
 #   Smoke (default): -DRUN_SELFTEST -> _start runs PURE + SCRATCH-DEVICE +
-#     REAL-VOLUME READ-ONLY (81 tests); destructive 71/83 print SKIP and leave
-#     the volume untouched. NOTE: even smoke performs bounded device writes
-#     (scratch-LBA patterns at 200/500-511, zeroed after; FAT2 heal on a
-#     diverged mount). Only SKIP_SELFTEST performs zero device writes.
-#   Full (destructive): -DRUN_SELFTEST -DSELFTEST_DESTRUCTIVE -> all 83 tests
-#     including 71 (SCRATCH/RENAMED) + 83 (CRASH) in the reserved namespace
-#     with pre-clean recovery + post-run preservation checks (`make full`).
+#     REAL-VOLUME READ-ONLY (85 tests); destructive 71/83/88/89 print SKIP
+#     and leave the volume untouched. NOTE: even smoke performs bounded
+#     device writes (scratch-LBA patterns at 200/500-511, zeroed after;
+#     FAT2 heal on a diverged mount). Only SKIP_SELFTEST performs zero
+#     device writes.
+#   Full (destructive): -DRUN_SELFTEST -DSELFTEST_DESTRUCTIVE -> all 89 tests
+#     including 71 (SCRATCH/RENAMED) + 83 (CRASH) + 88 (handle cycle) + 89
+#     (truncate/delete) in the reserved namespace with pre-clean recovery +
+#     post-run preservation checks (`make full`).
 #   Lean: -DSKIP_SELFTEST -> _start skips suite, minimal init, shell direct.
 #   Debug hooks (exec_dbg_pid/stack_dbg_char/cmd_dbg_putc fail-point markers):
 #     gated behind -DDEBUG_SELFTEST (same pattern as SELFTEST_DESTRUCTIVE);
@@ -361,9 +363,9 @@ check-serial:
 # `make all` assembles. Verifies:
 #   1. selftest64.asm classifies PURE / SCRATCH-DEVICE / READ-ONLY /
 #      DESTRUCTIVE and documents that RUN_SELFTEST performs writes.
-#   2. Tests 71/83 dispatch is gated on SELFTEST_DESTRUCTIVE with a SKIP
-#      path (smoke leaves the volume untouched); the msg_skip + skipped
-#      summary strings exist and R14 counts skips.
+#   2. Tests 71/83/88/89 dispatch is gated on SELFTEST_DESTRUCTIVE with a
+#      SKIP path (smoke leaves the volume untouched); the msg_skip +
+#      skipped summary strings exist and R14 counts skips.
 #   3. FULL_DEFS carries -DSELFTEST_DESTRUCTIVE and the full image recipe
 #      exists (`make full` -> dos64-full.img); default NASM_DEFS does NOT
 #      (plain `make` stays smoke).
@@ -374,13 +376,13 @@ check-selftest-modes:
 	@grep -q 'SCRATCH-DEVICE' $(SRC_KERNEL)/selftest64.asm || (echo "selftest-modes FAIL: missing classification header"; exit 1)
 	@grep -q 'msg_skip' $(SRC_KERNEL)/selftest64.asm || (echo "selftest-modes FAIL: missing msg_skip"; exit 1)
 	@grep -q 'Skipped (destructive)' $(SRC_KERNEL)/selftest64.asm || (echo "selftest-modes FAIL: missing skipped summary"; exit 1)
-	@test $$(grep -c 'ifdef SELFTEST_DESTRUCTIVE' $(SRC_KERNEL)/selftest64.asm) -ge 3 || (echo "selftest-modes FAIL: expected >=3 ifdef SELFTEST_DESTRUCTIVE (71+83+69)"; exit 1)
+	@test $$(grep -c 'ifdef SELFTEST_DESTRUCTIVE' $(SRC_KERNEL)/selftest64.asm) -ge 3 || (echo "selftest-modes FAIL: expected >=3 ifdef SELFTEST_DESTRUCTIVE (71+83+69+88+89)"; exit 1)
 	@grep -q 'FULL_DEFS := -DRUN_SELFTEST -DSELFTEST_DESTRUCTIVE' Makefile || (echo "selftest-modes FAIL: Makefile missing FULL_DEFS"; exit 1)
 	@grep -q 'dos64-full.img' Makefile || (echo "selftest-modes FAIL: Makefile missing full image recipe"; exit 1)
 	@! grep -Eq '^NASM_DEFS \?= .*SELFTEST_DESTRUCTIVE' Makefile || (echo "selftest-modes FAIL: default NASM_DEFS must stay smoke (no SELFTEST_DESTRUCTIVE)"; exit 1)
 	@grep -q 'SCRATCH.TXT' include/fs.inc || (echo "selftest-modes FAIL: include/fs.inc missing reserved namespace"; exit 1)
 	@grep -q 'check_volume_clean' include/fs.inc || (echo "selftest-modes FAIL: include/fs.inc must reference check_volume_clean"; exit 1)
-	@echo "Selftest modes OK: smoke (85 + 2 SKIP) default, full (87) via make full"
+	@echo "Selftest modes OK: smoke (85 + 4 SKIP) default, full (89) via make full"
 
 # Debug-hook check — source-level assertion that test/fail-point markers
 # stay out of release objects (same pattern as SELFTEST_DESTRUCTIVE).

@@ -362,8 +362,11 @@ Next — N2 implementation, one slice at a time (design + tests 84+ spec:
       (Done: smoke 85+2 / full 87 green on QEMU + Bochs, volumes CLEAN.
       Slot grew `176→184` (test 82 locks `[16,200)`); `3Dh` refuses modes
       1/2, wildcards, subdirs; `3Eh` refuses 0–2/double-close.)
-- [ ] 6. **N2c** `3Ch` + file `3Fh`/`40h` + `42h` + tests 88 (destructive,
+- [x] 6. **N2c** `3Ch` + file `3Fh`/`40h` + `42h` + tests 88 (destructive,
       `SCRATCH.TXT`) and 89 (scrub/mirror invariance).
+      (Done: smoke 85+4 / full 89 green on QEMU + Bochs, volumes CLEAN.
+      Descs embed the FCB (13 qwords, no sync protocol); `3Fh`/`40h` are
+      byte-exact via `fs_fcb_io64` `recsiz=1`; `42h` clamps 0..size.)
 - [ ] 7. **N2d** shell flip (`sh_do_exec` enters, `Exit <code>`,
       `%ERRORLEVEL%`); N2 acceptance demo on `dos64-nasm.img`.
 

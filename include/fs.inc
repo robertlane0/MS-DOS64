@@ -55,19 +55,21 @@ endstruc
 %define FS_FILE_LBA_BASE 510  ; file-data base when DPB firrec remapped for test [26]
 
 ; --- Reserved filesystem test namespace (destructive self-tests only) ---
-; Tests 71/83 (SELFTEST_DESTRUCTIVE) are the ONLY writers to the live
-; volume, and they use ONLY these names: SCRATCH.TXT + RENAMED.TXT (71)
-; and CRASH.TXT (83). All other volume files (HELLO.TXT, README.TXT,
-; TEST.COM, DATA.BIN) are non-test files and must survive every test
-; cycle unchanged — both tests verify this pre- and post-run via
-; fs_vol_read_file64 + scrub/mirror checks. Mount-time recovery: each
-; destructive test starts with delete-both + discard/remount + reclaim +
-; heal + scrub, so an interrupted run (power loss between FAT/root/data
-; writes leaves only leaks per the crash model below) is recovered
-; idempotently by the next boot. Never create these three names from the
-; shell or stamper; `tools/check_volume_clean.py` treats their presence
-; (or any orphan/mirror mismatch) as a dirty volume. Smoke
-; (RUN_SELFTEST without SELFTEST_DESTRUCTIVE) never creates them.
+; Tests 71/83/88/89 (SELFTEST_DESTRUCTIVE) are the ONLY writers to the live
+; volume, and they use ONLY these names: SCRATCH.TXT + RENAMED.TXT (71),
+; CRASH.TXT (83), SCRATCH.TXT again (88 handle cycle, 89 truncate/delete).
+; All other volume files (HELLO.TXT, README.TXT, TEST.COM, DATA.BIN) are
+; non-test files and must survive every test cycle unchanged — the writers
+; verify this pre- and post-run via scrub/mirror checks. Mount-time
+; recovery: 71/83 start with delete-both + discard/remount + reclaim +
+; heal + scrub, and test 70 recovers all three names on every boot, so an
+; interrupted run (power loss between FAT/root/data writes leaves only
+; leaks per the crash model below) is recovered idempotently by the next
+; boot; 88/89 additionally tolerate leftovers via CREATE-truncate. Never
+; create these three names from the shell or stamper;
+; `tools/check_volume_clean.py` treats their presence (or any
+; orphan/mirror mismatch) as a dirty volume. Smoke (RUN_SELFTEST without
+; SELFTEST_DESTRUCTIVE) never creates them.
 ; --- Real on-image FAT12 volume (tools/mkfat12.py, 1.44M geometry) ---
 ; Extent [FS_VOL_LBA, FS_VOL_LBA+FS_VOL_TOTSEC): boot+BPB, 2x9 FAT,
 ; 14-sec root, data clusters 2..2848. Must stay clear of the kernel

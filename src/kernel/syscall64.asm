@@ -53,9 +53,9 @@ extern fs_vol_boot
 extern fs_dir_find64
 extern fs_vol_flush_root64
 extern fs_fcb_open64
+extern fs_fcb_create64
 extern fs_fcb_io64
 extern fs_fcb_delete64
-extern fs_fcb_create64
 extern fs_fcb_rename64
 extern fs_fcb_search64
 extern fs_make_fcb64
@@ -97,6 +97,10 @@ global handler_read_file
 global handler_write_file
 global handler_open_file
 global handler_close_file
+global handler_create_file
+global handler_lseek_file
+global hdl_open_core
+global hdl_lseek_core
 global handler_abort
 global handler_alloc_mem
 global handler_free_mem
@@ -139,6 +143,17 @@ global handler_setdma
 %define MAXCALL 36
 %define IOSTACK_SIZE 4096
 %define DSKSTACK_SIZE 4096
+; N2b+N2c handle layer (3Dh/3Eh + 3Ch/file-3Fh/40h/42h) field constants.
+; (Placed here, ahead of first use: NASM %defines are order-sensitive and
+; the 3Fh/40h file branches above the handler block use them.)
+%define FD_FILE_MIN 3
+%define FD_FILE_MAX 15
+%define HDESC_N 16
+%define HDESC_STRIDE 13     ; qwords per description (104B)
+%define HDESC_STATE 0       ; +0
+%define HDESC_FCB 1         ; +8: FCB64 image (fs_make zeroes 80B: +8..+88)
+%define HDESC_POS 11        ; +88: byte position
+%define HDESC_OWNER 12      ; +96: owner PSP
 
 section .bss
 alignb 16
@@ -170,10 +185,7 @@ srch_next_slot: resq 1
 ;   +8 first cluster, +16 size bytes, +24 position (N2c; 0),
 ;   +32 owner PSP (0 = kernel context; close-on-exit sweep lands in N2d).
 kern_fd_table: resq 16
-fs_hdesc:      resq 16*5
-; Scratch FCB for 3Dh name parse + open (single-threaded cooperative use,
-; same pattern as selftest aux_fcb; handlers run on IOSTACK/DSKSTACK).
-hdl_fcb:       resb FCBSIZ64
+fs_hdesc:      resq 16*13
 ; Debug/self-test hooks (fail-point markers, EXEC introspection).
 ; Gated behind -DDEBUG_SELFTEST (same pattern as SELFTEST_DESTRUCTIVE):
 ; default/smoke/full/lean builds omit them so release objects stay
@@ -201,7 +213,7 @@ syscall_init:
     mov rcx, 16
     rep stosq
     lea rdi, [rel fs_hdesc]
-    mov rcx, 16*5
+    mov rcx, 16*13
     rep stosq
     pop rdi
     pop rcx
@@ -408,13 +420,13 @@ DISPATCH64:
     dq handler_inuse      ; 39
     dq handler_inuse      ; 3A
     dq handler_inuse      ; 3B
-    dq handler_inuse      ; 3C (N2c: CREATE)
+    dq handler_create_file ; 3C 60 AH=3Ch CREATE (N2c: truncate/create)
     dq handler_open_file  ; 3D 61 AH=3Dh OPEN (N2b: read-only files)
     dq handler_close_file ; 3E 62 AH=3Eh CLOSE (N2b)
     dq handler_read_file  ; 3F 63 AH=3Fh READ (Phase9: handle 0 stdin)
     dq handler_write_file ; 40 64 AH=40h WRITE (Phase9: handles 1/2 stdout)
     dq handler_inuse      ; 41
-    dq handler_inuse      ; 42
+    dq handler_lseek_file ; 42 66 AH=42h LSEEK (N2c: 0..size, no sparse)
     dq handler_inuse      ; 43
     dq handler_inuse      ; 44
     dq handler_inuse      ; 45
@@ -958,7 +970,13 @@ handler_read_file:          ; AH=3Fh
     and r8, 0xFFFF           ; BX
     and r9, 0xFFFF           ; CX (DOS 16-bit count; 64-bit ext uses low 16 for compat)
     cmp r8, 0
-    jne .fail_rf_badhandle
+    je .console_rf
+    cmp r8, FD_FILE_MIN      ; N2c: file fds 3..15 via the desc table
+    jb .fail_rf_badhandle
+    cmp r8, FD_FILE_MAX
+    ja .fail_rf_badhandle
+    jmp .file_rf
+.console_rf:
     test rdx, rdx
     jz .fail_rf_badbuf
     test r9, r9
@@ -1015,20 +1033,82 @@ handler_read_file:          ; AH=3Fh
     pop rbx
     ret
 
+; .file_rf — N2c file-descriptor reads (R8=fd 3..15, R9=count16, RDX=buf).
+;   Byte-exact via fs_fcb_io64 with recsiz=1 (pos == recno); short reads at
+;   EOF return CF=0 with RAX < count (DOS contract). Reads never mutate the
+;   desc or the volume (io64 read path is pure), so no snapshot is needed.
+.file_rf:
+    test rdx, rdx
+    jz .fail_rf_badbuf
+    mov rsi, rdx                 ; buf (rsi free; lookup spares it)
+    mov ecx, r8d                 ; fd
+    call hdl_desc_ptr            ; RAX=desc, EDX=state (1/2 both readable)
+    jc .fail_rf_file             ; RAX=6 already
+    mov rbx, rax                 ; desc
+    mov dword [rbx + HDESC_FCB*8 + FCB64.recsiz], 1
+    mov rax, [rbx + HDESC_FCB*8 + FCB64.filsiz]   ; size
+    mov rcx, [rbx + HDESC_POS*8]                  ; pos
+    cmp rcx, rax
+    jae .nzero_rf
+    sub rax, rcx                 ; remaining
+    cmp r9, rax
+    jbe .docall_rf
+    mov r9, rax                  ; n = remaining
+    jmp .docall_rf
+.nzero_rf:
+    xor r9d, r9d                 ; at/past EOF: zero-length (io64 .io_zero)
+.docall_rf:
+    mov rdx, rsi                 ; buf
+    mov rsi, rcx                 ; pos == recno (recsiz=1)
+    mov rcx, r9                  ; n
+    lea rdi, [rbx + HDESC_FCB*8]
+    xor r8d, r8d                 ; read
+    call fs_fcb_io64             ; RAX=done (r8-r15 + rbx preserved)
+    jc .hard_rf
+    add [rbx + HDESC_POS*8], rax ; advance pos
+    mov rdx, rax
+    mov rbx, [rel SPSAVE64]
+    test rbx, rbx
+    jz .rf_noframe_f
+    mov [rbx + STKPTRS64.rax_save], rax
+.rf_noframe_f:
+    mov rax, rdx
+    clc
+    jmp .exit_rf
+.hard_rf:
+    mov rdx, rax                 ; done-so-far (desc untouched by reads)
+    mov rbx, [rel SPSAVE64]
+    test rbx, rbx
+    jz .rf_hard_nf
+    mov [rbx + STKPTRS64.rax_save], rax
+.rf_hard_nf:
+    mov rax, rdx
+    stc
+    jmp .exit_rf
+.fail_rf_file:
+    mov rbx, [rel SPSAVE64]
+    test rbx, rbx
+    jz .rf_ff_nf
+    mov [rbx + STKPTRS64.rax_save], rax   ; 6
+.rf_ff_nf:
+    stc
+    jmp .exit_rf
+
 ; ------------------------------------------------------------
-; N2b: handle file layer — AH=3Dh OPEN + AH=3Eh CLOSE (read-only).
-; PLAN.md Phase N2 slices N2b (this) / N2c (3Ch + file 3Fh/40h + 42h).
+; N2b+N2c: handle file layer — 3Dh OPEN + 3Eh CLOSE + 3Ch CREATE +
+; file 3Fh/40h + 42h LSEEK. PLAN.md Phase N2 slices N2b/N2c.
 ; fds 0-2 stay reserved console handles (3Fh stdin / 40h stdout+stderr);
 ; files allocate fds 3..15 from the current context's table.
-%define FD_FILE_MIN 3
-%define FD_FILE_MAX 15
-%define HDESC_N 16
-%define HDESC_QWORDS 5
-%define HDESC_STATE 0       ; qword idx: 0 free, 1 open read-only (2 = rw, N2c)
-%define HDESC_FIRST 1       ; first cluster
-%define HDESC_SIZEB 2       ; size bytes
-%define HDESC_POS 3         ; position (N2c; 0)
-%define HDESC_OWNER 4       ; owner PSP, 0 = kernel context (sweep: N2d)
+; fs_hdesc: 16 system-wide open-file descriptions, 13 qwords each:
+;   +0  state (0 free, 1 open read-only, 2 open read/write)
+;   +8  FCB64 image (80B): fs_make/open/create/io operate DIRECTLY on it,
+;       so firclus/filsiz need no sync protocol (the desc IS the state);
+;       handle I/O forces recsiz=1 (byte-exact positions).
+;   +88 pos (byte position; == RR since recsiz=1)
+;   +96 owner PSP (0 = kernel context; close-on-exit sweep: N2d)
+; (N2c: embedded-FCB replaces N2b's 5-qword + scratch-FCB design — the
+; scratch copy invited sync bugs; field constants live with MAXCOM above
+; because the 3Fh/40h branches precede this block.)
 
 ; fd_table_base64 — Out: RAX = 16-qword fd table for the current context:
 ;   entered-child slot PSP (proc_psp[]) + fd_table, else kern_fd_table.
@@ -1047,21 +1127,88 @@ fd_table_base64:
     lea rax, [rel kern_fd_table]
     ret
 
-; handler_open_file — AH=3Dh OPEN handle (N2b: read-only files).
-;   Direct: RDI=mode (0 read-only; 1/2 fail until N2c), RDX=name ptr
+; hdl_parse_name — validate + parse a handle path into an FCB (3Ch/3Dh).
+;   In: RDX=name (NUL-terminated 8.3), RDI=FCB target (80B).
+;   Out: CF 0 ok; CF 1 + RAX=2 (not-found class) on null/empty/malformed/
+;        wild/partial-parse/non-A: drive. Clobbers RAX/RSI only (fs_make
+;        preserves the rest; RDI itself is preserved for the caller).
+hdl_parse_name:
+    test rdx, rdx
+    jz .bad_pn
+    cmp byte [rdx], 0
+    je .bad_pn
+    mov rsi, rdx
+    xor eax, eax                 ; AL=0: no separator skipping (DOS-strict)
+    call fs_make_fcb64
+    jc .bad_pn                   ; AL=0xFF malformed
+    test al, al
+    jnz .bad_pn                  ; wild flag: no ?/* for handles
+    cmp byte [rsi], 0            ; parser must consume the whole string:
+    jne .bad_pn                  ; '\' '/' and trailing junk stop the cursor
+    cmp byte [rdi + FCB64.drive], 1   ; 0 default / 1 A: only (one volume)
+    ja .bad_pn
+    xor eax, eax
+    clc
+    ret
+.bad_pn:
+    mov eax, 2
+    stc
+    ret
+
+; hdl_desc_ptr — resolve fd to its description (shared by 3Eh/3Fh/40h/42h).
+;   In: ECX=fd. Out: RAX=desc base, EDX=state (!=0), CF 0; CF 1 + RAX=6
+;   (invalid handle) on bad fd / closed / table-descriptor desync.
+;   Clobbers RAX/RDX/R8/RBX only; preserves RCX + R9-R15 + RSI/RDI.
+hdl_desc_ptr:
+    cmp ecx, FD_FILE_MIN
+    jb .bad_hd
+    cmp ecx, FD_FILE_MAX
+    ja .bad_hd
+    call fd_table_base64         ; RAX=table (clobbers RAX/RBX only)
+    mov r8, rax
+    mov rdx, [r8 + rcx*8]        ; 1-based desc idx, 0 = not open
+    test rdx, rdx
+    jz .bad_hd
+    dec edx
+    cmp edx, HDESC_N
+    jae .bad_hd
+    lea rax, [rel fs_hdesc]
+    imul rdx, rdx, HDESC_STRIDE*8
+    add rax, rdx
+    mov edx, [rax + HDESC_STATE*8]
+    test edx, edx
+    jz .bad_hd
+    clc
+    ret
+.bad_hd:
+    mov eax, 6
+    stc
+    ret
+
+; handler_open_file / hdl_open_core — AH=3Dh OPEN handle (read-only files).
+;   Trap (DISPATCH target): RAX=0x3Dmm (AL=mode, DOS 0/1/2), RDX=name
 ;           (NUL-terminated 8.3, flat root only).
-;   Trap: RAX=0x3Dmm (AL=mode, DOS 0/1/2), RDX=name; mode comes from AL
-;           iff AH==0x3D (same trap/direct split as handler_exit_process).
+;   Direct (hdl_open_core): RDI=mode (0 read-only; 1/2 fail until N2c),
+;           RDX=name, no RAX constraint.
 ;   Out: RAX=fd (3..15, DOS-ish errors below), CF 0 ok / 1 fail. Trap path
 ;        also writes RAX to the SPSAVE64 rax_save slot (3Fh pattern).
 ;   Fail codes (DOS-flavored): 2 not-found/bad-name, 4 table full,
 ;        5 access-denied (write modes until N2c).
 ;   Name rules: X: drive prefix parsed by the FCB layer (0/A: accepted);
-;        '\' '/' subdirs rejected (flat root only); wildcards rejected.
+;        partial parses ('\' '/'/trailing junk) and wildcards rejected.
 ;   Zero device writes on every path: mount is read-only on clean images
-;        and open fills only the scratch FCB + RAM tables.
+;        and open fills only the desc FCB + RAM tables.
+; handler_open_file — AH=3Dh trap entry: DOS AL mode -> RDI, enter core.
+;   Direct callers use hdl_open_core (RDI=mode, no RAX constraint) instead —
+;   splitting the two keeps libc-style direct calls unambiguous (a stale
+;   RAX=0x3Dxx must never reroute a direct call; same reason 42h splits).
 handler_open_file:
+    movzx edi, al
+    jmp hdl_open_core
+
+hdl_open_core:
     push rbx
+    push rbp
     push rcx
     push rdx
     push rsi
@@ -1070,54 +1217,15 @@ handler_open_file:
     push r9
     push r10
     push r11
-    mov r10d, 2                  ; default err: file not found
-    mov ebx, eax
-    shr ebx, 8
-    and ebx, 0xFF
-    cmp bl, 0x3D
-    jne .use_rdi_of
-    movzx edi, al                ; trap: DOS AL mode
-.use_rdi_of:
-    test rdi, rdi                ; N2b: mode 0 (read-only) only
+    test rdi, rdi                ; mode 0 (read-only) only for now
     jz .mode_ok_of
-    mov r10d, 5                  ; write modes -> denied until N2c
+    mov eax, 5                   ; write modes -> denied until N2c
     jmp .fail_of
 .mode_ok_of:
-    test rdx, rdx
-    jz .fail_of
-    cmp byte [rdx], 0
-    je .fail_of
-    mov rsi, rdx                 ; RDX intact: name
-    lea rdi, [rel hdl_fcb]
-    xor eax, eax                 ; AL=0: no separator skipping (DOS-strict)
-    call fs_make_fcb64
-    jc .fail_of                  ; AL=0xFF malformed
-    test al, al
-    jnz .fail_of                 ; wild flag: no ?/* for 3Dh
-    cmp byte [rsi], 0            ; parser must consume the whole string:
-    jne .fail_of                 ; '\' '/' and trailing junk stop the cursor
-                                 ; (flat root only; stricter than not-found)
-    mov al, [rel hdl_fcb + FCB64.drive]
-    cmp al, 1                    ; 0 default / 1 A: only (one volume)
-    ja .fail_of
-    call vol_ensure_mounted
-    jc .fail_of
-    lea rdi, [rel hdl_fcb]
-    lea rbp, [rel fs_vol_dpb]
-    lea rsi, [rel fs_vol_root]
-    call fs_fcb_open64
-    test rax, rax
-    jnz .fail_of                 ; not found (err already 2)
-    mov r9d, [rel hdl_fcb + FCB64.firclus]
-    mov r10, [rel hdl_fcb + FCB64.filsiz]   ; size (kept live; err stays 2)
-    test r10, r10
-    jz .empty_ok_of
-    cmp r9d, 2                   ; nonzero size needs a real first cluster;
-    jb .fail_of                  ; refuse corrupt dirents (scrub DANGLING)
-.empty_ok_of:
     call fd_table_base64         ; RAX=table (clobbers RAX/RBX only)
     mov r11, rax
-    mov ecx, FD_FILE_MIN         ; alloc fd slot first (no rollback needed)
+    mov ecx, FD_FILE_MIN         ; alloc fd slot first (commit is last,
+                                 ; so parse/open failures roll back free)
 .fdscan_of:
     cmp ecx, FD_FILE_MAX+1
     jae .full_of
@@ -1126,26 +1234,44 @@ handler_open_file:
     inc ecx
     jmp .fdscan_of
 .full_of:
-    mov r10d, 4                  ; too many open files
+    mov eax, 4                   ; too many open files
     jmp .fail_of
-.fdfound_of:                     ; ECX=fd
+.fdfound_of:                     ; ECX=fd, RDX=name, R11=table
     lea rbx, [rel fs_hdesc]      ; alloc description
     xor r8d, r8d
 .dscan_of:
     cmp r8d, HDESC_N
     jae .full_of
     mov rax, r8
-    imul rax, rax, HDESC_QWORDS*8
+    imul rax, rax, HDESC_STRIDE*8
     cmp qword [rbx + rax + HDESC_STATE*8], 0
     je .dfound_of
     inc r8d
     jmp .dscan_of
-.dfound_of:                      ; R8=desc idx, ECX=fd, R9D=firstclus,
-                                 ; R10=size (live since open; scans spared it)
-    mov qword [rbx + rax + HDESC_STATE*8], 1
-    mov [rbx + rax + HDESC_FIRST*8], r9
-    mov [rbx + rax + HDESC_SIZEB*8], r10
-    mov qword [rbx + rax + HDESC_POS*8], 0
+.dfound_of:                      ; R8=idx, ECX=fd, R11=table, RDX=name
+    mov rax, r8
+    imul rax, rax, HDESC_STRIDE*8
+    add rbx, rax                 ; RBX=desc base
+    mov rsi, rdx                 ; (hdl_parse_name wants RDX=name too)
+    lea rdi, [rbx + HDESC_FCB*8]
+    call hdl_parse_name          ; fills desc FCB (RDX/RBX/R8/ECX/R11 safe)
+    jc .fail_of                  ; RAX=2 already
+    call vol_ensure_mounted
+    jc .failmount_of
+    lea rdi, [rbx + HDESC_FCB*8]
+    lea rbp, [rel fs_vol_dpb]
+    lea rsi, [rel fs_vol_root]
+    call fs_fcb_open64
+    test rax, rax
+    jnz .fail2_of                ; not found
+    mov eax, [rbx + HDESC_FCB*8 + FCB64.firclus]
+    cmp qword [rbx + HDESC_FCB*8 + FCB64.filsiz], 0
+    je .empty_ok_of
+    cmp eax, 2                   ; nonzero size needs a real first cluster;
+    jb .fail2_of                 ; refuse corrupt dirents (scrub DANGLING)
+.empty_ok_of:
+    mov qword [rbx + HDESC_STATE*8], 1
+    mov qword [rbx + HDESC_POS*8], 0
     mov rdx, [rel proc_current]  ; owner PSP (0 = kernel context)
     cmp rdx, 16
     jae .owner0_of
@@ -1155,10 +1281,7 @@ handler_open_file:
 .owner0_of:
     xor edx, edx
 .owner1_of:
-    lea rax, [rel fs_hdesc]      ; recompute desc addr (rax reused above)
-    mov rbx, r8
-    imul rbx, rbx, HDESC_QWORDS*8
-    mov [rax + rbx + HDESC_OWNER*8], rdx
+    mov [rbx + HDESC_OWNER*8], rdx
     lea rax, [r8 + 1]            ; table slot = 1-based desc idx
     mov [r11 + rcx*8], rax
     mov eax, ecx                 ; RAX=fd
@@ -1176,10 +1299,15 @@ handler_open_file:
     pop rsi
     pop rdx
     pop rcx
+    pop rbp
     pop rbx
     ret
+.failmount_of:
+    mov eax, 2                   ; volume unreachable (not-found class)
+    jmp .fail_of
+.fail2_of:
+    mov eax, 2
 .fail_of:
-    mov eax, r10d
     mov rbx, [rel SPSAVE64]
     test rbx, rbx
     jz .noframe_fof
@@ -1194,14 +1322,135 @@ handler_open_file:
     pop rsi
     pop rdx
     pop rcx
+    pop rbp
     pop rbx
     ret
 
-; handler_close_file — AH=3Eh CLOSE handle (N2b).
+; handler_create_file — AH=3Ch CREATE handle (N2c).
+;   In: RDX=name (NUL-terminated 8.3, flat root only), direct and trap
+;       alike (DOS CX attributes ignored — always 0x20 archive, matching
+;       fs_fcb_create64). No RAX dependence, so one label serves both.
+;   Out: RAX=fd (3..15, writable state 2), CF 0 ok / 1 fail. Trap frame
+;        updated. Truncate-if-exists (root-first inside fs_fcb_create64:
+;        zeroed size/firstclus flushed BEFORE the old tail is freed, so a
+;        reset between leaves a reclaimable orphan leak, never a dangling
+;        entry). Fail codes: 2 bad-name/volume, 4 table full, 5 denied
+;        (dir full / FAT or flush failure — closest DOS analog).
+handler_create_file:
+    push rbx
+    push rbp
+    push rcx
+    push rdx
+    push rsi
+    push rdi
+    push r8
+    push r9
+    push r10
+    push r11
+    call fd_table_base64         ; RAX=table (clobbers RAX/RBX only)
+    mov r11, rax
+    mov ecx, FD_FILE_MIN         ; alloc fd slot first (commit is last)
+.fdscan_cf:
+    cmp ecx, FD_FILE_MAX+1
+    jae .full_cf
+    cmp qword [r11 + rcx*8], 0
+    je .fdfound_cf
+    inc ecx
+    jmp .fdscan_cf
+.full_cf:
+    mov eax, 4                   ; too many open files
+    jmp .fail_cf2
+.fdfound_cf:                     ; ECX=fd, R11=table, RDX=name
+    lea rbx, [rel fs_hdesc]      ; alloc description
+    xor r8d, r8d
+.dscan_cf:
+    cmp r8d, HDESC_N
+    jae .full_cf
+    mov rax, r8
+    imul rax, rax, HDESC_STRIDE*8
+    cmp qword [rbx + rax + HDESC_STATE*8], 0
+    je .dfound_cf
+    inc r8d
+    jmp .dscan_cf
+.dfound_cf:                      ; R8=idx, ECX=fd, R11=table, RDX=name
+    mov rax, r8
+    imul rax, rax, HDESC_STRIDE*8
+    add rbx, rax                 ; RBX=desc base
+    lea rdi, [rbx + HDESC_FCB*8]
+    call hdl_parse_name          ; fills desc FCB (RDX/RBX/R8/ECX/R11 safe)
+    jc .fail_cf2                 ; RAX=2 already
+    call vol_ensure_mounted
+    jc .failmount_cf2
+    lea rdi, [rbx + HDESC_FCB*8]
+    call fs_fcb_create64         ; returns RBX=dirent (desc base recomputed
+    test rax, rax                ; below); pushes r8/r9/r10, spares r11
+    jnz .fail5_cf2
+    lea rbx, [rel fs_hdesc]      ; recompute desc base (create used RBX)
+    mov rax, r8
+    imul rax, rax, HDESC_STRIDE*8
+    add rbx, rax
+    mov qword [rbx + HDESC_STATE*8], 2   ; writable
+    mov qword [rbx + HDESC_POS*8], 0
+    mov rdx, [rel proc_current]  ; owner PSP (0 = kernel context)
+    cmp rdx, 16
+    jae .owner0_cf
+    lea rax, [rel proc_psp]
+    mov rdx, [rax + rdx*8]
+    jmp .owner1_cf
+.owner0_cf:
+    xor edx, edx
+.owner1_cf:
+    mov [rbx + HDESC_OWNER*8], rdx
+    lea rax, [r8 + 1]            ; table slot = 1-based desc idx
+    mov [r11 + rcx*8], rax
+    mov eax, ecx                 ; RAX=fd
+    mov rbx, [rel SPSAVE64]
+    test rbx, rbx
+    jz .noframe_cf2
+    mov [rbx + STKPTRS64.rax_save], rax
+.noframe_cf2:
+    clc
+    pop r11
+    pop r10
+    pop r9
+    pop r8
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rcx
+    pop rbp
+    pop rbx
+    ret
+.failmount_cf2:
+    mov eax, 2
+    jmp .fail_cf2
+.fail5_cf2:
+    mov eax, 5                   ; cannot create (dir full / FAT / flush)
+.fail_cf2:
+    mov rbx, [rel SPSAVE64]
+    test rbx, rbx
+    jz .noframe_fcf2
+    mov [rbx + STKPTRS64.rax_save], rax
+.noframe_fcf2:
+    stc
+    pop r11
+    pop r10
+    pop r9
+    pop r8
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rcx
+    pop rbp
+    pop rbx
+    ret
+
+; handler_close_file — AH=3Eh CLOSE handle.
 ;   In: RBX=fd, direct and trap (BX) alike — same reg, no AH split needed.
 ;   Out: RAX=0 ok / 6 invalid handle, CF accordingly; trap frame updated.
-;   Fds 0-2 (console) fail honestly; double close fails. N2b descs are
-;   read-only so no flush is needed (N2c hook: writable+dirty flush here).
+;   Fds 0-2 (console) fail honestly; double close fails. Writes flush
+;   through at op end (fs_fcb_io64 FAT-first commit), so close only frees
+;   the table slot + descriptor (dir timestamps deferred to N2d).
 handler_close_file:
     push rbx
     push rcx
@@ -1214,28 +1463,14 @@ handler_close_file:
     push r11
     mov ecx, ebx
     and ecx, 0xFFFF
-    cmp ecx, FD_FILE_MIN
-    jb .fail_cf
-    cmp ecx, FD_FILE_MAX
-    ja .fail_cf
-    call fd_table_base64         ; RAX=table (clobbers RAX/RBX only)
-    mov r8, rax
-    mov rdx, [r8 + rcx*8]        ; 1-based desc idx, 0 = not open
-    test rdx, rdx
-    jz .fail_cf
-    dec edx
-    cmp edx, HDESC_N
-    jae .fail_cf                 ; table/descriptor desync (paranoia)
-    lea rax, [rel fs_hdesc]
-    imul rdx, rdx, HDESC_QWORDS*8
-    cmp qword [rax + rdx + HDESC_STATE*8], 0
-    je .fail_cf
-    mov qword [rax + rdx + HDESC_STATE*8], 0
-    mov qword [rax + rdx + HDESC_FIRST*8], 0
-    mov qword [rax + rdx + HDESC_SIZEB*8], 0
-    mov qword [rax + rdx + HDESC_POS*8], 0
-    mov qword [rax + rdx + HDESC_OWNER*8], 0
-    mov qword [r8 + rcx*8], 0
+    call hdl_desc_ptr            ; RAX=desc (clobbers RAX/RDX/R8/RBX)
+    jc .fail_cf                  ; RAX=6 already
+    mov r8, rax                  ; desc (fd no longer needed)
+    mov qword [r8 + HDESC_STATE*8], 0
+    mov qword [r8 + HDESC_POS*8], 0
+    mov qword [r8 + HDESC_OWNER*8], 0
+    call fd_table_base64         ; RAX=table
+    mov qword [rax + rcx*8], 0
     xor eax, eax
     mov rbx, [rel SPSAVE64]
     test rbx, rbx
@@ -1254,15 +1489,98 @@ handler_close_file:
     pop rbx
     ret
 .fail_cf:
-    mov eax, 6                   ; invalid handle
     mov rbx, [rel SPSAVE64]
     test rbx, rbx
     jz .noframe_fcf
-    mov [rbx + STKPTRS64.rax_save], rax
+    mov [rbx + STKPTRS64.rax_save], rax   ; RAX=6 from hdl_desc_ptr
 .noframe_fcf:
     stc
     pop r11
     pop r10
+    pop r9
+    pop r8
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rcx
+    pop rbx
+    ret
+
+; handler_lseek_file / hdl_lseek_core — AH=42h LSEEK (N2c).
+;   Trap (DISPATCH target): RAX=0x42oo (AL=origin 0 set / 1 cur / 2 end),
+;           RBX=fd, RCX=signed offset.
+;   Direct (hdl_lseek_core): RBX=fd, RCX=signed offset, RDI=origin.
+;   Out: RAX=new position, CF 0 ok / 1 fail; trap frame updated.
+;   Range 0..size enforced (no sparse extends — documented DOS deviation:
+;   DOS allows beyond-EOF seeks; this engine has no hole representation).
+;   Fail codes: 6 bad fd, 1 bad origin, 25 seek error (out of range).
+;   Pure RAM (desc state only): no disk I/O, no mount needed.
+handler_lseek_file:
+    movzx edi, al
+    jmp hdl_lseek_core
+
+hdl_lseek_core:
+    push rbx
+    push rcx
+    push rdx
+    push rsi
+    push rdi
+    push r8
+    push r9
+    mov r9, rcx                  ; signed offset (r9 free; lookup spares it)
+    mov ecx, ebx                 ; fd
+    call hdl_desc_ptr            ; RAX=desc (clobbers RAX/RDX/R8/RBX)
+    jc .fail_ls                  ; RAX=6 already
+    mov rbx, rax                 ; desc
+    cmp rdi, 0
+    je .org0_ls
+    cmp rdi, 1
+    je .org1_ls
+    cmp rdi, 2
+    je .org2_ls
+    mov eax, 1                   ; bad origin (DOS 1)
+    jmp .fail_ls
+.org0_ls:
+    mov rax, r9
+    jmp .range_ls
+.org1_ls:
+    mov rax, [rbx + HDESC_POS*8]
+    add rax, r9
+    jo .rangefail_ls             ; signed overflow -> out of range
+    jmp .range_ls
+.org2_ls:
+    mov rax, [rbx + HDESC_FCB*8 + FCB64.filsiz]
+    add rax, r9
+    jo .rangefail_ls
+.range_ls:
+    test rax, rax
+    js .rangefail_ls             ; negative -> out of range
+    cmp rax, [rbx + HDESC_FCB*8 + FCB64.filsiz]
+    ja .rangefail_ls             ; beyond EOF -> out of range (no sparse)
+    mov [rbx + HDESC_POS*8], rax
+    mov rbx, [rel SPSAVE64]
+    test rbx, rbx
+    jz .noframe_ls
+    mov [rbx + STKPTRS64.rax_save], rax
+.noframe_ls:
+    clc
+    pop r9
+    pop r8
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rcx
+    pop rbx
+    ret
+.rangefail_ls:
+    mov eax, 25                  ; seek error
+.fail_ls:
+    mov rbx, [rel SPSAVE64]
+    test rbx, rbx
+    jz .noframe_fls
+    mov [rbx + STKPTRS64.rax_save], rax
+.noframe_fls:
+    stc
     pop r9
     pop r8
     pop rdi
@@ -1288,7 +1606,11 @@ handler_write_file:         ; AH=40h
     je .ok_handle_wf
     cmp r8, 2
     je .ok_handle_wf
-    jmp .fail_wf_badhandle
+    cmp r8, FD_FILE_MIN          ; N2c: file fds 3..15 via the desc table
+    jb .fail_wf_badhandle
+    cmp r8, FD_FILE_MAX
+    ja .fail_wf_badhandle
+    jmp .file_wf
 .ok_handle_wf:
     test rdx, rdx
     jz .fail_wf_badbuf
@@ -1344,6 +1666,83 @@ handler_write_file:         ; AH=40h
     pop rcx
     pop rbx
     ret
+
+; .file_wf — N2c file-descriptor writes (R8=fd 3..15, R9=count16, RDX=buf).
+;   Byte-exact via fs_fcb_io64 with recsiz=1; alloc-on-write extends the
+;   chain with zero-filled clusters, and the engine commits FAT-first
+;   (FAT flush, then root flush with the new size) at op end — a reset
+;   between leaves reclaimable orphans, never dangling entries.
+;   Read-only descs (state 1) are denied (DOS 5). On a hard mid-op failure
+;   the pre-op firclus/filsiz snapshot is restored so RAM matches the last
+;   committed dir state (disk may hold reclaimable orphans); the caller
+;   sees CF=1 with RAX=bytes done.
+.file_wf:
+    test rdx, rdx
+    jz .fail_wf_badbuf
+    mov rsi, rdx                 ; buf (rsi free; lookup spares it)
+    mov ecx, r8d                 ; fd
+    call hdl_desc_ptr            ; RAX=desc, EDX=state (fd always validated,
+    jc .fail_wf_file             ; RAX=6 already; even zero-count writes do)
+    cmp edx, 2
+    jne .deny_wf                 ; read-only desc -> access denied
+    test r9, r9
+    jz .ok_zero_wf               ; valid writable fd + zero count: success
+    mov rbx, rax                 ; desc
+    mov dword [rbx + HDESC_FCB*8 + FCB64.recsiz], 1
+    push r12                     ; snapshot firclus/filsiz (io_hard rollback)
+    push r13
+    mov r12d, [rbx + HDESC_FCB*8 + FCB64.firclus]
+    mov r13, [rbx + HDESC_FCB*8 + FCB64.filsiz]
+    mov rdx, rsi                 ; buf
+    mov rsi, [rbx + HDESC_POS*8] ; pos == recno (recsiz=1)
+    mov rcx, r9                  ; n
+    lea rdi, [rbx + HDESC_FCB*8]
+    mov r8d, 1                   ; write
+    call fs_fcb_io64             ; RAX=done (r8-r15 + rbx preserved)
+    jc .hard_wf
+    add [rbx + HDESC_POS*8], rax ; advance pos (size/firstclus already live)
+    pop r13
+    pop r12
+    mov rdx, rax
+    mov rbx, [rel SPSAVE64]
+    test rbx, rbx
+    jz .wf_noframe_f
+    mov [rbx + STKPTRS64.rax_save], rax
+.wf_noframe_f:
+    mov rax, rdx
+    clc
+    jmp .exit_wf
+.hard_wf:
+    mov [rbx + HDESC_FCB*8 + FCB64.firclus], r12d   ; RAM back to committed
+    mov [rbx + HDESC_FCB*8 + FCB64.filsiz], r13
+    pop r13
+    pop r12
+    mov rdx, rax                 ; done-so-far
+    mov rbx, [rel SPSAVE64]
+    test rbx, rbx
+    jz .wf_hard_nf
+    mov [rbx + STKPTRS64.rax_save], rax
+.wf_hard_nf:
+    mov rax, rdx
+    stc
+    jmp .exit_wf
+.deny_wf:
+    mov eax, 5
+    mov rbx, [rel SPSAVE64]
+    test rbx, rbx
+    jz .wf_deny_nf
+    mov [rbx + STKPTRS64.rax_save], rax
+.wf_deny_nf:
+    stc
+    jmp .exit_wf
+.fail_wf_file:
+    mov rbx, [rel SPSAVE64]
+    test rbx, rbx
+    jz .wf_ff_nf
+    mov [rbx + STKPTRS64.rax_save], rax   ; 6
+.wf_ff_nf:
+    stc
+    jmp .exit_wf
 
 ; ------------------------------------------------------------
 ; G1/A2: AUX/COM, RTC date/time, VERIFY, memory/disk pointers.

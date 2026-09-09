@@ -35,10 +35,9 @@ Bochs boots with the same image once its lock is cleared.
 
 ## G1 → done: the INT 21h surface is real (except DOS-reserved slots)
 `src/kernel/syscall64.asm` + `src/kernel/fs64.asm`. Only `AH=18h/20h/2Fh–34h/
-36h–3Ch/41h–47h` stay `mov al,0; ret` — those are DOS-reserved (`INUSE`/
+36h–3Bh/41h–47h` stay `mov al,0; ret` — those are DOS-reserved (`INUSE`/
 `USERCODE`), which DOS 1.25 itself stubs; documented, not a gap.
-(N2b implemented `3Dh` OPEN read-only + `3Eh` CLOSE: new row below;
-`3Ch/42h` land in N2c.)
+(N2b implemented `3Dh`/`3Eh`, N2c `3Ch`/`42h` + file `3Fh`/`40h`: rows.)
 
 | AH | Handler | Backing |
 |---|---|---|
@@ -57,6 +56,9 @@ Bochs boots with the same image once its lock is cleared.
 | 2A–2D | GET/SETDATE/TIME | CMOS RTC 0x70/0x71 (UIP wait, BCD/binary + 12/24h modes, DOS weekday map, 1980+ year heuristic), validated via `cmd_date/time_set64` (also syncs the shell clock); software-clock fallback on RTC failure |
 | 2E | VERIFY | flag stored; AL>1 rejected |
 | 3D/3E | OPEN/CLOSE (handles) | N2b: per-context fd table (`PSP64.fd_table`, fds 3–15 over a 16-entry RAM description table); OPEN read-only (mode 0; 1/2 fail until N2c), flat-root 8.3 names, no wildcards/subdirs; CLOSE frees table+desc (double-close fails); DOS-flavored fail codes (2/4/5/6); zero device writes; test 87 |
+| 3C | CREATE (handles) | N2c: truncate-if-exists (root-first) else alloc; writable fd (state 2); CX attrs ignored (always archive); fail codes 2/4/5; test 88/89 |
+| 3F/40 | READ/WRITE (files) | N2c: fds ≥ 3 via desc table; byte-exact through `fs_fcb_io64` with `recsiz=1`; short reads at EOF (CF=0); alloc-on-write extends with FAT-first commit; ro-desc writes denied (5); partial-failure restores pre-op firclus/filsiz (reclaimable orphans); tests 88/89 |
+| 42 | LSEEK | N2c: signed offset, origins 0/1/2, range clamped to 0..size (no sparse extends — documented DOS deviation); codes 6/1/25; pure RAM, no disk I/O; test 88 |
 
 Record-I/O core `fs_fcb_io64` (per-record `pos=recno*recsiz`, chain walk with
 alloc-on-write, fresh-cluster zeroing so holes read 0, `filsiz` extension,
