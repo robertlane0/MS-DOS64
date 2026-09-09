@@ -129,7 +129,7 @@ init_serial:
     mov al, 0x03
     out dx, al
     mov dx, 0x3F8 + 2
-    xor al, al              ; disable FIFO to avoid Bochs overflow
+    xor al, al              ; disable FIFO to avoid UART overflow
     out dx, al
     mov dx, 0x3F8 + 4
     mov al, 0x03            ; RTS/DTR only, no loopback
@@ -166,7 +166,7 @@ print:
 ; In: AL=char. Out: CF=0 sent, CF=1 dropped (timeout). Preserves BX
 ; (print's page/attr); CX/DX/AX are scratch in the print loop.
 ; Size-tuned for the 512 B MBR: char stashed on the stack (no BL/BX save).
-SERIAL_TIMEOUT equ 0xFFFF        ; ample for Bochs baud delay, still bounded
+SERIAL_TIMEOUT equ 0xFFFF        ; ample for 16550 baud delay, still bounded
 serial_try_putc:
     push ax                     ; stash char (AL clobbered by status IN)
     mov cx, SERIAL_TIMEOUT
@@ -202,7 +202,7 @@ load_lba:
 
 load_chs:
     ; Read stage2 via CHS: LBA1 -> C0 H0 S2, count STAGE2_SECTORS
-    ; Assumes SPT=63, HPC=16 (Bochs config cylinders=20 heads=16 spt=63)
+    ; Assumes SPT=63, HPC=16 (disk image cylinders=20 heads=16 spt=63)
     ; For 15 sectors starting at S2 -> fits within track (S2..16)
     xor ax, ax
     mov es, ax

@@ -166,7 +166,7 @@ serial_print64:
 ; to a machine-wide hang.
 ; In: AL=char. Out: CF=0 sent, CF=1 dropped (timeout).
 ; Preserves RAX/RBX/RCX/RDX/RSI/RDI (only flags/CF clobbered).
-; Timeout: SERIAL_TIMEOUT polls — ample for Bochs 16550 baud delay
+; Timeout: SERIAL_TIMEOUT polls — ample for 16550 baud delay
 ; (per-byte THRE clear ~1000s of polls) yet bounded (<1ms) when LSR is
 ; stuck. QEMU (instant THRE) and missing UART (LSR=0xFF, THRE set) send
 ; on the first poll, so normal output is unchanged.

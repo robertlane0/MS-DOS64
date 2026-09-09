@@ -1,9 +1,9 @@
 # AGENTS.md: Converting MS-DOS v1.25 ASM to 64-bit BIOS Bootable System
 
-> **Status (2026-09-07): implementation complete — smoke 85 + 4 SKIP
-> (`make`, default, non-destructive) and full 89/89 PASS (`make full`,
+> **Status (2026-09-07): implementation complete — smoke 86 + 4 SKIP
+> (`make`, default, non-destructive) and full 90/90 PASS (`make full`,
 > destructive 71/83 in the reserved SCRATCH/RENAMED/CRASH namespace with
-> mount-time recovery) on QEMU and Bochs, then the interactive `COMMAND64`
+> mount-time recovery) on QEMU, then the interactive `COMMAND64`
 > shell (`src/kernel/shell64.asm`).
 > N2a (PLAN.md slice 4) landed: `proc_enter64` cooperative enter/return
 > (tests 84–86, PURE) — EXEC still spawn-only from the shell/trap (N2d).
@@ -14,6 +14,9 @@
 > `fs_fcb_io64` `recsiz=1`, FAT-first commit) + `42h` LSEEK (0..size, no
 > sparse); tests 88 (cycle) + 89 (truncate/delete) DESTRUCTIVE in the
 > `SCRATCH.TXT` namespace; descs now embed the FCB (13 qwords).
+> N2d (slice 7) landed: shell ENTERS programs (`Exit <code>`, `sh_last_exit`
+> for batch `%ERRORLEVEL%`, test 90) + `WRITE.COM` acceptance sample (args
+> + `3Ch`/`40h`/`3Eh` + exit code); full kernel 183/184 sectors.
 > The phase plan below is kept as the build record; every checklist item is done.
 > Current entry points: `README.md` (what works / memory / disk / shell),
 > `docs/18-truth-gap-analysis.md` + `docs/19-closure-g1-g6.md` (audit trail for
@@ -24,7 +27,7 @@
 > (FAT12 crash-ordering: FAT-first commit, mirror heal, scrub/reclaim).
 
 ## Mission
-You are tasked with converting the MIT-licensed MS-DOS v1.25 assembly code to create a fully 64-bit compatible operating system that boots via BIOS on x86-64 hardware. The target platform is Bochs emulator for testing, with the end goal being a working 64-bit OS that preserves the fundamental architecture and behavior of DOS while operating in long mode.
+You are tasked with converting the MIT-licensed MS-DOS v1.25 assembly code to create a fully 64-bit compatible operating system that boots via BIOS on x86-64 hardware. The target platform is QEMU emulator for testing, with the end goal being a working 64-bit OS that preserves the fundamental architecture and behavior of DOS while operating in long mode.
 
 ## Context and Constraints
 
@@ -39,7 +42,7 @@ You are tasked with converting the MIT-licensed MS-DOS v1.25 assembly code to cr
 - **Processor Mode Progression**: Real Mode → Protected Mode → Long Mode (64-bit)
 - **Memory Model**: Flat 64-bit addressing (no segmentation)
 - **Assembler**: NASM ≥ 2.15 (`nasm -f bin` for boot, `nasm -f elf64` + `ld -T linker.ld` + `objcopy -O binary` for the kernel, per `Makefile`)
-- **Testing Platform**: QEMU `qemu-system-x86_64` (primary proof path, `-serial stdio`) and Bochs x86-64 emulator (`bochsrc.txt`: 256 MiB, `cpu: model=ryzen`, BIOS firmware)
+- **Testing Platform**: QEMU `qemu-system-x86_64` (`-serial stdio` proof path, BIOS firmware)
 
 ## Conversion Strategy
 
@@ -347,7 +350,7 @@ endstruc
 ### Pre-Conversion Setup
 - [x] Clone MS-DOS v1.25 source from official Microsoft repository
 - [x] Install NASM 2.15+ (`nasm`, `ld`, `objcopy`, `python3` for `tools/mkfat12.py`)
-- [x] Set up QEMU (primary) + Bochs x86-64 BIOS support (`bochsrc.txt`: 256 MiB, `model=ryzen`)
+- [x] Set up QEMU x86-64 BIOS support for testing
 - [x] Create project structure for 64-bit rewrite (`src/boot|kernel|drivers|lib`, `include/`, `tools/`, `build/`)
 - [x] Set up version control for tracking changes
 
@@ -439,20 +442,12 @@ endstruc
 - [x] Implement batch file processor
 
 ### Testing and Debugging
-- [x] Create Bochs configuration file:
+- [x] Create QEMU run configuration (`make run-qemu`, `-serial stdio`):
   ```
-  megs: 256
-  romimage: file=$BXSHARE/BIOS-bochs-latest
-  vgaromimage: file=$BXSHARE/VGABIOS-lgpl-latest.bin
-  ata0-master: type=disk, path="build/dos64.img", mode=flat, cylinders=20, heads=16, spt=63
-  boot: disk
-  log: bochs.log
-  com1: enabled=1, mode=file, dev=serial.log
-  display_library: nogui
-  cpu: model=ryzen, count=1, ips=50000000, reset_on_triple_fault=1, ignore_bad_msrs=1
+  qemu-system-x86_64 -drive file=build/dos64.img,format=raw -serial stdio -display none
   ```
 - [x] Create bootable disk image with boot sector
-- [x] Test boot sequence in Bochs
+- [x] Test boot sequence in QEMU
 - [x] Verify mode transitions (real → protected → long)
 - [x] Test video output
 - [x] Test keyboard input
@@ -563,9 +558,8 @@ make
 # dd if=build/kernel.bin of=build/dos64.img bs=512 seek=16 conv=notrunc
 # python3 tools/mkfat12.py --vol-lba 512 --vol-totsec 2880 --sector-size 512 --kernel-lba 16 --kernel-sectors 184 build/dos64.img   # stamps FAT12 volume (canonical values: Makefile disk-layout block)
 
-# Test in QEMU (primary) or Bochs
+# Test in QEMU
 make run-qemu
-make run-bochs
 ```
 Expected (smoke `make`): 85 PASS + 4 SKIP on serial, then the `COMMAND64` shell prompt; (full `make full`): 89 PASS, then the shell prompt
 
@@ -597,15 +591,8 @@ Expected (smoke `make`): 85 PASS + 4 SKIP on serial, then the `COMMAND64` shell 
 
 ### Debugging Tools
 
-1. **Bochs Internal Debugger**:
-   ```
-   bochs -f bochsrc.txt -q
-   <bochs:1> b 0x7c00          # Breakpoint at boot sector
-   <bochs:2> c                  # Continue
-   <bochs:3> r                  # Show registers
-   <bochs:4> x /10xb 0x7c00    # Examine memory
-   <bochs:5> s                  # Step instruction
-   ```
+1. **QEMU monitor / GDB stub**: `qemu-system-x86_64 -s -S ...` then
+   `target remote :1234`; `info registers`, `x/10xb 0x7c00`, `stepi`.
 
 2. **Serial Port Logging**: Add serial output for debugging messages
    ```nasm
@@ -625,7 +612,7 @@ Expected (smoke `make`): 85 PASS + 4 SKIP on serial, then the `COMMAND64` shell 
 
 The conversion is successful when:
 
-- [x] System boots via BIOS on Bochs x86-64 emulator
+- [x] System boots via BIOS on QEMU x86-64 emulator
 - [x] Enters 64-bit long mode successfully
 - [x] Can output text to screen without BIOS calls
 - [x] Can read keyboard input without BIOS calls
@@ -682,7 +669,6 @@ Upon completion, you should have:
    - System call reference
    - Build and testing instructions
 5. **Test Programs**: Simple 64-bit .EXE programs demonstrating functionality
-6. **Bochs Configuration**: Ready-to-use bochsrc.txt for testing
 
 ## Appendix: README detail backup (trimmed 2026-09-07)
 
@@ -725,7 +711,7 @@ authoritative.
   counter from `KBC_TIMEOUT*`, `stc` failure branch, 3 checked sites per
   stage, fallback: skip remaining KBC outs, re-assert fast A20, continue).
 - Effect: boot/suite/shell keep working when the UART is absent or never
-  reports THRE; a stuck UART only loses diagnostics. Normal QEMU/Bochs
+  reports THRE; a stuck UART only loses diagnostics. Normal QEMU
   output unchanged; missing UART reads LSR=0xFF (THRE set) so first poll
   succeeds.
 - Limits: serial RX 1 byte deep (typing fine, paste bursts can overrun);
@@ -842,7 +828,7 @@ src/lib/       string64.asm + bcd64.asm (AAM/AAD->DIV, CBW equiv.) + addr64.asm 
 include/       fcb.inc/dpb.inc/psp.inc/mcb.inc/regs.inc/fs.inc/stack.inc (64-bit structures)
 tools/         mkfat12.py (stamps FAT12 volume) + check_volume_clean.py (pre/post cleanliness proof)
 MSDOS.ASM / IO.ASM / COMMAND.ASM   original v1.25 reference (STDDOS.ASM legacy wrapper; build uses src/ via Makefile)
-linker.ld      flat link at 0x100000 (.text.start first)   bochsrc.txt   Bochs config
+linker.ld      flat link at 0x100000 (.text.start first)
 ```
 #### Layering: timekeeping (`time64.asm`)
 - `time64.asm` is a leaf module owning the software clock
@@ -863,21 +849,14 @@ linker.ld      flat link at 0x100000 (.text.start first)   bochsrc.txt   Bochs c
 ### Verify commands (removed from README)
 ```bash
 timeout 25 qemu-system-x86_64 -drive file=build/dos64.img,format=raw -serial stdio -display none
-# tail: Summary: 85 passed, 0 failed ... Skipped (destructive): 4 ... MS-DOS64 shell (COMMAND64). Type HELP for commands.
+# tail: Summary: 86 passed, 0 failed ... Skipped (destructive): 4 ... MS-DOS64 shell (COMMAND64). Type HELP for commands.
 timeout 25 qemu-system-x86_64 -drive file=build/dos64-full.img,format=raw -serial stdio -display none
-# tail: Summary: 89 passed, 0 failed ... MS-DOS64 shell (COMMAND64).
+# tail: Summary: 90 passed, 0 failed ... MS-DOS64 shell (COMMAND64).
 python3 tools/check_volume_clean.py --vol-lba 512 --vol-totsec 2880 --sector-size 512 --kernel-lba 16 --kernel-sectors 184 build/dos64.img
 python3 tools/check_volume_clean.py --vol-lba 512 --vol-totsec 2880 --sector-size 512 --kernel-lba 16 --kernel-sectors 184 build/dos64-full.img
 printf '\rDIR\rTYPE HELLO.TXT\rHELP\rEXIT\r' | timeout 25 qemu-system-x86_64 -drive file=build/dos64.img,format=raw -serial stdio -display none
-rm -f bochs.log serial.log build/dos64.img.lock && make run-bochs; cat serial.log
-# (run-bochs boots build/dos64.img via the rendered build/bochsrc-dos64.txt;
-# run-bochs-full / run-bochs-lean boot their own images via build/bochsrc-dos64-full.txt
-# / build/bochsrc-dos64-lean.txt rendered from bochsrc.txt.in — see Makefile check-bochsrc)
 ```
 - Make targets: `make` (smoke img), `make full` (destructive full img),
   `make lean` (no self-test img), `make run-qemu` / `run-qemu-full` /
-  `run-qemu-lean` / `run-bochs` / `run-bochs-full` / `run-bochs-lean` (bochs targets boot
-  their own rendered `build/bochsrc-*.txt` and clear their own stale
-  lock first), `make clean`, `make check-layout` / `check-layout-neg` /
-  `check-kbc` / `check-serial` / `check-selftest-modes` / `check-debug-symbols` /
-  `check-bochsrc`.
+  `run-qemu-lean`, `make clean`, `make check-layout` / `check-layout-neg` /
+  `check-kbc` / `check-serial` / `check-selftest-modes` / `check-debug-symbols`.

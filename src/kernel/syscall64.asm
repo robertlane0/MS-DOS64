@@ -175,15 +175,10 @@ NUMDRV64: resb 1
 VERIFY_FLAG64: resb 1
 global VERIFY_FLAG64
 srch_next_slot: resq 1
-; N2b handle layer (AH=3Dh/3Eh; 3Ch/42h + file 3Fh/40h land in N2c).
-; kern_fd_table mirrors PSP64.fd_table (16 qwords) for the kernel context
-; (proc_current slot with no PSP, e.g. shell/harness): slot content is a
-; 1-based index into fs_hdesc, 0 = free. Fds 0-2 are reserved console
-; handles (never allocated); files live at 3..15.
-; fs_hdesc: 16 system-wide open-file descriptions, 5 qwords each:
-;   +0 state (0 free, 1 open read-only; 2 open read/write lands in N2c),
-;   +8 first cluster, +16 size bytes, +24 position (N2c; 0),
-;   +32 owner PSP (0 = kernel context; close-on-exit sweep lands in N2d).
+; N2b+N2c handle layer tables (layout documented at the FD_ defines above).
+; kern_fd_table mirrors PSP64.fd_table for the kernel context (shell/
+; harness); both follow the psp_init64 convention — [0..2] console
+; identity, rest -1 = free (N2d lesson: 0-means-free broke child opens).
 kern_fd_table: resq 16
 fs_hdesc:      resq 16*13
 ; Debug/self-test hooks (fail-point markers, EXEC introspection).
@@ -207,11 +202,22 @@ syscall_init:
     mov byte [rel THISDRV64], 0
     mov byte [rel CURDRV64], 0
     mov byte [rel NUMDRV64], 2   ; A:+B: (Phase9: SELDSK bounds, GETDRV)
-    ; N2b handle layer starts empty (BSS is not trusted zeroed).
+    ; N2d handle layer: PSP fd_table convention — [0..2] identity
+    ; (console), rest -1 (free). BSS is not trusted zeroed; match
+    ; psp_init64 exactly (a -1/0 mismatch silently breaks child opens).
     cld
     lea rdi, [rel kern_fd_table]
-    mov rcx, 16
-    rep stosq
+    xor eax, eax
+    stosq                        ; [0] = 0
+    inc rax
+    stosq                        ; [1] = 1
+    inc rax
+    stosq                        ; [2] = 2
+    mov ecx, 13
+    mov rax, -1
+    rep stosq                    ; [3..15] = -1 (free)
+    xor eax, eax                 ; descs: 0 = free (RAX is still -1 above;
+                                 ; forgetting this poisons every open (N2d))
     lea rdi, [rel fs_hdesc]
     mov rcx, 16*13
     rep stosq
@@ -1105,7 +1111,8 @@ handler_read_file:          ; AH=3Fh
 ;       so firclus/filsiz need no sync protocol (the desc IS the state);
 ;       handle I/O forces recsiz=1 (byte-exact positions).
 ;   +88 pos (byte position; == RR since recsiz=1)
-;   +96 owner PSP (0 = kernel context; close-on-exit sweep: N2d)
+;   +96 owner PSP (0 = kernel context; close-on-exit sweep deferred to N3
+;       for slot space — only buggy children leak, none in-tree)
 ; (N2c: embedded-FCB replaces N2b's 5-qword + scratch-FCB design — the
 ; scratch copy invited sync bugs; field constants live with MAXCOM above
 ; because the 3Fh/40h branches precede this block.)
@@ -1125,6 +1132,57 @@ fd_table_base64:
     ret
 .fd_kern:
     lea rax, [rel kern_fd_table]
+    ret
+
+; hdl_alloc_handle — alloc fd slot (3..15 ascending) + free description.
+;   Shared by 3Ch/3Dh (saves ~30B over two inline copies).
+;   Out: ECX=fd, R8=desc idx, R11=table base, RBX=desc base, CF 0;
+;   CF 1 + RAX=4 (too many open) when either is exhausted. Nothing is
+;   committed (state/table untouched), so failures roll back free.
+;   Clobbers RAX/RBX/RCX/R8/R11 only.
+hdl_alloc_handle:
+    call fd_table_base64         ; RAX=table (clobbers RAX/RBX only)
+    mov r11, rax
+    mov ecx, FD_FILE_MIN
+.fah_fd:
+    cmp ecx, FD_FILE_MAX+1
+    jae .fah_full
+    cmp qword [r11 + rcx*8], -1  ; FREE is -1 (psp_init64 convention)
+    je .fah_fdf
+    inc ecx
+    jmp .fah_fd
+.fah_fdf:
+    lea rbx, [rel fs_hdesc]
+    xor r8d, r8d
+.fah_desc:
+    cmp r8d, HDESC_N
+    jae .fah_full
+    mov rax, r8
+    imul rax, rax, HDESC_STRIDE*8
+    cmp qword [rbx + rax + HDESC_STATE*8], 0
+    je .fah_df
+    inc r8d
+    jmp .fah_desc
+.fah_df:
+    add rbx, rax                 ; RBX=desc base
+    clc
+    ret
+.fah_full:
+    mov eax, 4
+    stc
+    ret
+
+; hdl_owner_psp — Out: RDX = current owner PSP (0 = kernel context).
+; Shared by 3Ch/3Dh. Clobbers RAX/RDX only.
+hdl_owner_psp:
+    mov rdx, [rel proc_current]
+    cmp rdx, 16                  ; == PROC_MAX (proc64 %define, not global)
+    jae .own0_ho
+    lea rax, [rel proc_psp]
+    mov rdx, [rax + rdx*8]
+    ret
+.own0_ho:
+    xor edx, edx
     ret
 
 ; hdl_parse_name — validate + parse a handle path into an FCB (3Ch/3Dh).
@@ -1222,37 +1280,8 @@ hdl_open_core:
     mov eax, 5                   ; write modes -> denied until N2c
     jmp .fail_of
 .mode_ok_of:
-    call fd_table_base64         ; RAX=table (clobbers RAX/RBX only)
-    mov r11, rax
-    mov ecx, FD_FILE_MIN         ; alloc fd slot first (commit is last,
-                                 ; so parse/open failures roll back free)
-.fdscan_of:
-    cmp ecx, FD_FILE_MAX+1
-    jae .full_of
-    cmp qword [r11 + rcx*8], 0
-    je .fdfound_of
-    inc ecx
-    jmp .fdscan_of
-.full_of:
-    mov eax, 4                   ; too many open files
-    jmp .fail_of
-.fdfound_of:                     ; ECX=fd, RDX=name, R11=table
-    lea rbx, [rel fs_hdesc]      ; alloc description
-    xor r8d, r8d
-.dscan_of:
-    cmp r8d, HDESC_N
-    jae .full_of
-    mov rax, r8
-    imul rax, rax, HDESC_STRIDE*8
-    cmp qword [rbx + rax + HDESC_STATE*8], 0
-    je .dfound_of
-    inc r8d
-    jmp .dscan_of
-.dfound_of:                      ; R8=idx, ECX=fd, R11=table, RDX=name
-    mov rax, r8
-    imul rax, rax, HDESC_STRIDE*8
-    add rbx, rax                 ; RBX=desc base
-    mov rsi, rdx                 ; (hdl_parse_name wants RDX=name too)
+    call hdl_alloc_handle        ; ECX=fd, R8=idx, R11=table, RBX=desc
+    jc .fail_of                  ; RAX=4 already (RDX=name untouched)
     lea rdi, [rbx + HDESC_FCB*8]
     call hdl_parse_name          ; fills desc FCB (RDX/RBX/R8/ECX/R11 safe)
     jc .fail_of                  ; RAX=2 already
@@ -1272,15 +1301,7 @@ hdl_open_core:
 .empty_ok_of:
     mov qword [rbx + HDESC_STATE*8], 1
     mov qword [rbx + HDESC_POS*8], 0
-    mov rdx, [rel proc_current]  ; owner PSP (0 = kernel context)
-    cmp rdx, 16
-    jae .owner0_of
-    lea rax, [rel proc_psp]
-    mov rdx, [rax + rdx*8]
-    jmp .owner1_of
-.owner0_of:
-    xor edx, edx
-.owner1_of:
+    call hdl_owner_psp           ; RDX=owner (clobbers RAX/RDX only)
     mov [rbx + HDESC_OWNER*8], rdx
     lea rax, [r8 + 1]            ; table slot = 1-based desc idx
     mov [r11 + rcx*8], rax
@@ -1347,35 +1368,8 @@ handler_create_file:
     push r9
     push r10
     push r11
-    call fd_table_base64         ; RAX=table (clobbers RAX/RBX only)
-    mov r11, rax
-    mov ecx, FD_FILE_MIN         ; alloc fd slot first (commit is last)
-.fdscan_cf:
-    cmp ecx, FD_FILE_MAX+1
-    jae .full_cf
-    cmp qword [r11 + rcx*8], 0
-    je .fdfound_cf
-    inc ecx
-    jmp .fdscan_cf
-.full_cf:
-    mov eax, 4                   ; too many open files
-    jmp .fail_cf2
-.fdfound_cf:                     ; ECX=fd, R11=table, RDX=name
-    lea rbx, [rel fs_hdesc]      ; alloc description
-    xor r8d, r8d
-.dscan_cf:
-    cmp r8d, HDESC_N
-    jae .full_cf
-    mov rax, r8
-    imul rax, rax, HDESC_STRIDE*8
-    cmp qword [rbx + rax + HDESC_STATE*8], 0
-    je .dfound_cf
-    inc r8d
-    jmp .dscan_cf
-.dfound_cf:                      ; R8=idx, ECX=fd, R11=table, RDX=name
-    mov rax, r8
-    imul rax, rax, HDESC_STRIDE*8
-    add rbx, rax                 ; RBX=desc base
+    call hdl_alloc_handle        ; ECX=fd, R8=idx, R11=table, RBX=desc
+    jc .fail_cf2                 ; RAX=4 already (RDX=name untouched)
     lea rdi, [rbx + HDESC_FCB*8]
     call hdl_parse_name          ; fills desc FCB (RDX/RBX/R8/ECX/R11 safe)
     jc .fail_cf2                 ; RAX=2 already
@@ -1391,15 +1385,7 @@ handler_create_file:
     add rbx, rax
     mov qword [rbx + HDESC_STATE*8], 2   ; writable
     mov qword [rbx + HDESC_POS*8], 0
-    mov rdx, [rel proc_current]  ; owner PSP (0 = kernel context)
-    cmp rdx, 16
-    jae .owner0_cf
-    lea rax, [rel proc_psp]
-    mov rdx, [rax + rdx*8]
-    jmp .owner1_cf
-.owner0_cf:
-    xor edx, edx
-.owner1_cf:
+    call hdl_owner_psp           ; RDX=owner (clobbers RAX/RDX only)
     mov [rbx + HDESC_OWNER*8], rdx
     lea rax, [r8 + 1]            ; table slot = 1-based desc idx
     mov [r11 + rcx*8], rax
@@ -1462,7 +1448,7 @@ handler_close_file:
     push r10
     push r11
     mov ecx, ebx
-    and ecx, 0xFFFF
+    and ecx, 0xFFFF              ; BX semantics (matches 3Fh/40h/42h)
     call hdl_desc_ptr            ; RAX=desc (clobbers RAX/RDX/R8/RBX)
     jc .fail_cf                  ; RAX=6 already
     mov r8, rax                  ; desc (fd no longer needed)
@@ -1470,7 +1456,7 @@ handler_close_file:
     mov qword [r8 + HDESC_POS*8], 0
     mov qword [r8 + HDESC_OWNER*8], 0
     call fd_table_base64         ; RAX=table
-    mov qword [rax + rcx*8], 0
+    mov qword [rax + rcx*8], -1  ; FREE is -1 (psp_init64 convention)
     xor eax, eax
     mov rbx, [rel SPSAVE64]
     test rbx, rbx
@@ -1528,30 +1514,32 @@ hdl_lseek_core:
     push r8
     push r9
     mov r9, rcx                  ; signed offset (r9 free; lookup spares it)
-    mov ecx, ebx                 ; fd
+    mov ecx, ebx
+    and ecx, 0xFFFF              ; BX semantics (matches 3Eh/3Fh/40h)
     call hdl_desc_ptr            ; RAX=desc (clobbers RAX/RDX/R8/RBX)
     jc .fail_ls                  ; RAX=6 already
     mov rbx, rax                 ; desc
-    cmp rdi, 0
-    je .org0_ls
-    cmp rdi, 1
-    je .org1_ls
-    cmp rdi, 2
+    cmp rdi, 2                   ; origin: ja catches 3+ AND negatives
+    ja .badorg_ls                ; (unsigned compare: negatives are huge)
     je .org2_ls
-    mov eax, 1                   ; bad origin (DOS 1)
-    jmp .fail_ls
-.org0_ls:
-    mov rax, r9
-    jmp .range_ls
-.org1_ls:
+    test rdi, rdi
+    jz .org0_ls
+    ; == 1: relative-to-current falls through
     mov rax, [rbx + HDESC_POS*8]
     add rax, r9
-    jo .rangefail_ls             ; signed overflow -> out of range
+    jo .rangefail_ls
+    jmp .range_ls
+.org0_ls:
+    mov rax, r9
     jmp .range_ls
 .org2_ls:
     mov rax, [rbx + HDESC_FCB*8 + FCB64.filsiz]
     add rax, r9
     jo .rangefail_ls
+    jmp .range_ls
+.badorg_ls:
+    mov eax, 1                   ; bad origin (DOS 1)
+    jmp .fail_ls
 .range_ls:
     test rax, rax
     js .rangefail_ls             ; negative -> out of range
@@ -1727,19 +1715,12 @@ handler_write_file:         ; AH=40h
     stc
     jmp .exit_wf
 .deny_wf:
-    mov eax, 5
-    mov rbx, [rel SPSAVE64]
-    test rbx, rbx
-    jz .wf_deny_nf
-    mov [rbx + STKPTRS64.rax_save], rax
-.wf_deny_nf:
-    stc
-    jmp .exit_wf
-.fail_wf_file:
+    mov eax, 5                   ; read-only desc -> access denied
+.fail_wf_file:                   ; (RAX=6 from lookup, or 5 above)
     mov rbx, [rel SPSAVE64]
     test rbx, rbx
     jz .wf_ff_nf
-    mov [rbx + STKPTRS64.rax_save], rax   ; 6
+    mov [rbx + STKPTRS64.rax_save], rax
 .wf_ff_nf:
     stc
     jmp .exit_wf

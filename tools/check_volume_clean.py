@@ -55,7 +55,7 @@ DATABIN_NAME = b"DATA    BIN"
 # enough for the shell's 4 KiB staging buffer (sh_file); anything else
 # (live test names, missing base files, dangling/xlink/orphans) is dirty
 # exactly as before.
-SAMPLE_NAMES = {b"HELLO   COM", b"ECHO    COM", b"CAT     COM"}
+SAMPLE_NAMES = {b"HELLO   COM", b"ECHO    COM", b"CAT     COM", b"WRITE   COM"}
 SAMPLE_MAX_BYTES = 4096
 
 

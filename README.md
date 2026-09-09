@@ -9,14 +9,14 @@ Boot runs a short self-test, then drops you at an `A>` prompt.
 
 ## Status
 
-Works on QEMU (recommended) and Bochs. Default build passes 85 checks
-with 4 skipped; `make full` runs all 89, then starts the shell either way.
+Works on QEMU. Default build passes 86 checks
+with 4 skipped; `make full` runs all 90, then starts the shell either way.
 Design notes live in `docs/`; `AGENTS.md` has the full build record.
 
 ## Requirements
 
 - `nasm >= 2.15`, `ld` / `objcopy`, `python3`
-- `qemu-system-x86_64` or Bochs
+- `qemu-system-x86_64`
 
 ## Build and run
 
@@ -27,9 +27,6 @@ make full         # full destructive test image (build/dos64-full.img)
 make run-qemu-full
 make lean         # skip self-test entirely, straight to shell
 make run-qemu-lean
-make run-bochs    # boot smoke image (rendered build/bochsrc-dos64.txt)
-make run-bochs-full  # boot full image (rendered build/bochsrc-dos64-full.txt)
-make run-bochs-lean  # boot lean image (rendered build/bochsrc-dos64-lean.txt)
 make clean
 ```
 

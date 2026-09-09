@@ -23,29 +23,35 @@ struc PSP64
     .fcb2       resb 32   ; +0x80: FCB 2 (original 0x6C)
     .cmd_len    resb 1    ; +0xA0: command tail length (original 0x80)
     .cmd_tail   resb 127  ; +0xA1: command tail (127 bytes, original 0x81)
-    .pad1       resb 32   ; pad to 0x100
-    ; --- 64-bit extensions beyond 256 ---
-    .env_ptr    resq 1    ; +0x100: environment block linear address (was word at 0x2C in DOS2+)
-    .cr3        resq 1    ; +0x108: page table base for process isolation
-    .rsp0       resq 1    ; +0x110: kernel stack pointer (RSP) on entry
-    .rflags     resq 1    ; +0x118: saved RFLAGS
-    .rax_save   resq 1    ; +0x120: extended register save area (R8-R15)
-    .rbx_save   resq 1    ; +0x128
-    .rcx_save   resq 1    ; +0x130
-    .rdx_save   resq 1    ; +0x138
-    .rsi_save   resq 1    ; +0x140
-    .rdi_save   resq 1    ; +0x148
-    .rbp_save   resq 1    ; +0x150
-    .r8_save    resq 1    ; +0x158
-    .r9_save    resq 1    ; +0x160
-    .r10_save   resq 1    ; +0x168
-    .r11_save   resq 1    ; +0x170
-    .r12_save   resq 1    ; +0x178
-    .r13_save   resq 1    ; +0x180
-    .r14_save   resq 1    ; +0x188
-    .r15_save   resq 1    ; +0x190
-    .fd_table   resq 16   ; +0x198: extended file handle table (16×64-bit indices, was FCB-only)
-    .pad2       resb 64   ; +0x218: reserved to reach 664 (PSP64_size 0x298)
+    .pad1       resb 32   ; 0x120..0x140 (NOT 0x100: the +0xNN comments below
+                                      ; drifted +0x40 when this block grew; offsets here are
+                                      ; NASM-verified, 2026-09-08 — always use the symbols)
+    ; --- 64-bit extensions ---
+    .env_ptr    resq 1    ; +0x140: environment block linear address (was word at 0x2C in DOS2+)
+    .cr3        resq 1    ; +0x148: page table base for process isolation
+    .rsp0       resq 1    ; +0x150: kernel stack pointer (RSP) on entry
+    .rflags     resq 1    ; +0x158: saved RFLAGS
+    .rax_save   resq 1    ; +0x160: extended register save area (R8-R15)
+    .rbx_save   resq 1    ; +0x168
+    .rcx_save   resq 1    ; +0x170
+    .rdx_save   resq 1    ; +0x178
+    .rsi_save   resq 1    ; +0x180
+    .rdi_save   resq 1    ; +0x188
+    .rbp_save   resq 1    ; +0x190
+    .r8_save    resq 1    ; +0x198
+    .r9_save    resq 1    ; +0x1A0
+    .r10_save   resq 1    ; +0x1A8
+    .r11_save   resq 1    ; +0x1B0
+    .r12_save   resq 1    ; +0x1B8
+    .r13_save   resq 1    ; +0x1C0
+    .r14_save   resq 1    ; +0x1C8
+    .r15_save   resq 1    ; +0x1D0
+    .fd_table   resq 16   ; +0x1D8: per-context fd table (was FCB-only).
+                          ; Convention (psp_init64 + syscall64 handle layer):
+                          ; slots 0-2 hold 0/1/2 (console identity), slots
+                          ; 3-15 hold 1-based global-desc indexes, FREE is -1
+                          ; (0xFFFF...). NEVER assume 0 means free here.
+    .pad2       resb 64   ; +0x258..0x298: reserved to reach 664 (PSP64_size 0x298)
 endstruc
 %define PSPSIZ64 PSP64_size
 

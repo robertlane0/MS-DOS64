@@ -205,10 +205,10 @@ before any assembler work. **Design + acceptance tests (84+) are done in
 
 Acceptance: a hand-written 10-instruction `.COM` loaded **from the volume
 by name** with args runs, writes a file via `3Dh/40h/3Eh`, exits with a
-code the shell can print; `make` + `make full` green on QEMU and Bochs.
+code the shell can print; `make` + `make full` green on QEMU.
 
 **Build order — N2a → N2d (the next steps; do in order, keep `make` /
-`make full` / `make lean` + the Bochs trio green after each slice):**
+`make full` / `make lean` green after each slice):**
 
 - **N2a — enter/return, no I/O, no volume risk (do first).**
   `src/kernel/proc64.asm`: new `proc_enter64` + `exec_caller_rsp` save
@@ -219,7 +219,7 @@ code the shell can print; `make` + `make full` green on QEMU and Bochs.
   85 (code `0x2A` via real `INT 0x21`), 86 (tail echo into a harness
   buffer + `memcmp`) — all PURE. Also update the suite-count strings
   (`81 + 2` in `Makefile`/`README.md`/`AGENTS.md` /`docs/`) to the new
-  totals. Acceptance: smoke green on QEMU + Bochs with zero new device
+  totals. Acceptance: smoke green on QEMU with zero new device
   writes; `check_volume_clean.py` CLEAN.
 - **N2b — handle table + `3Dh`-ro + `3Eh` (smallest useful file slice).**
   Define `PSP64.fd_table` semantics (fds 0–2 console, 3–15 files) on top
@@ -230,7 +230,7 @@ code the shell can print; `make` + `make full` green on QEMU and Bochs.
   root→FAT order), extend `3Fh`/`40h` to fds ≥ 3 (short-read at EOF,
   alloc-on-write at `pos == size`), LSEEK clamped to `0..size`; tests
   88 (`SCRATCH.TXT` cycle, destructive-gated) + 89 (scrub/mirror
-  invariance). Acceptance: `make full` green on QEMU + Bochs,
+  invariance). Acceptance: `make full` green on QEMU,
   `check_volume_clean.py` pre/post CLEAN.
 - **N2d — shell flip + exit codes (N2 acceptance).** `sh_do_exec` enters
   and prints `Exit <code>`; `%ERRORLEVEL%` batch query; `ECHO.COM`
@@ -241,7 +241,10 @@ code the shell can print; `make` + `make full` green on QEMU and Bochs.
 ### Phase N3 — `libc64` shim (enables C programs generally, NASM specifically)
 
 **Entry: N2d green. Milestone breakdown: `docs/23-nasm-port-milestones.md`
-(N3.1–N3.5). `hello.c` is the first C program running on DOS64.**
+(N3.1–N3.5). `hello.c` is the first C program running on DOS64.
+WARNING: the full kernel closes N2d at 183/184 sectors (36B free) —
+N3 must open with a size plan (scratch-LBA relocation vs test/code diet)
+before adding `src/lib` bulk. See item 12.**
 
 - [ ] New `src/lib/libc64.asm` (System V ABI, 16 B alignment, callee-saved
       discipline per `src/kernel/stack64.asm`): `memcpy/memset/strcmp/
@@ -294,8 +297,7 @@ first — never squeeze the 184-sector kernel slot.**
 - [ ] Replace `nasm/nasmlib/mmap.c`, `file.c`/`fileio.c` backends with
       `stdio64` calls; stub `getopt`-long subset or vendor it.
 - [ ] Solve size: if N0 shows overflow, grow image (`IMG_MB` /
-      `VOL_SECTORS` in `Makefile:23-28` + `check-layout` + `bochsrc`
-      CHS) **or** ship `NASM.COM` on a second optional image
+      `VOL_SECTORS` in `Makefile:23-28` + `check-layout` disk geometry) **or** ship `NASM.COM` on a second optional image
       (`dos64-tools.img`). Never silently squeeze the kernel slot.
 - [ ] `NDISASM` port explicitly deferred (needs no new syscalls; file it
       as follow-up).
@@ -316,8 +318,8 @@ bin` assembles the same corpus as host NASM 3.02 byte-identically.
 - [ ] Docs: update `README.md` (Using the shell), `AGENTS.md` (status +
       memory/disk deltas), `docs/06-syscall-reference.md` (new `3Ch/3Dh/
       3Eh/42h` rows), close G1–G6-style audit for new surface.
-- [ ] Regression: `make`, `make full`, `make lean` + Bochs trio
-      (`run-bochs*`) all green; `check_volume_clean.py` pre/post clean.
+- [ ] Regression: `make`, `make full`, `make lean`
+      (`run-qemu*`) all green; `check_volume_clean.py` pre/post clean.
 
 ## 6. What is explicitly out of scope
 
@@ -351,24 +353,27 @@ Done:
 
 Next — N2 implementation, one slice at a time (design + tests 84+ spec:
 `docs/22-n2-exec-design.md`; each slice keeps `make` / `make full` /
-`make lean` + the Bochs trio green):
+`make lean` green):
 
 - [x] 4. **N2a** enter/return (`proc_enter64`, `RET`-trampoline, `AH=4Ch`
       convergence) + tests 84–86 (PURE) + suite-count string updates.
-      (Done: smoke 84+2 / full 86 green on QEMU + Bochs, volumes CLEAN.
+      (Done: smoke 84+2 / full 86 green on QEMU, volumes CLEAN.
       Test 86 caught a real drift — loader uses `PSP+PSP_SIZE` (664), not
       the `PSP+512` of stale comments; fixed across code/samples/docs.)
 - [x] 5. **N2b** handle table + `3Dh`-ro + `3Eh` + test 87 (zero writes).
-      (Done: smoke 85+2 / full 87 green on QEMU + Bochs, volumes CLEAN.
+      (Done: smoke 85+2 / full 87 green on QEMU, volumes CLEAN.
       Slot grew `176→184` (test 82 locks `[16,200)`); `3Dh` refuses modes
       1/2, wildcards, subdirs; `3Eh` refuses 0–2/double-close.)
 - [x] 6. **N2c** `3Ch` + file `3Fh`/`40h` + `42h` + tests 88 (destructive,
       `SCRATCH.TXT`) and 89 (scrub/mirror invariance).
-      (Done: smoke 85+4 / full 89 green on QEMU + Bochs, volumes CLEAN.
+      (Done: smoke 85+4 / full 89 green on QEMU, volumes CLEAN.
       Descs embed the FCB (13 qwords, no sync protocol); `3Fh`/`40h` are
       byte-exact via `fs_fcb_io64` `recsiz=1`; `42h` clamps 0..size.)
-- [ ] 7. **N2d** shell flip (`sh_do_exec` enters, `Exit <code>`,
+- [x] 7. **N2d** shell flip (`sh_do_exec` enters, `Exit <code>`,
       `%ERRORLEVEL%`); N2 acceptance demo on `dos64-nasm.img`.
+      (Done: smoke 86+4 / full 90 green on QEMU, volumes CLEAN.
+      `WRITE.COM` proves args + handle writes + exit code in one program;
+      full kernel at 183/184 sectors — N3 must open with a size plan.)
 
 Then, towards NASM running on DOS64 (breakdown: `docs/23-…`):
 

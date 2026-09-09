@@ -1,9 +1,9 @@
 # Phase 1 – Boot & Testing Strategy for 64-bit Conversion
 
 > **As built (2026-09-07):** this strategy is implemented — MBR → stage2 →
-> kernel at `0x100000` boots smoke 85 + 4 SKIP (`make`) or full 89 PASS
+> kernel at `0x100000` boots smoke 86 + 4 SKIP (`make`) or full 90 PASS
 > (`make full`, destructive 71/83 in the reserved namespace with recovery)
-> + `COMMAND64` REPL on QEMU (primary) and Bochs. Concrete sizes/layout
+> + `COMMAND64` REPL on QEMU. Concrete sizes/layout
 > below reflect the code; the step rationale is unchanged. See `README.md`
 > + `docs/19-closure-g1-g6.md` for the final state (chunked loads,
 > `KERNEL_SECTORS 184`, FAT12 volume at LBA 512+, PIC master `0x28`/slave
@@ -17,7 +17,7 @@
 
 ## 1. Why New Boot Chain Is Needed
 
-Original DOS had no MBR in repo — SCP boot loaded `IO.SYS` + `MSDOS.SYS` via unknown loader (likely absolute sectors). `IO.ASM:INIT` assumes it is already at `BIOSSEG:0` with DOS at `DOSSEG`. For BIOS Bochs we must supply MBR + stage2 that reproduces `real → protected → long` and places kernel at `0x100000`.
+Original DOS had no MBR in repo — SCP boot loaded `IO.SYS` + `MSDOS.SYS` via unknown loader (likely absolute sectors). `IO.ASM:INIT` assumes it is already at `BIOSSEG:0` with DOS at `DOSSEG`. For BIOS boot we must supply MBR + stage2 that reproduces `real → protected → long` and places kernel at `0x100000`.
 
 ## 2. Target Memory Layout (AGENTS.md recommendation, adapted)
 
@@ -122,7 +122,7 @@ Needed handlers: #DE(0), #GP(13), #PF(14) → fault print to VGA then hlt; IDT g
 
 ## 6. Driver Replacement Order (per AGENTS.md Priority)
 
-1. **VGA text** – memory-mapped `0xB8000`, ports 0x3D4/0x3D5 cursor. Implements `CONOUT`, `OUTCH`, `CRLF`. Verify by printing "Hello 64-bit DOS!" on `qemu/bochs`.
+1. **VGA text** – memory-mapped `0xB8000`, ports 0x3D4/0x3D5 cursor. Implements `CONOUT`, `OUTCH`, `CRLF`. Verify by printing "Hello 64-bit DOS!" on QEMU.
 2. **Keyboard** – port 0x60 data, 0x64 status (OBF 1, IBF 2); translate scancode set 1 to ASCII; circular queue 128B (`KBD_QUEUE_SIZE`, power-of-two mask). Verify echo.
 3. **Disk** – ATA PIO LBA28: poll `BSY=0x80` via `0x1F7`, write 0x1F2 sect cnt, 0x1F3-0x1F6 LBA, 0x1F7 cmd 0x20 read / 0x30 write. Alternatively AHCI. Verify read of boot sector 0 and check 0xAA55.
 
@@ -130,9 +130,9 @@ Time/BIOSGETTIME replaced later via CMOS `PORT 0x70/0x71`.
 
 ## 7. Incremental Testing (AGENTS.md §Testing Procedure)
 
-Each stage has Bochs run:
+Each stage has a QEMU run (`make run-qemu`, `-serial stdio`):
 
-*Stage 1 – Boot + mode.* Build mbr only, `dd if=mbr.bin of=dos64.img conv=notrunc; bochs -f bochsrc.txt -q` → check `r` shows `CR0 PE=1`, `EFER LME=1`, `CS long`. Halt with magic `0xEBFE`.
+*Stage 1 – Boot + mode.* Build mbr only, `dd if=mbr.bin of=dos64.img conv=notrunc; make run-qemu` → serial shows the mode trace. Halt with magic `0xEBFE`.
 
 *Stage 2 – VGA.* Add `call dbg_print` → see text.
 
@@ -155,8 +155,8 @@ flags (classification: PURE / SCRATCH-DEVICE / REAL-VOLUME READ-ONLY /
 REAL-VOLUME DESTRUCTIVE — see `src/kernel/selftest64.asm` header):
 
 ```nasm
-; Smoke (default): nasm -DRUN_SELFTEST -> 85 + 4 SKIP, then shell_repl64
-; Full:  nasm -DRUN_SELFTEST -DSELFTEST_DESTRUCTIVE -> 89, then shell
+; Smoke (default): nasm -DRUN_SELFTEST -> 86 + 4 SKIP, then shell_repl64
+; Full:  nasm -DRUN_SELFTEST -DSELFTEST_DESTRUCTIVE -> 90, then shell
 ; Lean:  nasm -DSKIP_SELFTEST -> skip suite, minimal init, shell direct
 %ifdef SKIP_SELFTEST
 %undef RUN_SELFTEST
@@ -171,11 +171,11 @@ REAL-VOLUME DESTRUCTIVE — see `src/kernel/selftest64.asm` header):
 `Makefile` exposes all three (objects are kept separate so the images can coexist):
 
 ```bash
-make                    # smoke: build/dos64.img (RUN_SELFTEST, 85 + 4 SKIP + shell)
-make full               # full: build/dos64-full.img (RUN_SELFTEST+SELFTEST_DESTRUCTIVE, 89 + shell)
+make                    # smoke: build/dos64.img (RUN_SELFTEST, 86 + 4 SKIP + shell)
+make full               # full: build/dos64-full.img (RUN_SELFTEST+SELFTEST_DESTRUCTIVE, 90 + shell)
 make lean               # lean: build/dos64-lean.img (SKIP_SELFTEST, shell direct)
-make run-qemu           # boot smoke image, expect "Summary: 85 passed, 0" + "Skipped (destructive): 4"
-make run-qemu-full      # boot full image, expect "Summary: 89 passed, 0"
+make run-qemu           # boot smoke image, expect "Summary: 86 passed, 0" + "Skipped (destructive): 4"
+make run-qemu-full      # boot full image, expect "Summary: 90 passed, 0"
 make run-qemu-lean      # boot lean image, expect "Lean boot ... entering COMMAND64..."
 ```
 
@@ -307,23 +307,11 @@ drops RAM caches so each remount behaves like a reboot. Power-loss
 consistency here is ordering + healing, NOT transactional (torn
 multi-sector writes stay deterministic via `FAT1`-wins).
 
-## 8. Bochs Config (AGENTS.md template)
+## 8. QEMU run (only supported emulator)
 
-```
-megs: 256
-romimage: file=$BXSHARE/BIOS-bochs-latest
-vgaromimage: file=$BXSHARE/VGABIOS-lgpl-latest.bin
-ata0-master: type=disk, path="build/dos64.img", mode=flat, cylinders=20, heads=16, spt=63
-boot: disk
-log: bochs.log
-cpu: model=ryzen, count=1, ips=50000000, reset_on_triple_fault=1, ignore_bad_msrs=1
-panic: action=report
-magic_break: enabled=1
-com1: enabled=1, mode=file, dev=serial.log
-display_library: nogui
-```
-
-(QEMU `qemu-system-x86_64 -drive file=build/dos64.img,format=raw -serial stdio -display none` is the primary proof path.)
+QEMU is the sole test path (`qemu-system-x86_64 -drive
+file=build/dos64.img,format=raw -serial stdio -display none` carries the
+suite transcript and the shell).
 
 Build scripts (see `Makefile`):
 
@@ -338,15 +326,15 @@ dd if=build/mbr.bin of=build/dos64.img conv=notrunc
 dd if=build/stage2.bin of=build/dos64.img bs=512 seek=1 conv=notrunc
 dd if=build/kernel.bin of=build/dos64.img bs=512 seek=16 conv=notrunc  # or via stage2 LBA loader
 python3 tools/mkfat12.py --vol-lba 512 --vol-totsec 2880 --sector-size 512 --kernel-lba 16 --kernel-sectors 184 build/dos64.img  # stamps FAT12 volume (canonical values: Makefile disk-layout block)
-make run-qemu   # or: bochs -f bochsrc.txt -q
+make run-qemu
 ```
 
 ## 9. Debugging Tools
 
-* Bochs internal debugger: `b 0x7C00`, `c`, `r`, `x /10xb 0x7C00`, `s`, `creg`.
+* QEMU monitor / GDB stub: `-s -S` + `target remote :1234`; `info registers`, `x/10xb 0x7c00`, `stepi`.
 * Serial port logging: `mov dx,0x3F8; out dx,al` fallback.
 * VGA dump: `mov rax,0xB8000; mov word [rax],0x0F44` (white-on-black 'D').
-* Triple-fault: `ips` and `reset_on_triple_fault=1` will reset; check `bochs.log` for `exception` lines.
+* Triple-fault: QEMU resets; check the serial transcript for `exception` lines.
 
 ## 10. Success Criteria (Phase 1 → Phase 12)
 
@@ -356,6 +344,6 @@ Refer to Validation section. Phase 1 success is **documentation + scaffold** com
 
 1. Implement `src/boot/mbr.asm` + `stage2.asm` + `gdt.asm`
 2. Create `linker.ld` and `Makefile`
-3. Smoke-test mode switch in Bochs with debugger.
+3. Smoke-test mode switch under QEMU with the GDB stub.
 
 *Memory map follows AGENTS.md §Memory Layout Recommendations; all addresses verified against IO.ASM:0F0h ports and MSDOS.ASM mem arithmetic.*

@@ -200,7 +200,7 @@ kbd_flush:
 
 ; ------------------------------------------------------------
 ; kbd_init — initialize controller, enable keyboard, flush
-;   Assumes 8042 exists (Bochs/QEMU). Polling only, no IRQ.
+;   Assumes 8042 exists (QEMU). Polling only, no IRQ.
 ;   Returns: RAX 0 success, 1 failed (but we tolerate no failure in emulator)
 ; ------------------------------------------------------------
 kbd_init:
@@ -248,7 +248,7 @@ kbd_init:
 .dec:
     dec rcx
     jnz .wait_ack
-    ; timeout, but still consider ok for emulator (Bochs may not need F4)
+    ; timeout, but still consider ok for emulator (QEMU may not need F4)
     jmp .done_ok
 .ack_ok:
 .done_ok:

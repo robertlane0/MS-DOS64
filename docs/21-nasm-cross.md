@@ -108,7 +108,7 @@ only). Spawn budget still applies: `PSP + payload + 2048 < 6 MiB`.
 
 ```bash
 make nasm-samples      # assemble samples/*.asm with the submodule NASM,
-                       # stage HELLO.COM/ECHO.COM/CAT.COM onto build/dos64-nasm.img
+                       # stage HELLO/ECHO/CAT/WRITE .COM onto build/dos64-nasm.img
 make run-qemu-nasm     # boot it (serial in your terminal)
 ```
 
@@ -117,48 +117,49 @@ What `make nasm-samples` does: builds `build/nasm-sub/src/nasm` from the
 assembles `samples/*.asm` with `-f bin` into `build/nasm-samples/`,
 copies the smoke `mbr`/`stage2`/`kernel` artifacts, and stamps the FAT12
 volume with `tools/mkfat12.py --extra-file HELLO.COM=… --extra-file
-ECHO.COM=… --extra-file CAT.COM=…` (client-file support lives in the
-stamper, not in the default `make` path — the default image keeps only
-`HELLO.TXT/README.TXT/TEST.COM/DATA.BIN`). `tools/check_volume_clean.py`
-allow-lists the three sample names: permitted but never required, and
-when present they must be chain-valid and ≤ 4096 bytes.
+ECHO.COM=… --extra-file CAT.COM=… --extra-file WRITE.COM=…` (client-file
+support lives in the stamper, not in the default `make` path — the
+default image keeps only `HELLO.TXT/README.TXT/TEST.COM/DATA.BIN`).
+`tools/check_volume_clean.py` allow-lists the four sample names:
+permitted but never required, and when present they must be chain-valid
+and ≤ 4096 bytes.
 
-Demo (serial-driven, QEMU):
+Demo (serial-driven, QEMU) — since N2d the shell ENTERS programs:
 
 ```bash
-printf '\rDIR\rHELLO\rCAT\rTEST\rEXIT\r' | timeout 25 qemu-system-x86_64 \
+printf '\rDIR\rHELLO\rWRITE hello\rTYPE OUT.TXT\rDEL OUT.TXT\rEXIT\r' \
+  | timeout 25 qemu-system-x86_64 \
   -drive file=build/dos64-nasm.img,format=raw -serial stdio -display none
 ```
 
-Expect `HELLO.COM/ECHO.COM/CAT.COM` in the `DIR` listing and
-`Loaded, pid N` after each external name (see §4 for what that means).
-Note: type `HELLO` or `CAT`, not `ECHO`, for the spawn check — `ECHO`
+Expect the four `.COM` names in the `DIR` listing, `Loaded, pid N`
+followed by `Exit <code>` after each external name, `hello` from `TYPE
+OUT.TXT` (the file `WRITE.COM` created via `3Ch`/`40h`/`3Eh`), and a
+clean volume afterwards (`DEL` removes it; child console printing is
+VGA-only — serial shows the shell lines). This is the N2 acceptance demo
+(PLAN.md Phase N2): volume-loaded `.COM` with args runs, writes a file
+through the handle layer, exits with a code the shell prints.
+Note: type `HELLO` or `CAT`, not `ECHO`, to run a sample — `ECHO`
 resolves to the shell's `ECHO` builtin (builtins win over externals in
 `sh_exec_line`), so `ECHO hi` prints `hi` without touching `ECHO.COM`.
-That shadowing is tracked N2 shell work (lookup order / PATH); `ECHO.COM`
-rides along as a spawn/verify target and becomes the N2 argv round-trip
-test the moment enter/return lands.
+`ECHO.COM` rides along as a spawn/verify target; `WRITE.COM` is the argv
+round-trip test (its exit code IS the tail length).
 
 ## 4. Honest EXEC limits (read before filing bugs)
 
-`EXEC` today **spawns but does not context-switch** (`AGENTS.md`
-Phase 10; `proc_spawn64` + `sh_do_exec`): the shell loads `<name>.COM`
-from the volume (≤ 4096 bytes), allocates PSP+payload+stack, inits
-PSP64/env, copies the image, records pid/entry — it never `call`s the
-entry, and prints `Loaded, pid N` before terminate+reap. Consequences:
+Since N2d the shell ENTERS programs (`sh_do_exec` → `proc_enter64`,
+cooperative like DOS): `<name>.COM` loads from the volume (≤ 4096 bytes),
+spawns, runs on its own stack with `RDI=PSP`, and returns via `RET`
+(exit 0) or `AH=4Ch`/`INT 20h` — the shell prints `Loaded, pid N` then
+`Exit <code>` and reaps. Remaining limits:
 
-- `HELLO` proves load+spawn, not execution. The message text does not
-  print yet — that needs the N2 enter/return step.
-- There is no `argc/argv` beyond the 127 B `cmd_tail`, no redirection
-  or pipes (use `-o`-style flags later), no `ERRORLEVEL` (exit codes
-  stop at the zombie record).
+- Child `INT 21h` console output (`AH=02h/09h`) goes to VGA text only;
+  shell lines (`Loaded`/`Exit`/builtins) go to VGA+serial. Drive the
+  serial demo via exit codes and files, not child printing.
+- No `argc/argv` beyond the 127 B `cmd_tail` (`RDI=PSP` + raw tail;
+  tokenized argv is N3 `crt0` work), no redirection or pipes (use `-o`
+  flags later), no timer preemption (cooperative only, by design).
+- Batch `%ERRORLEVEL%` expands (uppercase only); `ECHO`-style builtins
+  still shadow same-named `.COM`s.
 - `TYPE` shows the first 4 KiB; serial RX is 1 byte deep (paste bursts
   can overrun); serial TX is bounded best-effort (dropped, never hangs).
-
-These are tracked N2 follow-ups, not sample bugs: EXEC-from-path is
-done (shell loads by name), but enter/return (`call` entry, child stack
-switch, `RET`/`AH=4Ch`-to-parent), `3Ch/3Dh/3Eh/42h` handles, argv/env
-convention, and exit-code propagation are all N2 work
-(`docs/22-n2-exec-design.md`). The samples are written against the
-documented N2-target ABI (§1) so they run unmodified once N2 lands —
-that is the point of staging them now.

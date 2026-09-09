@@ -63,6 +63,7 @@ extern env_count64
 extern proc_spawn64
 extern proc_terminate64
 extern proc_reap64
+extern sh_last_exit
 extern fs_dir_get_firstclus64
 extern fs_dir_get_size64
 extern fs_dir_get_attr64
@@ -931,8 +932,8 @@ cmd_path_get64:
 ; VGA-only output would vanish from serial.log / stdio transcripts).
 ; Serial is optional diagnostic I/O: bounded TX via serial_try_putc64
 ; (drop on timeout, CF ignored) so a stuck UART cannot hang the shell.
-; The SERIAL_TIMEOUT budget covers Bochs 16550 baud delay, so normal
-; Bochs/QEMU output is unchanged.
+; The SERIAL_TIMEOUT budget covers 16550 baud delay, so normal
+; QEMU output is unchanged.
 cmd_emit_both:
     push rax
     push rdx
@@ -1688,6 +1689,54 @@ cmd_batch_expand64:
     jz .copy_be
     cmp cl, '%'
     je .esc_be
+    ; %ERRORLEVEL% ? (uppercase literal + closing %; else fall through to
+    ; digits/literal handling below with input unconsumed; uses DL (not AL:
+    ; .copy_be below emits AL, which must still hold '%' from loop top)
+    lea rsi, [rel batch_err_name]
+    lea rdi, [r12+1]
+    mov ecx, 10
+.cmp_el:
+    mov dl, [rdi]
+    cmp dl, [rsi]
+    jne .noterr_el
+    inc rdi
+    inc rsi
+    dec ecx
+    jnz .cmp_el
+    cmp byte [rdi], '%'
+    jne .noterr_el
+    ; match: decimal sh_last_exit into dst (bounded like .copy_param).
+    ; Do-while shape: value 0 yields exactly one '0' digit, no special case.
+    mov rax, [rel sh_last_exit]
+    lea rsi, [rel cmd_batch_decbuf+24]
+    mov ecx, 10
+.div_el:
+    xor edx, edx
+    div rcx
+    add dl, '0'
+    dec rsi
+    mov [rsi], dl
+    test rax, rax
+    jnz .div_el
+.copydec_el:
+    lea rcx, [rel cmd_batch_decbuf+24]
+    sub rcx, rsi                 ; len (always >= 1)
+.cploop_el:
+    test rcx, rcx
+    jz .after_el
+    cmp rbx, r14
+    jae .done_be
+    mov al, [rsi]
+    mov [r13 + rbx], al
+    inc rbx
+    inc rsi
+    dec rcx
+    jmp .cploop_el
+.after_el:
+    add r12, 12                  ; skip %ERRORLEVEL%
+    jmp .loop_be
+.noterr_el:
+    mov cl, [r12+1]              ; restore char for digit checks below
     cmp cl, '0'
     jb .copy_be
     cmp cl, '9'
@@ -2970,6 +3019,7 @@ t50_cls db "CLS",13,0
 t50_ver db "VER",13,0
 t50_bad db "FOOBAR",13,0
 t50_empty db 13,0
+batch_err_name db "ERRORLEVEL",0   ; N2d: %ERRORLEVEL% (uppercase only, documented)
 
 section .bss
 alignb 16
@@ -2982,6 +3032,7 @@ cmd_batch_off: resq 1
 cmd_batch_buf: resb CMD_BATCH_SIZE
 cmd_batch_params: resq 10
 cmd_batch_param_buf: resb 256
+cmd_batch_decbuf: resb 24       ; N2d: %ERRORLEVEL% decimal scratch (20 digits max)
 cmd_tmp_line: resb 256
 cmd_test_dirbuf: resb 512
 cmd_test_out: resb 512

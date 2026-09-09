@@ -3,7 +3,7 @@
 Not attempted in one jump (PLAN §5). Each milestone below is sized S/M/L,
 lands independently behind the previous tier's green suite, and states its
 own acceptance. Prerequisites: N2 design (`docs/22-…`) implemented and
-stable; `make` / `make full` / `make lean` + Bochs trio green throughout.
+stable; `make` / `make full` / `make lean` green throughout.
 
 ## N3 — `libc64` shim (enables C programs generally, NASM specifically)
 
@@ -32,7 +32,7 @@ libz path (→ drop), `isatty` (→ honest stub).
 |---|---|---|---|
 | N4A.1 | submodule build variant: `configure --disable-*`, keep `asm/parser/preproc`, `nasmlib` minus `mmap/realpath/rlimit`, `output/outbin.c` (+ `outelf.c` iff `MZ64` output wanted), `x86` tables pre-generated host-side (never run Perl on DOS64); patches as `nasm/dos64-*.patch` stack, not a fork | M | host cross-build of trimmed NASM succeeds |
 | N4A.2 | backend swap: `nasmlib/mmap.c`, `file.c`/`fileio.c` → `stdio64` calls; `getopt`-long subset vendored | M | trimmed NASM passes its own test subset on Linux against the shim headers |
-| N4A.3 | size solution from N0 numbers: (a) accept mini-assembler as the on-image tool, or (b) grow `VOL_SECTORS`/`IMG_MB` via the layout block + `check-layout` + `bochsrc` CHS, or (c) ship `NASM.COM` on `dos64-tools.img`. Never squeeze the 184-sector kernel slot | S | decision recorded + image boots |
+| N4A.3 | size solution from N0 numbers: (a) accept mini-assembler as the on-image tool, or (b) grow `VOL_SECTORS`/`IMG_MB` via the layout block + `check-layout` disk geometry, or (c) ship `NASM.COM` on `dos64-tools.img`. Never squeeze the 184-sector kernel slot | S | decision recorded + image boots |
 | N4A.4 | on-image `NASM -f bin` assembles the N1+N4B corpus byte-identically to host NASM 3.02 | L | byte-identical corpus |
 
 `NDISASM` explicitly deferred (no new syscalls; file as follow-up).
@@ -44,7 +44,7 @@ libz path (→ drop), `isatty` (→ honest stub).
 | N5.1 | shell: `ASM64`/`NASM` in `HELP`, PATH search, batch-friendly `ERRORLEVEL`, pipe-driven `make run-qemu` demo | S | `printf 'ASM64 HELLO.ASM\rHELLO\rEXIT\r'` demo |
 | N5.2 | harness: assembler round-trip tests (smoke-safe: memory/scratch; destructive volume writes behind `SELFTEST_DESTRUCTIVE`); `check-serial`/`check-kbc` patterns hold | M | suite green, counts documented |
 | N5.3 | docs: `README.md` shell chapter, `AGENTS.md` status + memory/disk deltas, `docs/06-…` new `3Ch/3Dh/3Eh/42h` rows, G1–G6-style audit for new surface | S | docs merged |
-| N5.4 | regression: `make`, `make full`, `make lean` + Bochs trio + `check_volume_clean.py` pre/post clean | S | all green |
+| N5.4 | regression: `make`, `make full`, `make lean` + `check_volume_clean.py` pre/post clean | S | all green |
 
 Ordering: N3.1 → N3.2 → N2b-handles (if not yet done, they block N3.3) →
 N3.3 → N3.4 → N3.5 → N4B.1 → N4B.2 → N4B.3 → N4A.* → N5. Track B (N4B)

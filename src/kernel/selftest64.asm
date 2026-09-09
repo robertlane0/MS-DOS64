@@ -1,5 +1,5 @@
 ; MS-DOS64 self-test suite — extracted from main.asm so main stays boot glue.
-; Provides selftest_run64: runs tests 1..89, prints PASS/FAIL + summary + phase lines.
+; Provides selftest_run64: runs tests 1..90, prints PASS/FAIL + summary + phase lines.
 ; Returns RAX = failed count (0 = all pass). Called by _start in full builds.
 ; Lean builds (SKIP_SELFTEST): stub returns 0; test code excluded via RUN_SELFTEST.
 ;
@@ -34,7 +34,7 @@
 ;   -DRUN_SELFTEST alone (default `make`): smoke suite — PURE + SCRATCH-DEVICE
 ;     + REAL-VOLUME READ-ONLY. Tests 71/83/88/89 print SKIP and leave the
 ;     volume untouched (only mount reads + scratch-LBA I/O occur).
-;   -DRUN_SELFTEST -DSELFTEST_DESTRUCTIVE (`make full`): full suite — all 89
+;   -DRUN_SELFTEST -DSELFTEST_DESTRUCTIVE (`make full`): full suite — all 90
 ;     tests including 71/83/88/89 in the reserved namespace with mount-time
 ;     recovery
 ;     (pre-clean delete + discard/remount + reclaim + heal + scrub) and
@@ -304,6 +304,8 @@ extern hdl_open_core
 extern handler_close_file
 extern handler_create_file
 extern hdl_lseek_core
+extern sh_last_exit
+extern cmd_batch_expand64
 extern proc_reap64
 extern proc_free_all64
 extern handler_exec
@@ -1876,6 +1878,23 @@ selftest_run64:
     inc r14
     mov rsi, msg_skip
 %endif
+    call vga_print
+    call serial_print64
+
+    ; ---- Test 90: shell EXEC enter + ERRORLEVEL (N2d, READ-ONLY) ----
+    mov rsi, msg_test90
+    call vga_print
+    call serial_print64
+    call test_shell_enter
+    test rax, rax
+    jz .t90_pass
+    inc r13
+    mov rsi, msg_fail
+    jmp .t90_done
+.t90_pass:
+    inc r12
+    mov rsi, msg_pass
+.t90_done:
     call vga_print
     call serial_print64
 
@@ -9766,7 +9785,6 @@ test_open_close:
     pop rcx
     pop rbx
     ret
-
 ; ------------------------------------------------------------
 ; Test 88: handle create/write/seek/read cycle (N2c, DESTRUCTIVE).
 ;   3Ch create SCRATCH.TXT, trap + direct 40h/3Fh/42h I/O, 1000B pattern
@@ -10063,8 +10081,7 @@ test_handle_cycle:
     lea rsi, [rel t88_scratch]
     mov al, 1
     call fs_make_fcb64
-    cmp al, 0xFF
-    je .fail88
+    jc .fail88
     lea rdx, [rel aux_fcb]
     call handler_delete
     jc .fail88
@@ -10145,10 +10162,16 @@ test_handle_truncdel:
     inc eax
     jmp .fill89
 .filled89:
-    ; create + write 1000B (2 clusters live afterwards)
+    ; create + write 1000B (2 clusters live afterwards). First create goes
+    ; through the real INT 0x21 trap (proves DISPATCH[3C] + frame writeback)
+    mov rax, 0x3C00
     lea rdx, [rel t88_scratch]
-    call handler_create_file
+    int 0x21
     jc .fail89
+    cmp rax, 3
+    jb .fail89
+    cmp rax, 15
+    ja .fail89
     mov r15, rax
     mov rbx, r15
     lea rdx, [rel t88_out]
@@ -10213,8 +10236,7 @@ test_handle_truncdel:
     lea rsi, [rel t88_scratch]
     mov al, 1
     call fs_make_fcb64
-    cmp al, 0xFF
-    je .fail89
+    jc .fail89
     lea rdx, [rel aux_fcb]
     call handler_delete
     jc .fail89
@@ -10238,6 +10260,67 @@ test_handle_truncdel:
 .fail89:
     mov rax, 1
 .done89:
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop r11
+    pop r10
+    pop r9
+    pop r8
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rcx
+    pop rbx
+    ret
+
+; ------------------------------------------------------------
+; Test 90: shell EXEC enters + ERRORLEVEL (N2d, REAL-VOLUME READ-ONLY).
+;   sh_exec_line("TEST") loads TEST.COM by name, ENTERS it (RET->exit 0),
+;   returns 0; sh_last_exit must read 0. Then poke 42 and prove the batch
+;   %ERRORLEVEL% expansion formats multi-digit values. Restores 0.
+;   Zero volume writes (volume reads only) — runs in smoke.
+; ------------------------------------------------------------
+test_shell_enter:
+    push rbx
+    push rcx
+    push rdx
+    push rsi
+    push rdi
+    push r8
+    push r9
+    push r10
+    push r11
+    push r12
+    push r13
+    push r14
+    push r15
+    lea rdi, [rel t90_test]
+    call sh_exec_line
+    test rax, rax
+    jnz .fail90
+    mov rax, [rel sh_last_exit]
+    test rax, rax
+    jnz .fail90
+    mov qword [rel sh_last_exit], 42
+    lea rdi, [rel t90_errsrc]
+    lea rsi, [rel t88_in]
+    mov edx, 2048
+    call cmd_batch_expand64
+    cmp rax, 2
+    jne .fail90
+    cmp word [rel t88_in], 0x3234   ; "42" little-endian (len==2 pins it)
+    jne .fail90
+    mov qword [rel sh_last_exit], 0
+    call mem_validate64
+    test rax, rax
+    jnz .fail90
+    xor eax, eax
+    jmp .done90
+.fail90:
+    mov rax, 1
+.done90:
     pop r15
     pop r14
     pop r13
@@ -10343,8 +10426,11 @@ msg_test84 db " [84] Enter/return round-trip (RET + preserve)... ",0
 msg_test85 db " [85] Exit code via INT 0x21 AH=4Ch... ",0
 msg_test86 db " [86] Argv echo via PSP tail (enter)... ",0
 msg_test87 db " [87] Handle open/close ro + trap + bounds... ",0
-msg_test88 db " [88] Handle create/write/seek/read cycle... ",0
-msg_test89 db " [89] Truncate/delete lifecycle + invariance... ",0
+msg_test88 db " [88] Handle file cycle... ",0
+msg_test89 db " [89] Truncate/delete... ",0
+msg_test90 db " [90] Shell EXEC enter + ERRORLEVEL... ",0
+t90_test db "TEST",0
+t90_errsrc db "%ERRORLEVEL%",0
 t88_scratch db "SCRATCH.TXT",0
 t88_patch db 0xE0,0xE1,0xE2,0xE3,0xE4,0xE5,0xE6,0xE7,0xE8,0xE9
 t88_tail db "APPENDED!!",13,10

@@ -75,7 +75,7 @@ Out: RAX = child exit code, CF 0/1
 
 Sequencing (per PLAN §7 risk row): land `proc_enter64` + tests 84–86 with
 the shell still spawn-only; flip `sh_do_exec` to enter only after 84–86
-are green on QEMU **and** Bochs. No `EXEC_ENTER` ifdef needed if this order
+are green on QEMU. No `EXEC_ENTER` ifdef needed if this order
 holds — if boot destabilizes, revert the one-line shell flip, not the leaf.
 
 ## 2. Handle syscalls (N2b + N2c — landed)
@@ -125,16 +125,17 @@ both paths. DOS-flavored fail codes (2/4/5/6/1/25).
   is copied to the child, never aliased.
 - `MZ64` contract (`docs/20-nasm-gaps.md` §4) unchanged, plus `RDI = PSP`.
 
-## 4. Exit codes + `ERRORLEVEL`
+## 4. Exit codes + `ERRORLEVEL` (N2d — landed)
 
 Child code travels `AL`/`RDI` (at `RET` trampoline or `AH=4Ch`) →
-`proc_exitcode[slot]` → `reap` returns it → `sh_do_exec` prints
-`Loaded, pid N` today; after the N2a flip it additionally prints
-`Exit <code>` on return (non-zero codes especially — batch use).
-Batch `%ERRORLEVEL%` query rides the `%1`–`%9` machinery
-(`src/kernel/cmd64.asm`) — N2b, after codes are stable. `ECHO.COM`
-becomes the argv round-trip test the moment enter lands (it is staged
-but builtin-shadowed today — `docs/21-…md` §3).
+`proc_exitcode[slot]` → `sh_do_exec` prints `Loaded, pid N`, enters,
+prints `Exit <code>`, stores `sh_last_exit`, reaps (no separate
+terminate: the entered child is already zombie). Batch `%ERRORLEVEL%`
+expands in `cmd_batch_expand64` next to `%1`–`%9` (uppercase literal +
+closing `%`, decimal via a 24B scratch buffer, same dst bounds;
+`sh_last_exit` zeroed once per boot in `shell_repl64`). `WRITE.COM`
+(`samples/write.asm`) is the argv round-trip test — its exit code IS the
+tail length — while `ECHO.COM` stays staged but builtin-shadowed.
 
 ## 5. Acceptance tests (84+, in `src/kernel/selftest64.asm`)
 
@@ -149,8 +150,7 @@ but builtin-shadowed today — `docs/21-…md` §3).
 
 Acceptance (PLAN N2): a hand-written 10-instruction `.COM` loaded **from
 the volume by name** with args runs, writes a file via `3Dh/40h/3Eh`,
-exits with a code the shell prints; `make` + `make full` green on QEMU
-and Bochs; `make lean` unaffected. Smoke stays non-destructive
+exits with a code the shell prints; `make` + `make full` green on QEMU; `make lean` unaffected. Smoke stays non-destructive
 (`85+2`-pattern extended, never volume writes outside scratch LBAs);
 `make check-serial`/`check-kbc` patterns hold (child error paths use
 bounded `serial_try_putc64` only, never spin).

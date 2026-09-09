@@ -35,7 +35,7 @@ default rel
 %define ATA_CMD_WRITE   0x30
 %define ATA_CMD_IDENTIFY 0xEC
 
-%define ATA_TIMEOUT     1000000  ; loop iterations (~few ms per 100k? enough for Bochs/QEMU)
+%define ATA_TIMEOUT     1000000  ; loop iterations (~few ms per 100k? enough for QEMU)
 
 section .text
 global ata_init
@@ -206,7 +206,7 @@ ata_flush:
 
 ; ------------------------------------------------------------
 ; ata_init — wait for drive ready (no software reset by default)
-;   Primary master only (Bochs/QEMU ata0-master). No slave handling.
+;   Primary master only (QEMU ata0-master). No slave handling.
 ;   Performs gentle init: wait BSY clear, select master, wait DRDY.
 ;   Software reset is only used if drive not ready after generous timeout.
 ;   Returns: RAX 0 success, 1 timeout/error
@@ -637,7 +637,7 @@ ata_identify:
 ;   Original DOS used CHS via INT13 (track/head/sector). ATA uses LBA.
 ;   Provide conversion: LBA = (C*HPC + H)*SPT + S -1
 ;   and inverse.
-;   HPC=16, SPT=63 for our Bochs/QEMU image (cylinders=20 etc.)
+;   HPC=16, SPT=63 for our QEMU image (cylinders=20 etc.)
 ;   Demo function for testing conversion correctness.
 ; ------------------------------------------------------------
 chs_to_lba:

@@ -110,7 +110,7 @@ print16:
 ; serial_try_putc2 — AL=char -> COM1 with bounded THRE wait.
 ; Serial is optional diagnostic I/O (VGA INT 10h above is authoritative).
 ; In: AL=char. Out: CF=0 sent, CF=1 dropped (timeout). Preserves AX/BX/CX/DX.
-SERIAL_TIMEOUT2 equ 0xFFFF       ; ample for Bochs baud delay, still bounded
+SERIAL_TIMEOUT2 equ 0xFFFF       ; ample for 16550 baud delay, still bounded
 serial_try_putc2:
     push ax
     push bx

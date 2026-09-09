@@ -70,6 +70,7 @@ extern mem_alloc64
 extern mem_free64
 extern proc_terminate64
 extern proc_reap64
+extern proc_enter64
 extern cmd_exec_external64
 extern handler_create
 extern handler_delete
@@ -83,6 +84,8 @@ extern pic_get_mask64
 
 section .bss
 alignb 16
+global sh_last_exit
+sh_last_exit: resq 1            ; N2d: last child exit code (%ERRORLEVEL%)
 sh_line:    resb 128
 sh_cmd:     resb 16
 sh_tail:    resb 128
@@ -102,6 +105,7 @@ sh_bad:     db "Bad command or file name",13,10,0
 sh_nofile:  db "File not found",13,10,0
 sh_nomem:   db "Insufficient memory",13,10,0
 sh_loaded:  db "Loaded, pid ",0
+sh_exitmsg: db "Exit ",0
 sh_crlf:    db 13,10,0
 sh_ext_com: db "COM"
 
@@ -716,21 +720,39 @@ sh_do_exec:
     test rax, rax
     jz .exec_fail_ex
     mov r8, rax
+    push rax                     ; pid (enter clobbers R8-R11)
+    push rdx                     ; psp (prints clobber RDX)
     lea rsi, [rel sh_loaded]
     call sh_print                 ; (preserves R8/RBX/R10: pushes rax,rsi)
     mov rax, r8
     call sh_print_dec
     mov rsi, sh_crlf
     call sh_print
-    mov rdi, r8
-    xor esi, esi
-    call proc_terminate64
-    mov rdi, r8
-    call proc_reap64
+    pop rdi                      ; psp
+    call proc_enter64            ; N2d: run it (RAX=exit code, CF ok/fail)
+    jc .enter_failed_ex          ; [rsp] = pid
+    mov [rel sh_last_exit], rax  ; %ERRORLEVEL% store
+    push rax                     ; code (prints clobber RAX)
+    lea rsi, [rel sh_exitmsg]
+    call sh_print
+    pop rax
+    call sh_print_dec
+    mov rsi, sh_crlf
+    call sh_print
+    pop rdi                      ; pid
+    call proc_reap64             ; entered child is already zombie: reap only
     mov rdi, rbx
     call mem_free64
     xor eax, eax
     jmp .done_ex
+.enter_failed_ex:                ; spawn ok but enter failed (paranoia path:
+    pop rdi                      ; pid (practically infallible: fresh spawn,
+    xor esi, esi                 ; no nesting, so this never fires;
+    call proc_terminate64        ; RDI survives: terminate pushes/pops it)
+    call proc_reap64             ; RDI still pid
+    mov rdi, rbx
+    call mem_free64
+    jmp .bad_ex
 .exec_fail_ex:
     mov rdi, rbx
     call mem_free64
@@ -1044,6 +1066,7 @@ sh_exec_line:
 ; via ret -> caller halts; documented).
 shell_repl64:
     call cmd_init64
+    mov qword [rel sh_last_exit], 0   ; %ERRORLEVEL% starts 0 (BSS untrusted)
     ; Sync the shell clock from the RTC so DATE/TIME show real values
     ; (time_init64 via cmd_init64 defaults to 1983-04-01 12:00:00).
     call rtc_get_date64              ; ECX=y EDX=m R8D=d

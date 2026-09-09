@@ -1,6 +1,6 @@
 # MS-DOS64 – 64-bit BIOS boot build (83-test selftest + COMMAND64 shell; smoke/full/lean images)
 # Stack/ABI hardening (RSP 16B, System V RDI/RSI/RDX/RCX/R8/R9, callee-saved, canary, IST reserve) + all prior phases + G1-G6 closure (77-entry INT 21h, real FAT12 volume, REPL, PIC 0x28/0x30)
-# Requires: nasm >=2.15, ld (binutils), qemu or bochs
+# Requires: nasm >=2.15, ld (binutils), qemu
 BUILD := build
 SRC_BOOT := src/boot
 SRC_KERNEL := src/kernel
@@ -178,7 +178,7 @@ $(BUILD)/kernel.elf: $(KERNEL_OBJS) linker.ld | $(BUILD)
 $(BUILD)/kernel.bin: $(BUILD)/kernel.elf | $(BUILD)
 	objcopy -O binary $< $@
 	@echo "Kernel binary: $$(stat -c %s $@) bytes ($$(expr $$(stat -c %s $@) / 512) sectors)"
-	@test $$(stat -c %s $@) -le $$(expr $(KERNEL_SECTORS) \* $(IMG_SECTOR_SIZE)) || (echo "Kernel too large for $(KERNEL_SECTORS) sectors! Increase KERNEL_SECTORS in the Makefile disk-layout block"; exit 1)
+	@test $$(stat -c %s $@) -le $$(expr $(KERNEL_SECTORS) \* $(IMG_SECTOR_SIZE)) || (echo "Kernel too large for $(KERNEL_SECTORS) sectors! Increase KERNEL_SECTORS in the Makefile disk-layout block"; rm -f $@; exit 1)
 
 $(BUILD)/dos64.img: $(BUILD)/mbr.bin $(BUILD)/stage2.bin $(BUILD)/kernel.bin check-layout check-kbc check-serial check-selftest-modes check-debug-symbols | $(BUILD)
 	dd if=/dev/zero of=$@ bs=1M count=$(IMG_MB) status=none
@@ -195,7 +195,7 @@ $(LEAN_BUILD)/kernel.elf: $(LEAN_OBJS) linker.ld | $(BUILD)
 $(LEAN_BUILD)/kernel.bin: $(LEAN_BUILD)/kernel.elf | $(BUILD)
 	objcopy -O binary $< $@
 	@echo "Lean kernel binary: $$(stat -c %s $@) bytes ($$(expr $$(stat -c %s $@) / 512) sectors)"
-	@test $$(stat -c %s $@) -le $$(expr $(KERNEL_SECTORS) \* $(IMG_SECTOR_SIZE)) || (echo "Lean kernel too large for $(KERNEL_SECTORS) sectors! Increase KERNEL_SECTORS in the Makefile disk-layout block"; exit 1)
+	@test $$(stat -c %s $@) -le $$(expr $(KERNEL_SECTORS) \* $(IMG_SECTOR_SIZE)) || (echo "Lean kernel too large for $(KERNEL_SECTORS) sectors! Increase KERNEL_SECTORS in the Makefile disk-layout block"; rm -f $@; exit 1)
 
 $(BUILD)/dos64-lean.img: $(BUILD)/mbr.bin $(BUILD)/stage2.bin $(LEAN_BUILD)/kernel.bin check-layout check-kbc check-serial check-selftest-modes check-debug-symbols | $(BUILD)
 	dd if=/dev/zero of=$@ bs=1M count=$(IMG_MB) status=none
@@ -212,7 +212,7 @@ $(FULL_BUILD)/kernel.elf: $(FULL_OBJS) linker.ld | $(BUILD)
 $(FULL_BUILD)/kernel.bin: $(FULL_BUILD)/kernel.elf | $(BUILD)
 	objcopy -O binary $< $@
 	@echo "Full kernel binary: $$(stat -c %s $@) bytes ($$(expr $$(stat -c %s $@) / 512) sectors)"
-	@test $$(stat -c %s $@) -le $$(expr $(KERNEL_SECTORS) \* $(IMG_SECTOR_SIZE)) || (echo "Full kernel too large for $(KERNEL_SECTORS) sectors! Increase KERNEL_SECTORS in the Makefile disk-layout block"; exit 1)
+	@test $$(stat -c %s $@) -le $$(expr $(KERNEL_SECTORS) \* $(IMG_SECTOR_SIZE)) || (echo "Full kernel too large for $(KERNEL_SECTORS) sectors! Increase KERNEL_SECTORS in the Makefile disk-layout block"; rm -f $@; exit 1)
 
 $(BUILD)/dos64-full.img: $(BUILD)/mbr.bin $(BUILD)/stage2.bin $(FULL_BUILD)/kernel.bin check-layout check-kbc check-serial check-selftest-modes check-debug-symbols | $(BUILD)
 	dd if=/dev/zero of=$@ bs=1M count=$(IMG_MB) status=none
@@ -330,7 +330,7 @@ check-kbc:
 #   4. The AUX backend (`syscall64.asm com1_write_char`) stays bounded too
 #      (`dec rcx` budget + `stc` timeout); the RX poll (`com1_read_char`)
 #      is single-shot non-blocking by design.
-# Normal QEMU/Bochs output is unchanged: the timeout budget covers 16550
+# Normal QEMU output is unchanged: the timeout budget covers 16550
 # baud per-byte delay, and a missing UART reads LSR=0xFF (THRE set) so the
 # first poll succeeds. Prerequisite of both disk images, so every
 # `make all` runs this with no separate invocation.
@@ -382,7 +382,7 @@ check-selftest-modes:
 	@! grep -Eq '^NASM_DEFS \?= .*SELFTEST_DESTRUCTIVE' Makefile || (echo "selftest-modes FAIL: default NASM_DEFS must stay smoke (no SELFTEST_DESTRUCTIVE)"; exit 1)
 	@grep -q 'SCRATCH.TXT' include/fs.inc || (echo "selftest-modes FAIL: include/fs.inc missing reserved namespace"; exit 1)
 	@grep -q 'check_volume_clean' include/fs.inc || (echo "selftest-modes FAIL: include/fs.inc must reference check_volume_clean"; exit 1)
-	@echo "Selftest modes OK: smoke (85 + 4 SKIP) default, full (89) via make full"
+	@echo "Selftest modes OK: smoke (86 + 4 SKIP) default, full (90) via make full"
 
 # Debug-hook check — source-level assertion that test/fail-point markers
 # stay out of release objects (same pattern as SELFTEST_DESTRUCTIVE).
@@ -420,74 +420,8 @@ check-debug-symbols:
 	@! grep -Eq '^FULL_DEFS := .*DEBUG_SELFTEST' Makefile || (echo "debug-symbols FAIL: FULL_DEFS must omit DEBUG_SELFTEST (full stays symbol-clean)"; exit 1)
 	@echo "Debug symbols OK: hooks gated behind -DDEBUG_SELFTEST (release symbol-clean; nm validation: no exec_dbg/stack_dbg/cmd_dbg/exec_ret)"
 
-# Bochs configs — per-variant rendering from bochsrc.txt.in.
-# Fixes the run-bochs-full wrong-image bug: the single static bochsrc.txt
-# hardcodes build/dos64.img, so the -full target built dos64-full.img but
-# booted the smoke image. Each run-bochs* target now renders its own
-# build/bochsrc-<variant>.txt from the template with IMAGE set to its own
-# prerequisite image and boots that file. The template carries every
-# non-path setting (CHS cylinders=20 heads=16 spt=63, cpu model=ryzen);
-# only the ata0-master path differs per variant.
-BOCHSRC_IN := bochsrc.txt.in
-BOCHSRC_SMOKE := $(BUILD)/bochsrc-dos64.txt
-BOCHSRC_FULL := $(BUILD)/bochsrc-dos64-full.txt
-BOCHSRC_LEAN := $(BUILD)/bochsrc-dos64-lean.txt
-
-# Render build/bochsrc-<name>.txt from the template for IMAGE build/<name>.img.
-# IMAGE defaults to the stem mapping (build/<name>.img); an explicit
-# IMAGE=... on the command line overrides it, e.g.
-#   make $(BUILD)/bochsrc-dos64-full.txt IMAGE=$(BUILD)/dos64-full.img
-$(BUILD)/bochsrc-%.txt: $(BOCHSRC_IN) | $(BUILD)
-	sed 's:@IMAGE@:$(if $(IMAGE),$(IMAGE),$(BUILD)/$*.img):g' $< > $@.tmp
-	@! grep -q '@IMAGE@' $@.tmp || (echo "bochsrc FAIL: unsubstituted @IMAGE@ in $@"; rm -f $@.tmp; exit 1)
-	@mv $@.tmp $@
-	@echo "Generated $@ (IMAGE=$(if $(IMAGE),$(IMAGE),$(BUILD)/$*.img))"
-
-# Host check: each run-bochs* target must boot the same image it builds.
-# Deterministic, host-side, no emulator: inspects the template, the
-# rendered configs, and the Makefile wiring. Verifies:
-#   1. The template carries an @IMAGE@ placeholder (no hardcoded image path).
-#   2. Every rendered config references its own image, has no leftover
-#      placeholder, and preserves CHS (cylinders=20, heads=16, spt=63) and
-#      cpu model=ryzen exactly.
-#   3. The Makefile wires each run-bochs* target to its matching
-#      image prerequisite + rendered config, boots that config, and cleans
-#      only its own image lock.
-#   4. Rendered non-comment content matches the checked-in bochsrc.txt
-#      non-comment content except for the ata0-master path (template and
-#      legacy config cannot drift apart on CHS/CPU/serial settings).
-check-bochsrc: $(BOCHSRC_SMOKE) $(BOCHSRC_FULL) $(BOCHSRC_LEAN)
-	@grep -q '@IMAGE@' $(BOCHSRC_IN) || (echo "bochsrc FAIL: $(BOCHSRC_IN) missing @IMAGE@ placeholder"; exit 1)
-	@! grep -v '^#' $(BOCHSRC_IN) | grep -q 'build/dos64.*\.img' || (echo "bochsrc FAIL: $(BOCHSRC_IN) hardcodes an image path; use @IMAGE@"; exit 1)
-	@for pair in "dos64:$(BUILD)/dos64.img" "dos64-full:$(BUILD)/dos64-full.img" "dos64-lean:$(BUILD)/dos64-lean.img"; do \
-		name=$${pair%%:*}; img=$${pair#*:}; cfg=$(BUILD)/bochsrc-$$name.txt; \
-		test -f $$cfg || { echo "bochsrc FAIL: missing rendered $$cfg"; exit 1; }; \
-		grep -q "path=\"$$img\"" $$cfg || { echo "bochsrc FAIL: $$cfg does not reference $$img"; exit 1; }; \
-		! grep -q '@IMAGE@' $$cfg || { echo "bochsrc FAIL: $$cfg has unsubstituted @IMAGE@"; exit 1; }; \
-		grep -q 'cylinders=20, heads=16, spt=63' $$cfg || { echo "bochsrc FAIL: $$cfg lost CHS cylinders=20 heads=16 spt=63"; exit 1; }; \
-		grep -q 'cpu: model=ryzen' $$cfg || { echo "bochsrc FAIL: $$cfg lost cpu model=ryzen"; exit 1; }; \
-	done
-	@grep -Fq 'run-bochs:' Makefile || (echo "bochsrc FAIL: Makefile missing run-bochs"; exit 1)
-	@grep -q '^run-bochs:[^#]*dos64\.img' Makefile || (echo "bochsrc FAIL: run-bochs missing dos64.img prerequisite"; exit 1)
-	@grep -q '^run-bochs-full:[^#]*dos64-full\.img' Makefile || (echo "bochsrc FAIL: run-bochs-full missing dos64-full.img prerequisite"; exit 1)
-	@grep -q '^run-bochs-lean:[^#]*dos64-lean\.img' Makefile || (echo "bochsrc FAIL: run-bochs-lean missing dos64-lean.img prerequisite"; exit 1)
-	@grep -A3 '^run-bochs:' Makefile | grep -Fq 'bochs -f $$(BOCHSRC_SMOKE)' || (echo "bochsrc FAIL: run-bochs must boot $$(BOCHSRC_SMOKE)"; exit 1)
-	@grep -A3 '^run-bochs-full:' Makefile | grep -Fq 'bochs -f $$(BOCHSRC_FULL)' || (echo "bochsrc FAIL: run-bochs-full must boot $$(BOCHSRC_FULL) (not the smoke image)"; exit 1)
-	@grep -A3 '^run-bochs-lean:' Makefile | grep -Fq 'bochs -f $$(BOCHSRC_LEAN)' || (echo "bochsrc FAIL: run-bochs-lean must boot $$(BOCHSRC_LEAN)"; exit 1)
-	@grep -A2 '^run-bochs:' Makefile | grep -Fq 'rm -f $$(BUILD)/dos64.img.lock' || (echo "bochsrc FAIL: run-bochs must clean its own dos64.img.lock"; exit 1)
-	@grep -A2 '^run-bochs-full:' Makefile | grep -Fq 'rm -f $$(BUILD)/dos64-full.img.lock' || (echo "bochsrc FAIL: run-bochs-full must clean its own dos64-full.img.lock"; exit 1)
-	@grep -A2 '^run-bochs-lean:' Makefile | grep -Fq 'rm -f $$(BUILD)/dos64-lean.img.lock' || (echo "bochsrc FAIL: run-bochs-lean must clean its own dos64-lean.img.lock"; exit 1)
-	@! grep -A3 '^run-bochs-full:' Makefile | grep -Fq 'bochs -f bochsrc.txt' || (echo "bochsrc FAIL: run-bochs-full still boots static bochsrc.txt"; exit 1)
-	@for cfg in $(BOCHSRC_SMOKE) $(BOCHSRC_FULL) $(BOCHSRC_LEAN); do \
-		diff <(grep -v '^#' $(BOCHSRC_IN) | grep -v '^$$' | grep -v 'ata0-master') <(grep -v '^#' $$cfg | grep -v '^$$' | grep -v 'ata0-master') || { echo "bochsrc FAIL: $$cfg drifts from $(BOCHSRC_IN) beyond ata0-master path"; exit 1; }; \
-	done
-	@diff <(grep -v '^#' bochsrc.txt | grep -v '^$$') <(grep -v '^#' $(BOCHSRC_SMOKE) | grep -v '^$$') || (echo "bochsrc FAIL: rendered smoke $(BOCHSRC_SMOKE) drifts from checked-in bochsrc.txt beyond header comments"; exit 1)
-	@echo "Bochsrc OK: smoke/full/lean configs reference their own images, CHS 20/16/63 + cpu ryzen preserved"
-
-run-bochs: $(BUILD)/dos64.img $(BOCHSRC_SMOKE)
-	rm -f $(BUILD)/dos64.img.lock bochs.log serial.log
-	bochs -f $(BOCHSRC_SMOKE) -q
-
+# QEMU run targets (only supported emulator; `-serial stdio` carries the
+# suite transcript and the COMMAND64 REPL).
 run-qemu: $(BUILD)/dos64.img
 	qemu-system-x86_64 -drive file=$(BUILD)/dos64.img,format=raw -serial stdio
 
@@ -496,14 +430,6 @@ run-qemu-lean: $(BUILD)/dos64-lean.img
 
 run-qemu-full: $(BUILD)/dos64-full.img
 	qemu-system-x86_64 -drive file=$(BUILD)/dos64-full.img,format=raw -serial stdio
-
-run-bochs-full: $(BUILD)/dos64-full.img $(BOCHSRC_FULL)
-	rm -f $(BUILD)/dos64-full.img.lock bochs.log serial.log
-	bochs -f $(BOCHSRC_FULL) -q
-
-run-bochs-lean: $(BUILD)/dos64-lean.img $(BOCHSRC_LEAN)
-	rm -f $(BUILD)/dos64-lean.img.lock bochs.log serial.log
-	bochs -f $(BOCHSRC_LEAN) -q
 
 # N1 cross-assemble samples (PLAN.md tier 1; docs/21-nasm-cross.md).
 # Samples are assembled with a NASM built from the vendored nasm/
@@ -516,9 +442,8 @@ NASM_SUB_SRC := nasm
 NASM_SUB_BUILD := $(BUILD)/nasm-sub/src
 NASM_SUB_BIN := $(NASM_SUB_BUILD)/nasm
 SAMPLE_OUTDIR := $(BUILD)/nasm-samples
-SAMPLE_OUTS := $(SAMPLE_OUTDIR)/HELLO.COM $(SAMPLE_OUTDIR)/ECHO.COM $(SAMPLE_OUTDIR)/CAT.COM
+SAMPLE_OUTS := $(SAMPLE_OUTDIR)/HELLO.COM $(SAMPLE_OUTDIR)/ECHO.COM $(SAMPLE_OUTDIR)/CAT.COM $(SAMPLE_OUTDIR)/WRITE.COM
 NASM_IMG := $(BUILD)/dos64-nasm.img
-BOCHSRC_NASM := $(BUILD)/bochsrc-dos64-nasm.txt
 
 $(NASM_SUB_BIN):
 	mkdir -p $(BUILD)/nasm-sub
@@ -542,28 +467,29 @@ $(SAMPLE_OUTDIR)/CAT.COM: samples/cat.asm $(NASM_SUB_BIN) | $(BUILD)
 	$(NASM_SUB_BIN) -f bin $< -o $@
 	@test $$(stat -c %s $@) -le 4096 || (echo "sample $@ exceeds 4096B shell staging"; exit 1)
 
+$(SAMPLE_OUTDIR)/WRITE.COM: samples/write.asm $(NASM_SUB_BIN) | $(BUILD)
+	mkdir -p $(SAMPLE_OUTDIR)
+	$(NASM_SUB_BIN) -f bin $< -o $@
+	@test $$(stat -c %s $@) -le 4096 || (echo "sample $@ exceeds 4096B shell staging"; exit 1)
+
 $(NASM_IMG): $(BUILD)/mbr.bin $(BUILD)/stage2.bin $(BUILD)/kernel.bin $(SAMPLE_OUTS) check-layout check-kbc check-serial check-selftest-modes check-debug-symbols | $(BUILD)
 	dd if=/dev/zero of=$@ bs=1M count=$(IMG_MB) status=none
 	dd if=$(BUILD)/mbr.bin of=$@ conv=notrunc status=none
 	dd if=$(BUILD)/stage2.bin of=$@ bs=$(IMG_SECTOR_SIZE) seek=1 conv=notrunc status=none
 	dd if=$(BUILD)/kernel.bin of=$@ bs=$(IMG_SECTOR_SIZE) seek=$(KERNEL_LBA) conv=notrunc status=none
-	python3 -W error tools/mkfat12.py --vol-lba $(VOL_LBA) --vol-totsec $(VOL_SECTORS) --sector-size $(IMG_SECTOR_SIZE) --kernel-lba $(KERNEL_LBA) --kernel-sectors $(KERNEL_SECTORS) --extra-file HELLO.COM=$(SAMPLE_OUTDIR)/HELLO.COM --extra-file ECHO.COM=$(SAMPLE_OUTDIR)/ECHO.COM --extra-file CAT.COM=$(SAMPLE_OUTDIR)/CAT.COM $@
-	@echo "Created $@ ($$(stat -c %s $@) bytes, with N1 samples)"
+	python3 -W error tools/mkfat12.py --vol-lba $(VOL_LBA) --vol-totsec $(VOL_SECTORS) --sector-size $(IMG_SECTOR_SIZE) --kernel-lba $(KERNEL_LBA) --kernel-sectors $(KERNEL_SECTORS) --extra-file HELLO.COM=$(SAMPLE_OUTDIR)/HELLO.COM --extra-file ECHO.COM=$(SAMPLE_OUTDIR)/ECHO.COM --extra-file CAT.COM=$(SAMPLE_OUTDIR)/CAT.COM --extra-file WRITE.COM=$(SAMPLE_OUTDIR)/WRITE.COM $@
+	@echo "Created $@ ($$(stat -c %s $@) bytes, with N1+N2d samples)"
 
 nasm-samples: $(NASM_IMG)
 
 run-qemu-nasm: $(NASM_IMG)
 	qemu-system-x86_64 -drive file=$(NASM_IMG),format=raw -serial stdio
 
-run-bochs-nasm: $(NASM_IMG) $(BOCHSRC_NASM)
-	rm -f $(NASM_IMG).lock bochs.log serial.log
-	bochs -f $(BOCHSRC_NASM) -q
-
 nasm-clean:
-	rm -rf $(BUILD)/nasm-sub $(SAMPLE_OUTDIR) $(NASM_IMG) $(BOCHSRC_NASM) $(NASM_IMG).lock
+	rm -rf $(BUILD)/nasm-sub $(SAMPLE_OUTDIR) $(NASM_IMG) $(NASM_IMG).lock
 
 clean:
-	rm -rf $(BUILD)/*.bin $(BUILD)/*.o $(BUILD)/*.img $(BUILD)/*.elf $(BUILD)/*.map $(BUILD)/*.lock $(BUILD)/bochsrc-*.txt
+	rm -rf $(BUILD)/*.bin $(BUILD)/*.o $(BUILD)/*.img $(BUILD)/*.elf $(BUILD)/*.map $(BUILD)/*.lock
 	rm -rf $(BUILD)/src $(BUILD)/lean $(BUILD)/full $(BUILD)/include
 
-.PHONY: all lean full clean run-bochs run-bochs-full run-bochs-lean run-qemu run-qemu-lean run-qemu-full check-layout check-layout-neg check-kbc check-serial check-selftest-modes check-debug-symbols check-bochsrc nasm-samples run-qemu-nasm run-bochs-nasm nasm-clean
+.PHONY: all lean full clean run-qemu run-qemu-lean run-qemu-full check-layout check-layout-neg check-kbc check-serial check-selftest-modes check-debug-symbols nasm-samples run-qemu-nasm nasm-clean
