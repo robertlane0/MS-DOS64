@@ -240,11 +240,17 @@ code the shell can print; `make` + `make full` green on QEMU.
 
 ### Phase N3 — `libc64` shim (enables C programs generally, NASM specifically)
 
-**Entry: N2d green. Milestone breakdown: `docs/23-nasm-port-milestones.md`
-(N3.1–N3.5). `hello.c` is the first C program running on DOS64.
-WARNING: the full kernel closes N2d at 183/184 sectors (36B free) —
-N3 must open with a size plan (scratch-LBA relocation vs test/code diet)
-before adding `src/lib` bulk. See item 12.**
+**Entry: N2d green + item 8 (size plan) done. Milestone breakdown:
+`docs/23-nasm-port-milestones.md` (N3.1–N3.5). `hello.c` is the first C
+program running on DOS64.
+Size decision (approved 2026-09-08): the full
+kernel closes N2d at 183/184 sectors (~20B free), so N3 opens with
+scratch-LBA relocation, not diet — ATA scratch LBA `200`→`400`, then
+`KERNEL_SECTORS` `184`→`224` (+20 KB, extent `[16,240)`). Diet was
+measured and rejected: test-message shortening saves ~2.2 KB once (and
+degrades the serial log), shared handler prologues save ~1 KB at high
+regression risk, while N3 needs ~2–4 KB and N4/N5 more. Relocation is
+mechanical (single-source layout block + symbolic checks) — see item 8.**
 
 - [ ] New `src/lib/libc64.asm` (System V ABI, 16 B alignment, callee-saved
       discipline per `src/kernel/stack64.asm`): `memcpy/memset/strcmp/
@@ -377,19 +383,35 @@ Next — N2 implementation, one slice at a time (design + tests 84+ spec:
 
 Then, towards NASM running on DOS64 (breakdown: `docs/23-…`):
 
-- [ ] 8. **N3** `libc64` (N3.1–N3.5): heap over `48h/49h/4Ah`, `stdio64`
-      over N2 handles, `crt0`, cross-target `hello.c` demo. Entry: N2d.
-- [ ] 9. **N4B** mini-assembler `ASM64.COM` (N4B.1–N4B.3): spec, two-pass
+- [ ] 8. **N3-pre: kernel-slot growth** (approved 2026-09-08; blocks N3).
+      Move ATA scratch LBA `200`→`400` (`%define ATA_SCRATCH_LBA` in
+      `include/fs.inc`, beside the other scratch defines), then bump
+      `KERNEL_SECTORS` `184`→`224` in the Makefile disk-layout block.
+      Touch points: `src/drivers/ata.asm` (3 `mov rsi, 200` sites + stale
+      `16..143` comment), test 82 (`cmp eax, 184`→`224`,
+      `mov eax, 200`→`ATA_SCRATCH_LBA`, header comments; leave
+      `layout82_ext_table` vectors alone), doc/comment sweep
+      (`mkfat12.py` docstring, `stage2.asm` comment, `AGENTS.md`,
+      `docs/05`, this file's baseline refs, `docs/20/21/23` slot
+      mentions). LBA 400 is clear of boot (0–15), kernel even at 256
+      extents (ends 272), FS scratch (500+), and volume (512+); QEMU is
+      LBA-only so no CHS constraint. Verify: `make check-layout`,
+      `make check-layout-neg`, then the standard matrix (`make` /
+      `make full` / `make lean`, QEMU smoke 86+4 / full 90/90, shell
+      demo, `check_volume_clean.py` pre/post). Counts unchanged.
+- [ ] 9. **N3** `libc64` (N3.1–N3.5): heap over `48h/49h/4Ah`, `stdio64`
+      over N2 handles, `crt0`, cross-target `hello.c` demo. Entry: N2d + 8.
+- [ ] 10. **N4B** mini-assembler `ASM64.COM` (N4B.1–N4B.3): spec, two-pass
       `-f bin` subset in `src/tools/`, on-volume
       `ASM64 HELLO.ASM -o HELLO.COM` demo, byte-identical round-trips.
       Needs N2 only — may overlap N3.
-- [ ] 10. **N4A** full NASM port (N4A.1–N4A.4): submodule build variant,
+- [ ] 11. **N4A** full NASM port (N4A.1–N4A.4): submodule build variant,
       `stdio64` backend swap, size decision first, byte-identical corpus.
       Entry: N3.5 + N4B.3.
-- [ ] 11. **N5** integration + hardening (HELP/PATH/`ERRORLEVEL`, harness
+- [ ] 12. **N5** integration + hardening (HELP/PATH/`ERRORLEVEL`, harness
       round-trips, README/AGENTS/syscall-ref updates, G1–G6-style audit,
       full regression trio).
-- [ ] 12. Re-estimate whatever remains from N2 actuals after each slice;
+- [ ] 13. Re-estimate whatever remains from N2 actuals after each slice;
       confirm Track B scope vs full-port funding at N2d.
 
 ---
