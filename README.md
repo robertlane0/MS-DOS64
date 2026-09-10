@@ -10,7 +10,7 @@ Boot runs a short self-test, then drops you at an `A>` prompt.
 ## Status
 
 Works on QEMU. Default build passes 87 checks
-with 4 skipped; `make full` runs all 91, then starts the shell either way.
+with 5 skipped; `make full` runs all 92, then starts the shell either way.
 Design notes live in `docs/`; `AGENTS.md` has the full build record.
 
 ## Requirements

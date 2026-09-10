@@ -1,8 +1,8 @@
 # AGENTS.md: Converting MS-DOS v1.25 ASM to 64-bit BIOS Bootable System
 
-> **Status (2026-09-07): implementation complete — smoke 87 + 4 SKIP
-> (`make`, default, non-destructive) and full 91/91 PASS (`make full`,
-> destructive 71/83 in the reserved SCRATCH/RENAMED/CRASH namespace with
+> **Status (2026-09-07): implementation complete — smoke 87 + 5 SKIP
+> (`make`, default, non-destructive) and full 92/92 PASS (`make full`,
+> destructive 71/83/88/89/92 in the reserved SCRATCH/RENAMED/CRASH namespace with
 > mount-time recovery) on QEMU, then the interactive `COMMAND64`
 > shell (`src/kernel/shell64.asm`).
 > N2a (PLAN.md slice 4) landed: `proc_enter64` cooperative enter/return
@@ -564,7 +564,7 @@ make
 # Test in QEMU
 make run-qemu
 ```
-Expected (smoke `make`): 85 PASS + 4 SKIP on serial, then the `COMMAND64` shell prompt; (full `make full`): 89 PASS, then the shell prompt
+Expected (smoke `make`): 87 PASS + 5 SKIP on serial, then the `COMMAND64` shell prompt; (full `make full`): 92 PASS, then the shell prompt
 
 **Stage 2: Video Output**
 - Test character output to screen using VGA driver
@@ -777,7 +777,7 @@ authoritative.
 | `0x70000` | Kernel staging buffer (copied to `0x100000`; must avoid `0x90000` — BIOS `INT 13h` clobbers transfers ending there) |
 | `0x90000` | Initial `RSP` top (16-aligned); `IOSTACK`/`DSKSTACK` separate 4 KiB BSS stacks (16-aligned tops) |
 | `0xB8000` | VGA text buffer |
-| `0x100000+` | Kernel (linked flat at 1 MiB, ~92 KiB / ~184 sectors, ≤224) |
+| `0x100000+` | Kernel (linked flat at 1 MiB, ~100 KiB / ~199 sectors, ≤224) |
 | `0x200000+` | Heap (`MCB64` chain, first-fit) |
 
 ### Disk layout (`build/dos64.img`, 10 MiB)
@@ -852,9 +852,9 @@ linker.ld      flat link at 0x100000 (.text.start first)
 ### Verify commands (removed from README)
 ```bash
 timeout 25 qemu-system-x86_64 -drive file=build/dos64.img,format=raw -serial stdio -display none
-# tail: Summary: 87 passed, 0 failed ... Skipped (destructive): 4 ... MS-DOS64 shell (COMMAND64). Type HELP for commands.
+# tail: Summary: 87 passed, 0 failed ... Skipped (destructive): 5 ... MS-DOS64 shell (COMMAND64). Type HELP for commands.
 timeout 25 qemu-system-x86_64 -drive file=build/dos64-full.img,format=raw -serial stdio -display none
-# tail: Summary: 91 passed, 0 failed ... MS-DOS64 shell (COMMAND64).
+# tail: Summary: 92 passed, 0 failed ... MS-DOS64 shell (COMMAND64).
 python3 tools/check_volume_clean.py --vol-lba 512 --vol-totsec 2880 --sector-size 512 --kernel-lba 16 --kernel-sectors 224 build/dos64.img
 python3 tools/check_volume_clean.py --vol-lba 512 --vol-totsec 2880 --sector-size 512 --kernel-lba 16 --kernel-sectors 224 build/dos64-full.img
 printf '\rDIR\rTYPE HELLO.TXT\rHELP\rEXIT\r' | timeout 25 qemu-system-x86_64 -drive file=build/dos64.img,format=raw -serial stdio -display none

@@ -24,8 +24,9 @@
 ;   REAL-VOLUME DESTRUCTIVE (FAT/root/data-cluster writes on the live volume,
 ;     reserved namespace SCRATCH.TXT/RENAMED.TXT/CRASH.TXT): 71 (FCB create/
 ;     write/rename/delete round-trip), 83 (crash-ordering with fault
-;     injection + reclaim), 88 (handle create/write/seek/read cycle) and 89
-;     (handle truncate/delete lifecycle). Gated behind SELFTEST_DESTRUCTIVE
+;     injection + reclaim), 88 (handle create/write/seek/read cycle), 89
+;     (handle truncate/delete lifecycle) and 92 (stdio64 round-trip over
+;     handles). Gated behind SELFTEST_DESTRUCTIVE
 ;     (see below).
 ;     Test 69 performs one net-zero root flush (SETATTRIB same value back);
 ;     it is skipped when the value already matches so the smoke suite stays
@@ -33,10 +34,10 @@
 ;
 ; Boot modes (NASM defines, see Makefile):
 ;   -DRUN_SELFTEST alone (default `make`): smoke suite — PURE + SCRATCH-DEVICE
-;     + REAL-VOLUME READ-ONLY. Tests 71/83/88/89 print SKIP and leave the
+;     + REAL-VOLUME READ-ONLY. Tests 71/83/88/89/92 print SKIP and leave the
 ;     volume untouched (only mount reads + scratch-LBA I/O occur).
-;   -DRUN_SELFTEST -DSELFTEST_DESTRUCTIVE (`make full`): full suite — all 91
-;     tests including 71/83/88/89 in the reserved namespace with mount-time
+;   -DRUN_SELFTEST -DSELFTEST_DESTRUCTIVE (`make full`): full suite — all 92
+;     tests including 71/83/88/89/92 in the reserved namespace with mount-time
 ;     recovery
 ;     (pre-clean delete + discard/remount + reclaim + heal + scrub) and
 ;     post-run non-test preservation checks (HELLO/README intact, scrub clean,
@@ -327,6 +328,16 @@ extern puts
 extern printf
 extern sprintf
 extern snprintf
+extern fopen
+extern fclose
+extern fread
+extern fwrite
+extern fseek
+extern ftell
+extern fflush
+extern feof
+extern ferror
+extern isatty
 extern proc_reap64
 extern proc_free_all64
 extern handler_exec
@@ -1933,6 +1944,30 @@ selftest_run64:
     inc r12
     mov rsi, msg_pass
 .t91_done:
+    call vga_print
+    call serial_print64
+
+    ; ---- Test 92: stdio64 round-trip (N3.3, DESTRUCTIVE) ----
+    ; DESTRUCTIVE (real-volume writes in reserved namespace SCRATCH.TXT).
+    ; Smoke (no SELFTEST_DESTRUCTIVE): SKIP without touching the volume.
+    mov rsi, msg_test92
+    call vga_print
+    call serial_print64
+%ifdef SELFTEST_DESTRUCTIVE
+    call test_stdio_roundtrip
+    test rax, rax
+    jz .t92_pass
+    inc r13
+    mov rsi, msg_fail
+    jmp .t92_done
+.t92_pass:
+    inc r12
+    mov rsi, msg_pass
+.t92_done:
+%else
+    inc r14
+    mov rsi, msg_skip
+%endif
     call vga_print
     call serial_print64
 
@@ -10739,6 +10774,430 @@ test_libc_core:
     ret
 
 ; ------------------------------------------------------------
+; Test 92: stdio64 round-trip (N3.3, DESTRUCTIVE: SCRATCH.TXT writes).
+;   (a) 36K pattern via 3x12288 fwrite + ftell/fseek + fflush/fclose
+;       (flush = 32768+4096: multi-chunk 40h);
+;   (b) slurp readback: SEEK_END/ftell size, 3x sliced fread+memcmp, EOF;
+;   (c) write-stream fread error; (d) seek-gap zero fill ("AB"+8x0+"CD");
+;   (e) small "hi" content + negative/bad-whence seeks;
+;   (f) open-mode honesty (missing/a/r+/w+/empty -> NULL), NULL-stream
+;       results, isatty range; (g) teardown: delete + mirrors + validate.
+;   Returns RAX=0 pass / 1 fail. SEEK_* numeric (C header lands at N3.5).
+test_stdio_roundtrip:
+    push rbx
+    push rcx
+    push rdx
+    push rsi
+    push rdi
+    push r8
+    push r9
+    push r10
+    push r11
+    push r12
+    push r13
+    push r14
+    push r15
+    call mem_reset64
+    call proc_init64
+    call fs_vol_scrub64           ; pre-clean recovery (reserved namespace)
+    test rax, rax
+    jnz .fail92
+    ; pattern: 36864 bytes, byte i = i & 0xFF (binary-clean)
+    lea rdi, [rel t92_out]
+    xor eax, eax
+.fill92:
+    cmp eax, 36864
+    jae .filled92
+    mov [rdi + rax], al
+    inc eax
+    jmp .fill92
+.filled92:
+    ; ---- (a) write 36K: fopen w + 3x fwrite 12288 ----
+    lea rdi, [rel t88_scratch]    ; "SCRATCH.TXT" (reserved namespace)
+    lea rsi, [rel t92_w]
+    call fopen
+    test rax, rax
+    jz .fail92
+    mov r15, rax
+    lea rdi, [rel t92_out]
+    mov esi, 1
+    mov edx, 12288
+    mov rcx, r15
+    call fwrite
+    cmp rax, 12288
+    jne .fail92
+    lea rdi, [rel t92_out+12288]
+    mov esi, 1
+    mov edx, 12288
+    mov rcx, r15
+    call fwrite
+    cmp rax, 12288
+    jne .fail92
+    lea rdi, [rel t92_out+24576]
+    mov esi, 1
+    mov edx, 12288
+    mov rcx, r15
+    call fwrite
+    cmp rax, 12288
+    jne .fail92
+    mov rdi, r15
+    call ftell
+    cmp rax, 36864
+    jne .fail92
+    ; fseek SET 0 + ftell 0, then CUR +100
+    mov rdi, r15
+    xor esi, esi
+    xor edx, edx                  ; SEEK_SET
+    call fseek
+    test rax, rax
+    jnz .fail92
+    mov rdi, r15
+    call ftell
+    test rax, rax
+    jnz .fail92
+    mov rdi, r15
+    mov esi, 100
+    mov edx, 1                    ; SEEK_CUR
+    call fseek
+    test rax, rax
+    jnz .fail92
+    mov rdi, r15
+    call ftell
+    cmp rax, 100
+    jne .fail92
+    ; explicit fflush (direct path) then fclose (finds clean: no reflush)
+    mov rdi, r15
+    call fflush
+    test rax, rax
+    jnz .fail92
+    mov rdi, r15
+    call fclose
+    test rax, rax
+    jnz .fail92
+    ; ---- (b) readback: slurp + SEEK_END size + 3x sliced fread ----
+    lea rdi, [rel t88_scratch]
+    lea rsi, [rel t92_r]
+    call fopen
+    test rax, rax
+    jz .fail92
+    mov r15, rax
+    mov rdi, r15
+    xor esi, esi
+    mov edx, 2                    ; SEEK_END
+    call fseek
+    test rax, rax
+    jnz .fail92
+    mov rdi, r15
+    call ftell
+    cmp rax, 36864
+    jne .fail92
+    mov rdi, r15
+    xor esi, esi
+    xor edx, edx                  ; SEEK_SET
+    call fseek
+    test rax, rax
+    jnz .fail92
+    lea r14, [rel t92_out]        ; expected base (slices +0/+12288/+24576)
+    xor r13d, r13d                ; slice idx
+.slice92:
+    cmp r13, 3
+    jae .sliced92
+    lea rdi, [rel t92_in]
+    mov esi, 1
+    mov edx, 12288
+    mov rcx, r15
+    call fread
+    cmp rax, 12288
+    jne .fail92
+    lea rdi, [rel t92_in]
+    mov rsi, r14
+    mov rdx, 12288
+    call memcmp
+    test rax, rax
+    jnz .fail92
+    add r14, 12288
+    inc r13
+    jmp .slice92
+.sliced92:
+    mov rdi, r15
+    call ftell
+    cmp rax, 36864
+    jne .fail92
+    ; fread at EOF -> 0 items + feof set
+    lea rdi, [rel t92_in]
+    mov esi, 1
+    mov edx, 10
+    mov rcx, r15
+    call fread
+    test rax, rax
+    jnz .fail92
+    mov rdi, r15
+    call feof
+    test rax, rax
+    jz .fail92
+    ; fwrite on a read stream -> 0 items + ferror set
+    lea rdi, [rel t92_in]
+    mov esi, 1
+    mov edx, 10
+    mov rcx, r15
+    call fwrite
+    test rax, rax
+    jnz .fail92
+    mov rdi, r15
+    call ferror
+    test rax, rax
+    jz .fail92
+    mov rdi, r15
+    call fclose
+    test rax, rax
+    jnz .fail92
+    ; ---- (c) write-stream fread error (truncate first) ----
+    lea rdi, [rel t88_scratch]
+    lea rsi, [rel t92_w]
+    call fopen
+    test rax, rax
+    jz .fail92
+    mov r15, rax
+    lea rdi, [rel t92_in]
+    mov esi, 1
+    mov edx, 10
+    mov rcx, r15
+    call fread
+    test rax, rax
+    jnz .fail92
+    mov rdi, r15
+    call ferror
+    test rax, rax
+    jz .fail92
+    mov rdi, r15
+    call fclose
+    test rax, rax
+    jnz .fail92
+    ; ---- (d) seek-gap zero fill: "AB" + fseek 10 + "CD" ----
+    lea rdi, [rel t88_scratch]
+    lea rsi, [rel t92_w]
+    call fopen
+    test rax, rax
+    jz .fail92
+    mov r15, rax
+    lea rdi, [rel t92_ab]
+    mov esi, 1
+    mov edx, 2
+    mov rcx, r15
+    call fwrite
+    cmp rax, 2
+    jne .fail92
+    mov rdi, r15
+    mov esi, 10
+    xor edx, edx                  ; SEEK_SET past EOF: zero-fill gap
+    call fseek
+    test rax, rax
+    jnz .fail92
+    mov rdi, r15
+    call ftell
+    cmp rax, 10
+    jne .fail92
+    lea rdi, [rel t92_cd]
+    mov esi, 1
+    mov edx, 2
+    mov rcx, r15
+    call fwrite
+    cmp rax, 2
+    jne .fail92
+    mov rdi, r15
+    call fclose
+    test rax, rax
+    jnz .fail92
+    lea rdi, [rel t88_scratch]
+    lea rsi, [rel t92_r]
+    call fopen
+    test rax, rax
+    jz .fail92
+    mov r15, rax
+    lea rdi, [rel t92_in]
+    mov esi, 1
+    mov edx, 12
+    mov rcx, r15
+    call fread
+    cmp rax, 12
+    jne .fail92
+    lea rdi, [rel t92_in]
+    lea rsi, [rel t92_gap12]
+    mov rdx, 12
+    call memcmp                   ; "AB" + 8 zeros + "CD"
+    test rax, rax
+    jnz .fail92
+    mov rdi, r15
+    call fclose
+    test rax, rax
+    jnz .fail92
+    ; ---- (e) small content: "hi" + bad seeks ----
+    lea rdi, [rel t88_scratch]
+    lea rsi, [rel t92_w]
+    call fopen
+    test rax, rax
+    jz .fail92
+    mov r15, rax
+    lea rdi, [rel t92_hi]
+    mov esi, 1
+    mov edx, 2
+    mov rcx, r15
+    call fwrite
+    cmp rax, 2
+    jne .fail92
+    mov rdi, r15
+    call fclose
+    test rax, rax
+    jnz .fail92
+    lea rdi, [rel t88_scratch]
+    lea rsi, [rel t92_r]
+    call fopen
+    test rax, rax
+    jz .fail92
+    mov r15, rax
+    mov rdi, r15
+    xor esi, esi
+    mov edx, 2                    ; SEEK_END
+    call fseek
+    test rax, rax
+    jnz .fail92
+    mov rdi, r15
+    call ftell
+    cmp rax, 2
+    jne .fail92
+    mov rdi, r15
+    xor esi, esi
+    xor edx, edx
+    call fseek
+    test rax, rax
+    jnz .fail92
+    lea rdi, [rel t92_in]
+    mov esi, 1
+    mov edx, 2
+    mov rcx, r15
+    call fread
+    cmp rax, 2
+    jne .fail92
+    lea rdi, [rel t92_in]
+    lea rsi, [rel t92_hi]
+    mov rdx, 2
+    call memcmp
+    test rax, rax
+    jnz .fail92
+    mov rdi, r15                  ; negative position -> -1 (full 64-bit -1:
+    mov rsi, -1                   ; mov esi would zero-extend to +4G and pass!)
+    xor edx, edx
+    call fseek
+    cmp rax, -1
+    jne .fail92
+    mov rdi, r15                  ; bad whence -> -1
+    xor esi, esi
+    mov edx, 3
+    call fseek
+    cmp rax, -1
+    jne .fail92
+    mov rdi, r15
+    call fclose
+    test rax, rax
+    jnz .fail92
+    ; ---- (f) open-mode honesty + NULL streams + isatty ----
+    lea rdi, [rel t87_nope]       ; missing file -> NULL
+    lea rsi, [rel t92_r]
+    call fopen
+    test rax, rax
+    jnz .fail92
+    lea rdi, [rel t88_scratch]    ; append unsupported -> NULL (no truncate!)
+    lea rsi, [rel t92_a]
+    call fopen
+    test rax, rax
+    jnz .fail92
+    lea rdi, [rel t88_scratch]    ; plus-modes unsupported -> NULL
+    lea rsi, [rel t92_rp]
+    call fopen
+    test rax, rax
+    jnz .fail92
+    lea rdi, [rel t88_scratch]
+    lea rsi, [rel t92_wp]
+    call fopen
+    test rax, rax
+    jnz .fail92
+    lea rdi, [rel t88_scratch]    ; empty mode -> NULL
+    lea rsi, [rel t92_empty]
+    call fopen
+    test rax, rax
+    jnz .fail92
+    xor edi, edi                  ; ftell(NULL)/fclose(NULL) -> -1
+    call ftell
+    cmp rax, -1
+    jne .fail92
+    xor edi, edi
+    call fclose
+    cmp rax, -1
+    jne .fail92
+    xor edi, edi                  ; feof(NULL)=0, ferror(NULL)!=0
+    call feof
+    test rax, rax
+    jnz .fail92
+    xor edi, edi
+    call ferror
+    test rax, rax
+    jz .fail92
+    xor edi, edi                  ; consoles are ttys
+    call isatty
+    cmp rax, 1
+    jne .fail92
+    mov edi, 1
+    call isatty
+    cmp rax, 1
+    jne .fail92
+    mov edi, 2
+    call isatty
+    cmp rax, 1
+    jne .fail92
+    mov edi, 3                    ; files never are (range-basis: no alloc
+    call isatty                   ; state needed, deterministic either way)
+    test rax, rax
+    jnz .fail92
+    mov edi, -1
+    call isatty
+    test rax, rax
+    jnz .fail92
+    ; ---- (g) teardown: delete + mirrors + heap intact ----
+    lea rdi, [rel aux_fcb]
+    lea rsi, [rel t88_scratch]
+    mov al, 1
+    call fs_make_fcb64
+    jc .fail92
+    lea rdx, [rel aux_fcb]
+    call handler_delete
+    jc .fail92
+    call fs_vol_check_mirrors64
+    test rax, rax
+    jnz .fail92
+    call mem_validate64
+    test rax, rax
+    jnz .fail92
+    xor eax, eax
+    jmp .done92
+.fail92:
+    mov rax, 1
+.done92:
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop r11
+    pop r10
+    pop r9
+    pop r8
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rcx
+    pop rbx
+    ret
+
+; ------------------------------------------------------------
 
 section .rodata
 msg_test1 db " [1] Register mapping (AX->RAX, R8-R15)... ",0
@@ -10834,6 +11293,17 @@ msg_test90 db " [90] Shell EXEC enter + ERRORLEVEL... ",0
 t90_test db "TEST",0
 t90_errsrc db "%ERRORLEVEL%",0
 msg_test91 db " [91] libc core (string/heap/printf)... ",0
+msg_test92 db " [92] stdio64 round-trip (fopen/rw/seek)... ",0
+t92_w db "w",0
+t92_r db "r",0
+t92_a db "a",0
+t92_rp db "r+",0
+t92_wp db "w+",0
+t92_empty db 0
+t92_hi db "hi",0
+t92_ab db "AB",0
+t92_cd db "CD",0
+t92_gap12 db "A","B",0,0,0,0,0,0,0,0,"C","D"
 t91_hello db "hello",0
 t91_alpha db "abcdef",0
 t91_ababcf db "ababcf",0
@@ -10891,7 +11361,7 @@ msg_summary db 13,10,"Summary: ",0
 msg_summary2 db " passed, ",0
 msg_summary3 db " failed",13,10,0
 msg_summary4 db "Skipped (destructive): ",0
-msg_summary5 db " (run make full for 71+83+88+89)",13,10,0
+msg_summary5 db " (run make full for 71+83+88+89+92)",13,10,0
 msg_phase3_ok db "Phase3 register conversion: ALL TESTS PASS",13,10,0
 msg_phase3_fail db "Phase3: SOME TESTS FAILED",13,10,0
 msg_phase4_ok db "Phase4 addressing transformation: ALL TESTS PASS",13,10,0
@@ -11138,6 +11608,9 @@ t88_exp: resb 1024
 ; --- Test 91: libc scratch (PURE, no disk I/O) ---
 t91_a: resb 64
 t91_b: resb 64
+; --- Test 92: stdio round-trip buffers (DESTRUCTIVE, SCRATCH.TXT) ---
+t92_out: resb 36864
+t92_in: resb 12288
 
 
 %else

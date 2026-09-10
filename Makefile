@@ -96,7 +96,7 @@ FULL_DEFS := -DRUN_SELFTEST -DSELFTEST_DESTRUCTIVE
 # identically from harness and child context). Listed EXPLICITLY, never by
 # wildcard: crt0.asm must never link into the kernel (duplicate _start).
 SRC_LIBC := src/libc
-LIBC_KERN_SRCS := $(SRC_LIBC)/libc64.asm
+LIBC_KERN_SRCS := $(SRC_LIBC)/libc64.asm $(SRC_LIBC)/stdio64.asm
 KERNEL_SRCS := $(wildcard $(SRC_KERNEL)/*.asm) $(wildcard $(SRC_DRIVERS)/*.asm) $(wildcard $(SRC_LIB)/*.asm) $(LIBC_KERN_SRCS)
 KERNEL_OBJS := $(patsubst %.asm,$(BUILD)/%.o,$(KERNEL_SRCS))
 
@@ -381,13 +381,13 @@ check-selftest-modes:
 	@grep -q 'SCRATCH-DEVICE' $(SRC_KERNEL)/selftest64.asm || (echo "selftest-modes FAIL: missing classification header"; exit 1)
 	@grep -q 'msg_skip' $(SRC_KERNEL)/selftest64.asm || (echo "selftest-modes FAIL: missing msg_skip"; exit 1)
 	@grep -q 'Skipped (destructive)' $(SRC_KERNEL)/selftest64.asm || (echo "selftest-modes FAIL: missing skipped summary"; exit 1)
-	@test $$(grep -c 'ifdef SELFTEST_DESTRUCTIVE' $(SRC_KERNEL)/selftest64.asm) -ge 3 || (echo "selftest-modes FAIL: expected >=3 ifdef SELFTEST_DESTRUCTIVE (71+83+69+88+89)"; exit 1)
+	@test $$(grep -c 'ifdef SELFTEST_DESTRUCTIVE' $(SRC_KERNEL)/selftest64.asm) -ge 3 || (echo "selftest-modes FAIL: expected >=3 ifdef SELFTEST_DESTRUCTIVE (71+83+69+88+89+92)"; exit 1)
 	@grep -q 'FULL_DEFS := -DRUN_SELFTEST -DSELFTEST_DESTRUCTIVE' Makefile || (echo "selftest-modes FAIL: Makefile missing FULL_DEFS"; exit 1)
 	@grep -q 'dos64-full.img' Makefile || (echo "selftest-modes FAIL: Makefile missing full image recipe"; exit 1)
 	@! grep -Eq '^NASM_DEFS \?= .*SELFTEST_DESTRUCTIVE' Makefile || (echo "selftest-modes FAIL: default NASM_DEFS must stay smoke (no SELFTEST_DESTRUCTIVE)"; exit 1)
 	@grep -q 'SCRATCH.TXT' include/fs.inc || (echo "selftest-modes FAIL: include/fs.inc missing reserved namespace"; exit 1)
 	@grep -q 'check_volume_clean' include/fs.inc || (echo "selftest-modes FAIL: include/fs.inc must reference check_volume_clean"; exit 1)
-	@echo "Selftest modes OK: smoke (87 + 4 SKIP) default, full (91) via make full"
+	@echo "Selftest modes OK: smoke (87 + 5 SKIP) default, full (92) via make full"
 
 # Debug-hook check — source-level assertion that test/fail-point markers
 # stay out of release objects (same pattern as SELFTEST_DESTRUCTIVE).
