@@ -113,7 +113,7 @@ KERNEL_OBJ_DIRS := $(sort $(dir $(KERNEL_OBJS)))
 LEAN_OBJ_DIRS := $(sort $(dir $(LEAN_OBJS)))
 FULL_OBJ_DIRS := $(sort $(dir $(FULL_OBJS)))
 
-all: $(BUILD)/dos64.img
+all: $(BUILD)/dos64.img libc-userland
 
 lean: $(BUILD)/dos64-lean.img
 
@@ -477,6 +477,19 @@ $(SAMPLE_OUTDIR)/WRITE.COM: samples/write.asm $(NASM_SUB_BIN) | $(BUILD)
 	$(NASM_SUB_BIN) -f bin $< -o $@
 	@test $$(stat -c %s $@) -le 4096 || (echo "sample $@ exceeds 4096B shell staging"; exit 1)
 
+# N3.4+: userland libc objects (crt0 today; N3.5 link inputs later).
+# Assembled WITHOUT kernel defines and NEVER linked into the kernel image
+# (crt0 defines _start; LIBC_KERN_SRCS stays crt0-free — see its comment).
+# Part of `all` so the userland entry rots never; validated by the host
+# harness (parsers) now and the hello.c demo (N3.5) next.
+LIBC_USERLAND := $(BUILD)/libc/crt0.o
+
+$(BUILD)/libc/crt0.o: $(SRC_LIBC)/crt0.asm | $(BUILD)
+	mkdir -p $(BUILD)/libc
+	$(NASM_ELF) $< -o $@
+
+libc-userland: $(LIBC_USERLAND)
+
 $(NASM_IMG): $(BUILD)/mbr.bin $(BUILD)/stage2.bin $(BUILD)/kernel.bin $(SAMPLE_OUTS) check-layout check-kbc check-serial check-selftest-modes check-debug-symbols | $(BUILD)
 	dd if=/dev/zero of=$@ bs=1M count=$(IMG_MB) status=none
 	dd if=$(BUILD)/mbr.bin of=$@ conv=notrunc status=none
@@ -495,6 +508,6 @@ nasm-clean:
 
 clean:
 	rm -rf $(BUILD)/*.bin $(BUILD)/*.o $(BUILD)/*.img $(BUILD)/*.elf $(BUILD)/*.map $(BUILD)/*.lock
-	rm -rf $(BUILD)/src $(BUILD)/lean $(BUILD)/full $(BUILD)/include
+	rm -rf $(BUILD)/src $(BUILD)/lean $(BUILD)/full $(BUILD)/include $(BUILD)/libc
 
-.PHONY: all lean full clean run-qemu run-qemu-lean run-qemu-full check-layout check-layout-neg check-kbc check-serial check-selftest-modes check-debug-symbols nasm-samples run-qemu-nasm nasm-clean
+.PHONY: all lean full clean run-qemu run-qemu-lean run-qemu-full check-layout check-layout-neg check-kbc check-serial check-selftest-modes check-debug-symbols nasm-samples run-qemu-nasm nasm-clean libc-userland
