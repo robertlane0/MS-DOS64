@@ -62,6 +62,7 @@ extern cmd_del_entry64
 extern cmd_ren_entry64
 extern fs_mount_volume64
 extern fs_vol_read_file64
+extern fs_vol_file_size64
 extern fs_vol_flush_root64
 extern fs_vol_root
 extern fs_vol_dpb
@@ -692,25 +693,28 @@ sh_do_exec:
     lea rdi, [rel sh_fcb+8]  ; raw 11-byte name ext @8 (NOT FCB64.ext=9: no drive byte here)
     mov ecx, 3
     rep movsb
-    ; stage file via mem_alloc
+    ; stage file: exact-size alloc + whole-file read (N3.5: the old 4KB
+    ; sh_file cap silently truncated larger .COMs — C binaries exceed it.
+    ; sh_file stays for TYPE's documented 4KiB window; EXEC has no cap
+    ; now — oversize images fail honestly at spawn (MEM_END) or alloc.)
     lea rdi, [rel sh_fcb]
-    lea rsi, [rel sh_file]
-    mov rdx, 4096
-    call fs_vol_read_file64
+    call fs_vol_file_size64       ; RAX=size, CF=1 missing
     jc .bad_ex
-    mov r10, rax                 ; len
-    test r10, r10
-    jz .bad_ex
-    mov rdi, r10
+    test rax, rax
+    jz .bad_ex                    ; empty file: nothing to run
+    mov r10, rax                  ; len
+    mov rdi, rax
     call mem_alloc64
     test rax, rax
     jz .nomem_ex
-    mov rbx, rax                 ; staging buffer
-    lea rsi, [rel sh_file]
-    mov rdi, rbx
-    mov rcx, r10
-    cld
-    rep movsb
+    mov rbx, rax                  ; staging buffer (freed on every path out)
+    lea rdi, [rel sh_fcb]
+    mov rsi, rbx
+    mov rdx, r10
+    call fs_vol_read_file64       ; cap = size: reads the whole file
+    jc .free_bad_ex
+    cmp rax, r10
+    jne .free_bad_ex              ; short read: never run a partial image
     mov rdi, rbx
     mov rsi, r10
     mov rdx, r9                  ; cmdline tail (may be empty string)
@@ -754,6 +758,10 @@ sh_do_exec:
     call mem_free64
     jmp .bad_ex
 .exec_fail_ex:
+    mov rdi, rbx
+    call mem_free64
+    jmp .bad_ex
+.free_bad_ex:                   ; read failed after staging alloc: free it
     mov rdi, rbx
     call mem_free64
 .bad_ex:

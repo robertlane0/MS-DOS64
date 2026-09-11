@@ -482,21 +482,36 @@ $(SAMPLE_OUTDIR)/WRITE.COM: samples/write.asm $(NASM_SUB_BIN) | $(BUILD)
 # (crt0 defines _start; LIBC_KERN_SRCS stays crt0-free — see its comment).
 # Part of `all` so the userland entry rots never; validated by the host
 # harness (parsers) now and the hello.c demo (N3.5) next.
-LIBC_USERLAND := $(BUILD)/libc/crt0.o
+# N3.5 C cross-target: gcc -ffreestanding -nostdlib -m64 -fPIE + userland.ld
+# (base 0, _start first) + objcopy -O binary. The loader does NO relocation,
+# so the image must be slide-safe: -fPIE codegen + static link (GOT relaxed
+# to RIP-relative LEA) with readelf/objdump acceptance below, not by script.
+LIBC_USERLAND := $(BUILD)/libc/crt0.o $(BUILD)/libc/libc64.o $(BUILD)/libc/stdio64.o
+UCFLAGS := -ffreestanding -nostdlib -m64 -fPIE -mno-red-zone -fno-stack-protector -fno-unwind-tables -fno-asynchronous-unwind-tables -Wall -Werror -Os
 
-$(BUILD)/libc/crt0.o: $(SRC_LIBC)/crt0.asm | $(BUILD)
+$(BUILD)/libc/%.o: $(SRC_LIBC)/%.asm | $(BUILD)
 	mkdir -p $(BUILD)/libc
 	$(NASM_ELF) $< -o $@
 
+$(BUILD)/hello.o: samples/hello.c | $(BUILD)
+	gcc $(UCFLAGS) -c $< -o $@
+
+$(BUILD)/chello.elf: $(BUILD)/hello.o $(LIBC_USERLAND) $(SRC_LIBC)/userland.ld
+	ld -T $(SRC_LIBC)/userland.ld -o $@ $(BUILD)/libc/crt0.o $(BUILD)/hello.o $(BUILD)/libc/libc64.o $(BUILD)/libc/stdio64.o -nostdlib --fatal-warnings
+
+$(BUILD)/CHELLO.COM: $(BUILD)/chello.elf
+	objcopy -O binary $< $@
+	@echo "CHELLO.COM: $$(stat -c %s $@) bytes"
+
 libc-userland: $(LIBC_USERLAND)
 
-$(NASM_IMG): $(BUILD)/mbr.bin $(BUILD)/stage2.bin $(BUILD)/kernel.bin $(SAMPLE_OUTS) check-layout check-kbc check-serial check-selftest-modes check-debug-symbols | $(BUILD)
+$(NASM_IMG): $(BUILD)/mbr.bin $(BUILD)/stage2.bin $(BUILD)/kernel.bin $(SAMPLE_OUTS) $(BUILD)/CHELLO.COM check-layout check-kbc check-serial check-selftest-modes check-debug-symbols | $(BUILD)
 	dd if=/dev/zero of=$@ bs=1M count=$(IMG_MB) status=none
 	dd if=$(BUILD)/mbr.bin of=$@ conv=notrunc status=none
 	dd if=$(BUILD)/stage2.bin of=$@ bs=$(IMG_SECTOR_SIZE) seek=1 conv=notrunc status=none
 	dd if=$(BUILD)/kernel.bin of=$@ bs=$(IMG_SECTOR_SIZE) seek=$(KERNEL_LBA) conv=notrunc status=none
-	python3 -W error tools/mkfat12.py --vol-lba $(VOL_LBA) --vol-totsec $(VOL_SECTORS) --sector-size $(IMG_SECTOR_SIZE) --kernel-lba $(KERNEL_LBA) --kernel-sectors $(KERNEL_SECTORS) --extra-file HELLO.COM=$(SAMPLE_OUTDIR)/HELLO.COM --extra-file ECHO.COM=$(SAMPLE_OUTDIR)/ECHO.COM --extra-file CAT.COM=$(SAMPLE_OUTDIR)/CAT.COM --extra-file WRITE.COM=$(SAMPLE_OUTDIR)/WRITE.COM $@
-	@echo "Created $@ ($$(stat -c %s $@) bytes, with N1+N2d samples)"
+	python3 -W error tools/mkfat12.py --vol-lba $(VOL_LBA) --vol-totsec $(VOL_SECTORS) --sector-size $(IMG_SECTOR_SIZE) --kernel-lba $(KERNEL_LBA) --kernel-sectors $(KERNEL_SECTORS) --extra-file HELLO.COM=$(SAMPLE_OUTDIR)/HELLO.COM --extra-file ECHO.COM=$(SAMPLE_OUTDIR)/ECHO.COM --extra-file CAT.COM=$(SAMPLE_OUTDIR)/CAT.COM --extra-file WRITE.COM=$(SAMPLE_OUTDIR)/WRITE.COM --extra-file CHELLO.COM=$(BUILD)/CHELLO.COM $@
+	@echo "Created $@ ($$(stat -c %s $@) bytes, with N1+N2d samples + N3.5 CHELLO)"
 
 nasm-samples: $(NASM_IMG)
 

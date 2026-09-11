@@ -402,8 +402,15 @@ Then, towards NASM running on DOS64 (breakdown: `docs/23-…`):
       `make check-layout-neg`, then the standard matrix (`make` /
       `make full` / `make lean`, QEMU smoke 86+4 / full 90/90, shell
       demo, `check_volume_clean.py` pre/post). Counts unchanged.
-- [ ] 9. **N3** `libc64` (N3.1–N3.5): heap over `48h/49h/4Ah`, `stdio64`
+- [x] 9. **N3** `libc64` (N3.1–N3.5): heap over `48h/49h/4Ah`, `stdio64`
       over N2 handles, `crt0`, cross-target `hello.c` demo. Entry: N2d + 8.
+      (Done 2026-09-10: N3.1+N3.2 libc core + test 91; N3.3 stdio64 + test
+      92; N3.4 crt0 + host harness; N3.5 `CHELLO.COM` runs on QEMU —
+      puts/malloc/fopen/fwrite, Exit 0, no relocs/GOT/syscalls. Required
+      two fixes: crt0 BSS-zeroing (flat .COM truncates NOBITS) and shell
+      EXEC exact-size staging via new `fs_vol_file_size64` (4KB cap
+      silently truncated larger programs). Full 92/92, volumes CLEAN;
+      recipe + constraints in `docs/24-c-cross-target.md`.)
 - [ ] 10. **N4B** mini-assembler `ASM64.COM` (N4B.1–N4B.3): spec, two-pass
       `-f bin` subset in `src/tools/`, on-volume
       `ASM64 HELLO.ASM -o HELLO.COM` demo, byte-identical round-trips.

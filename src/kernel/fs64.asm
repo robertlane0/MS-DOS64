@@ -49,6 +49,7 @@ global fs_fcb_open64
 global fs_file_read_cluster64
 global fs_mount_volume64
 global fs_vol_read_file64
+global fs_vol_file_size64
 global fs_vol_flush_fat64
 global fs_vol_flush_root64
 global fs_alloc_cluster64
@@ -3049,6 +3050,39 @@ fs_vol_read_file64:
     pop rsi
     pop rdx
     pop rcx
+    pop rbx
+    ret
+
+; ------------------------------------------------------------
+; fs_vol_file_size64 — RDI=11-byte name -> RAX=file size, CF 0 ok.
+;   CF 1 + RAX=0 when missing/unmounted. Reuses the read path's
+;   find+size prologue (same outputs, no I/O beyond the dir scan).
+;   (N3.5: shell EXEC stages whole programs — the old 4KB sh_file cap
+;   silently truncated larger .COMs. Exact-size staging via this query;
+;   the follow-up read uses cap=size so min(size,cap)=size.)
+; ------------------------------------------------------------
+fs_vol_file_size64:
+    push rbx
+    push rsi
+    push rbp
+    cmp byte [rel fs_vol_mounted], 0
+    je .fail_sz
+    lea rbp, [rel fs_vol_dpb]
+    lea rsi, [rel fs_vol_root]
+    ; RDI already = name
+    call fs_dir_find64            ; CF + RBX=entry
+    jc .fail_sz
+    call fs_dir_get_size64        ; RAX=size
+    clc
+    pop rbp
+    pop rsi
+    pop rbx
+    ret
+.fail_sz:
+    xor eax, eax
+    stc
+    pop rbp
+    pop rsi
     pop rbx
     ret
 

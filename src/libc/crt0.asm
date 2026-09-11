@@ -40,6 +40,8 @@ global crt_parse_args
 global crt_parse_env
 
 extern main
+extern _bss_start
+extern _bss_end
 
 %define PSP_CMD_LEN  0xA0
 %define PSP_CMD_TAIL 0xA1
@@ -58,6 +60,51 @@ section .rodata
 crt_empty: db 0                   ; argv[0] (no program path from kernel)
 
 section .text
+
+; _start MUST stay the first symbol in .text: the userland link puts crt0.o
+; first so _start lands at file offset 0 (the raw-.COM entry = image base;
+; the loader does no relocation). Helpers follow (order irrelevant).
+; _start — RDI=PSP on entry (N2a). Align stack, parse, call main, exit.
+_start:
+    and rsp, -16                  ; align (nothing live below; never returns)
+    mov rbx, rdi                  ; PSP FIRST: rep stosb below advances RDI
+    lea rdi, [rel _bss_start]     ; zero all BSS first (loader copies stale
+    lea rcx, [rel _bss_end]       ; bytes: flat .COM has no BSS content —
+    sub rcx, rdi                  ; without this the FILE table is garbage).
+    xor eax, eax                  ; LEA is RIP-relative: slide-safe.
+    cld                           ; (startup DF unknown; rep needs DF=0)
+    rep stosb                     ; ~1 KB once; RDI/RCX dead after (PSP in RBX)
+    push rbx
+    push r12                      ; preserve callee-saved for the enter
+                                  ; trampoline (parent state) + keep RSP
+                                  ; 16-aligned for the calls below
+    lea rsi, [rel crt_argv]
+    mov edx, MAX_ARGS
+    call crt_parse_args           ; RAX = argc
+    mov r12d, eax                 ; argc (int range: tail-bounded)
+    mov rdi, rbx
+    lea rsi, [rel crt_envp]
+    mov edx, MAX_ENV
+    call crt_parse_env            ; envp filled (count in RAX, unused here)
+    mov edi, r12d                 ; argc
+    lea rsi, [rel crt_argv]       ; argv
+    lea rdx, [rel crt_envp]       ; envp
+    call main
+    ; exit with main's low 8 bits: AL already holds them; set AH last and
+    ; zero every other volatile (stale regs are live trap inputs).
+    xor ebx, ebx
+    xor ecx, ecx
+    xor edx, edx
+    xor esi, esi
+    xor edi, edi
+    xor r8d, r8d
+    xor r9d, r9d
+    xor r10d, r10d
+    xor r11d, r11d
+    mov ah, 0x4C
+    int 0x21
+.hang:
+    jmp .hang                     ; 4Ch never returns; paranoia
 
 ; crt_parse_args(RDI=psp, RSI=argv_out, RDX=maxargs) -> RAX=argc.
 ; argv[0]="" always (slot 0); tail words fill slots 1... Returns argc with
@@ -187,37 +234,3 @@ crt_parse_env:
 .pe_noarray:
     xor eax, eax
     ret
-
-; _start — RDI=PSP on entry (N2a). Align stack, parse, call main, exit.
-_start:
-    and rsp, -16                  ; align (nothing live below; never returns)
-    push rbx
-    push r12                      ; 2 pushes: RSP%16==0 again, call-safe
-    mov rbx, rdi                  ; PSP (callee-saved across the parsers)
-    lea rsi, [rel crt_argv]
-    mov edx, MAX_ARGS
-    call crt_parse_args           ; RAX = argc
-    mov r12d, eax                 ; argc (int range: tail-bounded)
-    mov rdi, rbx
-    lea rsi, [rel crt_envp]
-    mov edx, MAX_ENV
-    call crt_parse_env            ; envp filled (count in RAX, unused here)
-    mov edi, r12d                 ; argc
-    lea rsi, [rel crt_argv]       ; argv
-    lea rdx, [rel crt_envp]       ; envp
-    call main
-    ; exit with main's low 8 bits: AL already holds them; set AH last and
-    ; zero every other volatile (stale regs are live trap inputs).
-    xor ebx, ebx
-    xor ecx, ecx
-    xor edx, edx
-    xor esi, esi
-    xor edi, edi
-    xor r8d, r8d
-    xor r9d, r9d
-    xor r10d, r10d
-    xor r11d, r11d
-    mov ah, 0x4C
-    int 0x21
-.hang:
-    jmp .hang                     ; 4Ch never returns; paranoia

@@ -20,6 +20,11 @@
 > N3-pre (PLAN.md item 8) landed: kernel slot `184→224` sectors (extent
 > `[16,240)`); ATA scratch moved `200→400` (`ATA_SCRATCH_LBA`, test 82
 > locks the new values).
+> N3 (PLAN.md item 9) done: `libc64` (test 91) + `stdio64` (test 92) +
+> `crt0` + C cross-target (`CHELLO.COM` demo: gcc `-fPIE` + `userland.ld`
+> base-0 + `objcopy -O binary`, no relocs/GOT/syscalls; `hello.c`
+> puts/malloc/fopen/fwrite runs `Exit 0`); shell EXEC stages whole files
+> now (`fs_vol_file_size64`, 4KB staging cap removed).
 > The phase plan below is kept as the build record; every checklist item is done.
 > Current entry points: `README.md` (what works / memory / disk / shell),
 > `docs/18-truth-gap-analysis.md` + `docs/19-closure-g1-g6.md` (audit trail for
