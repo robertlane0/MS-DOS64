@@ -515,6 +515,27 @@ $(NASM_IMG): $(BUILD)/mbr.bin $(BUILD)/stage2.bin $(BUILD)/kernel.bin $(SAMPLE_O
 
 nasm-samples: $(NASM_IMG)
 
+# N4B.3 host acceptance (docs/22-asm64-spec.md): asm64_core assembles the
+# four samples byte-identically to host `nasm -f bin`. Deterministic,
+# host-side, no emulator. Refs use system nasm (spec: host-nasm; the
+# submodule pin governs the shipped volume images, not this check).
+ASM64_REFDIR := $(BUILD)/asm64_ref
+ASM64_CHECK := $(BUILD)/asm64_check
+ASM64_CORE_O := $(BUILD)/asm64_core.o
+
+$(ASM64_CORE_O): src/tools/asm64_core.asm src/tools/ac_tables.asm src/tools/ac_parse.asm src/tools/ac_enc.asm | $(BUILD)
+	$(NASM_ELF) $< -o $@
+
+$(ASM64_REFDIR)/%.com: samples/%.asm | $(BUILD)
+	mkdir -p $(ASM64_REFDIR)
+	$(NASM) -f bin $< -o $@
+
+$(ASM64_CHECK): tools/asm64_check.c $(ASM64_CORE_O) | $(BUILD)
+	gcc -Wall -Werror -O2 $< $(ASM64_CORE_O) -o $@
+
+asm64-check: $(ASM64_CHECK) $(ASM64_REFDIR)/hello.com $(ASM64_REFDIR)/echo.com $(ASM64_REFDIR)/cat.com $(ASM64_REFDIR)/write.com
+	$(ASM64_CHECK) $(ASM64_REFDIR) samples
+
 run-qemu-nasm: $(NASM_IMG)
 	qemu-system-x86_64 -drive file=$(NASM_IMG),format=raw -serial stdio
 
@@ -524,5 +545,6 @@ nasm-clean:
 clean:
 	rm -rf $(BUILD)/*.bin $(BUILD)/*.o $(BUILD)/*.img $(BUILD)/*.elf $(BUILD)/*.map $(BUILD)/*.lock
 	rm -rf $(BUILD)/src $(BUILD)/lean $(BUILD)/full $(BUILD)/include $(BUILD)/libc
+	rm -rf $(ASM64_CHECK) $(ASM64_CORE_O) $(ASM64_REFDIR)
 
-.PHONY: all lean full clean run-qemu run-qemu-lean run-qemu-full check-layout check-layout-neg check-kbc check-serial check-selftest-modes check-debug-symbols nasm-samples run-qemu-nasm nasm-clean libc-userland
+.PHONY: all lean full clean run-qemu run-qemu-lean run-qemu-full check-layout check-layout-neg check-kbc check-serial check-selftest-modes check-debug-symbols nasm-samples run-qemu-nasm nasm-clean libc-userland asm64-check
