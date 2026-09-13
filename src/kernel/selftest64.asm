@@ -34,11 +34,11 @@
 ;
 ; Boot modes (NASM defines, see Makefile):
 ;   -DRUN_SELFTEST alone (default `make`): smoke suite — PURE + SCRATCH-DEVICE
-;     + REAL-VOLUME READ-ONLY. Tests 71/83/88/89/92 print SKIP and leave the
-;     volume untouched (only mount reads + scratch-LBA I/O occur); test 93
-;     (PURE assemble+memcmp) runs in smoke.
-;   -DRUN_SELFTEST -DSELFTEST_DESTRUCTIVE (`make full`): full suite — all 93
-;     tests including 71/83/88/89/92 in the reserved namespace with mount-time
+;     + REAL-VOLUME READ-ONLY. Tests 71/83/88/89/92/95 print SKIP and leave
+;     the volume untouched (only mount reads + scratch-LBA I/O occur);
+;     tests 93/94 (PURE assemble+memcmp / shims) run in smoke.
+;   -DRUN_SELFTEST -DSELFTEST_DESTRUCTIVE (`make full`): full suite — all 95
+;     tests including 71/83/88/89/92/95 in the reserved namespace with mount-time
 ;     recovery
 ;     (pre-clean delete + discard/remount + reclaim + heal + scrub) and
 ;     post-run non-test preservation checks (HELLO/README intact, scrub clean,
@@ -354,6 +354,16 @@ extern localtime
 extern strftime
 extern errno
 extern crt_envp
+extern fgets
+extern fgetc
+extern fputs
+extern fputc
+extern ungetc
+extern fprintf
+extern setvbuf
+extern remove
+extern stdout
+extern stdin
 extern proc_reap64
 extern proc_free_all64
 extern handler_exec
@@ -2026,6 +2036,30 @@ selftest_run64:
     inc r12
     mov rsi, msg_pass
 .t94_done:
+    call vga_print
+    call serial_print64
+
+    ; ---- Test 95: buffered I/O + remove (N4A.2b, DESTRUCTIVE) ----
+    ; Real-volume writes in the scratch namespace (N4A.TXT, created,
+    ; verified, removed — pre/post CLEAN). Smoke: SKIP untouched.
+    mov rsi, msg_test95
+    call vga_print
+    call serial_print64
+%ifdef SELFTEST_DESTRUCTIVE
+    call test_stdio95
+    test rax, rax
+    jz .t95_pass
+    inc r13
+    mov rsi, msg_fail
+    jmp .t95_done
+.t95_pass:
+    inc r12
+    mov rsi, msg_pass
+.t95_done:
+%else
+    inc r14
+    mov rsi, msg_skip
+%endif
     call vga_print
     call serial_print64
 
@@ -11547,6 +11581,199 @@ test_shim94:
     pop rbx
     ret
 
+; test_stdio95 — N4A.2b buffered I/O + remove (DESTRUCTIVE, N4A.TXT).
+; Writes via fputs/fputc/fprintf, reads via fgets/fgetc/ungetc/fread,
+; checks fseek/ftell/feof/ferror/setvbuf + console objects, then
+; remove()s the file and proves it gone. RAX=0 ok, 1 fail.
+test_stdio95:
+    push rbx
+    push rcx
+    push rdx
+    push rsi
+    push rdi
+    push r8
+    push r9
+    push r10
+    push r11
+    push r12
+    push r13
+    push r14
+    push r15                      ; 13 pushes: entry 8 -> 0, aligned
+    call mem_reset64
+    call proc_init64
+    ; --- write phase ---
+    lea rdi, [rel t95_name]
+    lea rsi, [rel t95_w]
+    call fopen
+    test rax, rax
+    jz .fail95
+    mov r15, rax                  ; fp
+    lea rdi, [rel t95_line1]
+    mov rsi, r15
+    call fputs
+    test rax, rax
+    jnz .fail95
+    mov edi, 'C'
+    mov rsi, r15
+    call fputc
+    cmp rax, 'C'
+    jne .fail95
+    mov rdi, r15
+    lea rsi, [rel t95_fmt]
+    lea rdx, [rel t95_x]
+    mov ecx, 42
+    call fprintf                  ; "X=42\n" -> 5
+    cmp rax, 5
+    jne .fail95
+    mov rdi, r15
+    call fclose
+    test rax, rax
+    jnz .fail95
+    ; --- read phase ---
+    lea rdi, [rel t95_name]
+    lea rsi, [rel t95_r]
+    call fopen
+    test rax, rax
+    jz .fail95
+    mov r15, rax
+    lea rdi, [rel t95_buf]
+    mov rsi, 16
+    mov rdx, r15
+    call fgets
+    test rax, rax
+    jz .fail95
+    lea rdi, [rel t95_buf]
+    lea rsi, [rel t95_line1]
+    mov rdx, 3
+    call memcmp
+    test rax, rax
+    jnz .fail95
+    mov rdi, r15
+    call fgetc
+    cmp rax, 'C'
+    jne .fail95
+    mov edi, 'C'
+    mov rsi, r15
+    call ungetc                   ; pushback (pos untouched)
+    cmp rax, 'C'
+    jne .fail95
+    mov rdi, r15
+    call fgetc                    ; drains pushback, still at "X=42\n"
+    cmp rax, 'C'
+    jne .fail95
+    lea rdi, [rel t95_buf]
+    mov rsi, 1
+    mov rdx, 5
+    mov rcx, r15
+    call fread
+    cmp rax, 5
+    jne .fail95
+    lea rdi, [rel t95_buf]
+    lea rsi, [rel t95_line2]
+    mov rdx, 5
+    call memcmp
+    test rax, rax
+    jnz .fail95
+    mov rdi, r15
+    call feof                     ; at end after full read
+    test rax, rax
+    jz .fail95
+    mov rdi, r15
+    call ferror
+    test rax, rax
+    jnz .fail95
+    mov rdi, r15
+    xor esi, esi
+    xor edx, edx
+    call fseek                     ; rewind (clears EOF + pushback)
+    test rax, rax
+    jnz .fail95
+    mov rdi, r15
+    call ftell
+    test rax, rax
+    jnz .fail95
+    mov rdi, r15
+    call feof
+    test rax, rax
+    jnz .fail95
+    mov rdi, r15
+    call fclose
+    test rax, rax
+    jnz .fail95
+    ; --- console objects (no volume, one marker line on stdout) ---
+    mov rdi, [rel stdout]
+    test rdi, rdi
+    jz .fail95
+    mov rsi, rdi
+    xor edx, edx
+    xor ecx, ecx
+    call setvbuf
+    test rax, rax
+    jnz .fail95
+    mov rdi, [rel stdout]
+    call ftell
+    test rax, rax
+    jnz .fail95
+    mov rdi, [rel stdout]
+    xor esi, esi
+    xor edx, edx
+    call fseek                     ; console: -1 (not seekable)
+    cmp rax, -1
+    jne .fail95
+    lea rdi, [rel t95_marker]
+    mov rsi, [rel stdout]
+    call fputs                     ; "[95]con\n" — visible suite marker
+    test rax, rax
+    jnz .fail95
+    mov rdi, [rel stdin]
+    test rdi, rdi
+    jz .fail95
+    mov edi, 'Q'
+    mov rsi, [rel stdin]
+    call ungetc                   ; pushback only: no keyboard touch
+    cmp rax, 'Q'
+    jne .fail95
+    mov rdi, [rel stdin]
+    call fgetc                    ; drains pushback (still no kbd touch)
+    cmp rax, 'Q'
+    jne .fail95
+    ; --- remove phase ---
+    lea rdi, [rel t95_name]
+    call remove
+    test rax, rax
+    jnz .fail95
+    lea rdi, [rel t95_name]
+    lea rsi, [rel t95_r]
+    call fopen                     ; gone: NULL
+    test rax, rax
+    jnz .fail95
+    lea rdi, [rel t95_name]
+    call remove                   ; twice: -1
+    cmp rax, -1
+    jne .fail95
+    xor eax, eax
+    jmp .done95
+.fail95:
+    ; best-effort cleanup so a failure leaves no volume residue either
+    lea rdi, [rel t95_name]
+    call remove
+    mov rax, 1
+.done95:
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop r11
+    pop r10
+    pop r9
+    pop r8
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rcx
+    pop rbx
+    ret
+
 ; ------------------------------------------------------------
 
 section .rodata
@@ -11646,6 +11873,7 @@ msg_test91 db " [91] libc core (string/heap/printf)... ",0
 msg_test92 db " [92] stdio64 round-trip (fopen/rw/seek)... ",0
 msg_test93 db " [93] ASM64 hello round-trip (assemble+memcmp)... ",0
 msg_test94 db " [94] nasm shims (cmp/span/strtol/sscanf/errno/time)... ",0
+msg_test95 db " [95] buffered I/O + remove (fgets/ungetc/fprintf)... ",0
 t94_Hello db "Hello",0
 t94_hello db "hello",0
 t94_a db "a",0
@@ -11676,6 +11904,14 @@ t94_gval db "1",0
 t94_nope db "NOPE",0
 t94_ymd db "%Y-%m-%d",0
 t94_ymd_exp db "1983-04-01",0
+t95_name db "N4A.TXT",0
+t95_w db "w",0
+t95_r db "r",0
+t95_line1 db "AB",10,0
+t95_fmt db "%s=%d",10,0
+t95_x db "X",0
+t95_line2 db "X=42",10,0
+t95_marker db "[95]con",10,0
 ; Test 93 corpus (N4B.3, PURE): embedded source + build-generated ref.
 ; hello.asm is checked-in (844 B); hello93.ref is stamped by make from the
 ; same file via host `nasm -f bin` (Makefile: build/hello93.ref rule).
@@ -11750,7 +11986,7 @@ msg_summary db 13,10,"Summary: ",0
 msg_summary2 db " passed, ",0
 msg_summary3 db " failed",13,10,0
 msg_summary4 db "Skipped (destructive): ",0
-msg_summary5 db " (run make full for 71+83+88+89+92)",13,10,0
+msg_summary5 db " (run make full for 71+83+88+89+92+95)",13,10,0
 msg_phase3_ok db "Phase3 register conversion: ALL TESTS PASS",13,10,0
 msg_phase3_fail db "Phase3: SOME TESTS FAILED",13,10,0
 msg_phase4_ok db "Phase4 addressing transformation: ALL TESTS PASS",13,10,0
@@ -12014,6 +12250,8 @@ t94_i2: resd 1
 t94_n: resd 1
 t94_t: resq 1
 t94_out: resb 32
+; --- Test 95: buffered I/O scratch (DESTRUCTIVE, N4A.TXT, self-cleaning) ---
+t95_buf: resb 32
 
 
 %else

@@ -56,6 +56,9 @@ global printf
 global sprintf
 global snprintf
 global exit
+global null_str                   ; N4A.2b: shared with stdio64 vfprintf
+global hexdig_lo
+global hexdig_hi
 
 section .rodata
 null_str: db "(null)",0

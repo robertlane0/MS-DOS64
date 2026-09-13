@@ -1,7 +1,7 @@
 # Phase 1 – Boot & Testing Strategy for 64-bit Conversion
 
 > **As built (2026-09-07):** this strategy is implemented — MBR → stage2 →
-> kernel at `0x100000` boots smoke 89 + 5 SKIP (`make`) or full 94 PASS
+> kernel at `0x100000` boots smoke 89 + 6 SKIP (`make`) or full 95 PASS
 > (`make full`, destructive 71/83/88/89/92 in the reserved namespace with recovery)
 > + `COMMAND64` REPL on QEMU. Concrete sizes/layout
 > below reflect the code; the step rationale is unchanged. See `README.md`
@@ -155,7 +155,7 @@ flags (classification: PURE / SCRATCH-DEVICE / REAL-VOLUME READ-ONLY /
 REAL-VOLUME DESTRUCTIVE — see `src/kernel/selftest64.asm` header):
 
 ```nasm
-; Smoke (default): nasm -DRUN_SELFTEST -> 89 + 5 SKIP, then shell_repl64
+; Smoke (default): nasm -DRUN_SELFTEST -> 89 + 6 SKIP, then shell_repl64
 ; Full:  nasm -DRUN_SELFTEST -DSELFTEST_DESTRUCTIVE -> 92, then shell
 ; Lean:  nasm -DSKIP_SELFTEST -> skip suite, minimal init, shell direct
 %ifdef SKIP_SELFTEST
@@ -171,7 +171,7 @@ REAL-VOLUME DESTRUCTIVE — see `src/kernel/selftest64.asm` header):
 `Makefile` exposes all three (objects are kept separate so the images can coexist):
 
 ```bash
-make                    # smoke: build/dos64.img (RUN_SELFTEST, 89 + 5 SKIP + shell)
+make                    # smoke: build/dos64.img (RUN_SELFTEST, 89 + 6 SKIP + shell)
 make full               # full: build/dos64-full.img (RUN_SELFTEST+SELFTEST_DESTRUCTIVE, 92 + shell)
 make lean               # lean: build/dos64-lean.img (SKIP_SELFTEST, shell direct)
 make run-qemu           # boot smoke image, expect "Summary: 87 passed, 0" + "Skipped (destructive): 5"

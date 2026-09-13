@@ -41,6 +41,7 @@ global crt_parse_env
 
 extern main
 extern crt_envp                  ; N4A.2a: owned by shim64 (kernel-linkable)
+extern stdio_init                ; N4A.2b: console objects (always linked)
 extern _bss_start
 extern _bss_end
 
@@ -79,6 +80,7 @@ _start:
     push r12                      ; preserve callee-saved for the enter
                                   ; trampoline (parent state) + keep RSP
                                   ; 16-aligned for the calls below
+    call stdio_init               ; console objects + stdin/out/err pointers
     lea rsi, [rel crt_argv]
     mov edx, MAX_ARGS
     call crt_parse_args           ; RAX = argc
