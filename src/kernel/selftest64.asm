@@ -35,8 +35,9 @@
 ; Boot modes (NASM defines, see Makefile):
 ;   -DRUN_SELFTEST alone (default `make`): smoke suite — PURE + SCRATCH-DEVICE
 ;     + REAL-VOLUME READ-ONLY. Tests 71/83/88/89/92 print SKIP and leave the
-;     volume untouched (only mount reads + scratch-LBA I/O occur).
-;   -DRUN_SELFTEST -DSELFTEST_DESTRUCTIVE (`make full`): full suite — all 92
+;     volume untouched (only mount reads + scratch-LBA I/O occur); test 93
+;     (PURE assemble+memcmp) runs in smoke.
+;   -DRUN_SELFTEST -DSELFTEST_DESTRUCTIVE (`make full`): full suite — all 93
 ;     tests including 71/83/88/89/92 in the reserved namespace with mount-time
 ;     recovery
 ;     (pre-clean delete + discard/remount + reclaim + heal + scrub) and
@@ -361,6 +362,7 @@ extern stack_test_canary
 extern stack_test_stress
 extern serial_print64
 extern serial_try_putc64
+extern asm64_assemble
 
 %ifdef RUN_SELFTEST
 
@@ -1968,6 +1970,27 @@ selftest_run64:
     inc r14
     mov rsi, msg_skip
 %endif
+    call vga_print
+    call serial_print64
+
+    ; ---- Test 93: ASM64 hello round-trip (N4B.3, PURE) ----
+    ; PURE (in-memory assemble + memcmp, no traps, no disk I/O): runs in
+    ; both smoke and full. Guards the on-device assembler core against
+    ; regressions; the full 4-sample corpus is proven host-side by
+    ; `make asm64-check` (7 KB for all four exceeds the kernel budget).
+    mov rsi, msg_test93
+    call vga_print
+    call serial_print64
+    call test_asm64_hello
+    test rax, rax
+    jz .t93_pass
+    inc r13
+    mov rsi, msg_fail
+    jmp .t93_done
+.t93_pass:
+    inc r12
+    mov rsi, msg_pass
+.t93_done:
     call vga_print
     call serial_print64
 
@@ -6254,12 +6277,12 @@ test_queue_interleave:
 
 ; ------------------------------------------------------------
 ; Test 82: Layout invariants — same arithmetic as make check-layout.
-;   Locks the canonical disk layout ( IMG 10M, secsiz 512, kernel 16+224,
+;   Locks the canonical disk layout ( IMG 10M, secsiz 512, kernel 16+256,
 ;   volume 512+2880, FAT 4608 / root 7168 / iobuf 32768 ) and proves the
 ;   build-time predicates at runtime, pure arithmetic, no disk I/O:
-;     kernel_end=16+224<=512, volume_end=3392*512<=10M, aliases
+;     kernel_end=16+256<=512, volume_end=3392*512<=10M, aliases
 ;     FS_VOL_LBA==VOL_LBA, scratch 400/500/501/510/511 clear of kernel
-;     [16,240) and volume [512,3392), FAT 9sec / root 14sec <=64 (ATA
+;     [16,272) and volume [512,3392), FAT 9sec / root 14sec <=64 (ATA
 ;     1..64 contract for the mount reads). Negative tables prove the same
 ;   predicates reject off-by-one overlaps (511, 500+extents) and oversize
 ;   volumes (1M image, 20000 sectors). Deterministic, no timing.
@@ -6286,7 +6309,7 @@ test_layout:
     cmp eax, 16
     jne .fail82
     mov eax, KERNEL_SECTORS
-    cmp eax, 224
+    cmp eax, 256
     jne .fail82
     mov eax, VOL_LBA
     cmp eax, 512
@@ -11197,6 +11220,67 @@ test_stdio_roundtrip:
     pop rbx
     ret
 
+; Test 93: ASM64 hello round-trip (N4B.3, PURE, smoke-safe).
+;   Assembles the embedded samples/hello.asm via asm64_assemble (no traps,
+;   no disk I/O — same pure contract as the host harness) and memcmps the
+;   bytes against build/hello93.ref (host `nasm -f bin`, build-generated).
+;   Returns RAX=0 pass, 1 fail. Callee-saved preserved; 16 B RSP alignment
+;   kept across the 8-arg assemble call (err/errcap pushed as 7th/8th).
+test_asm64_hello:
+    push rbx
+    push rcx
+    push rdx
+    push rsi
+    push rdi
+    push r12
+    push r13
+    push r14
+    push r15                      ; 9 pushes: RSP%16==0 here (entry had 8)
+    lea rdi, [rel t93_src]
+    mov rsi, t93_srclen
+    lea rdx, [rel t93_out]
+    mov rcx, t93_outlen
+    xor r8d, r8d                  ; no listing
+    xor r9d, r9d
+    push t93_errlen               ; 8th arg: errcap (16 B total pushed: aligned)
+    lea rax, [rel t93_err]
+    push rax                      ; 7th arg: err
+    call asm64_assemble
+    add rsp, 16
+    cmp rax, -1
+    je .fail93                    ; assemble error (errbuf has LINE: msg)
+    cmp rax, t93_reflen
+    jne .fail93                   ; length mismatch
+    lea rsi, [rel t93_out]
+    lea rdi, [rel t93_ref]
+    mov rcx, rax
+    jrcxz .pass93                 ; empty output: vacuously equal (never here)
+.cmp93:
+    mov al, [rsi]
+    mov bl, [rdi]
+    cmp al, bl
+    jne .fail93
+    inc rsi
+    inc rdi
+    dec rcx
+    jnz .cmp93
+.pass93:
+    xor eax, eax
+    jmp .done93
+.fail93:
+    mov rax, 1
+.done93:
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rcx
+    pop rbx
+    ret
+
 ; ------------------------------------------------------------
 
 section .rodata
@@ -11294,6 +11378,14 @@ t90_test db "TEST",0
 t90_errsrc db "%ERRORLEVEL%",0
 msg_test91 db " [91] libc core (string/heap/printf)... ",0
 msg_test92 db " [92] stdio64 round-trip (fopen/rw/seek)... ",0
+msg_test93 db " [93] ASM64 hello round-trip (assemble+memcmp)... ",0
+; Test 93 corpus (N4B.3, PURE): embedded source + build-generated ref.
+; hello.asm is checked-in (844 B); hello93.ref is stamped by make from the
+; same file via host `nasm -f bin` (Makefile: build/hello93.ref rule).
+t93_src: incbin "samples/hello.asm"
+t93_srclen equ ($ - t93_src)
+t93_ref: incbin "build/hello93.ref"
+t93_reflen equ ($ - t93_ref)
 t92_w db "w",0
 t92_r db "r",0
 t92_a db "a",0
@@ -11611,6 +11703,11 @@ t91_b: resb 64
 ; --- Test 92: stdio round-trip buffers (DESTRUCTIVE, SCRATCH.TXT) ---
 t92_out: resb 36864
 t92_in: resb 12288
+; --- Test 93: ASM64 assemble buffers (PURE) ---
+t93_outlen equ 256
+t93_errlen equ 256
+t93_out: resb 256
+t93_err: resb 256
 
 
 %else

@@ -25,12 +25,12 @@ IMG_SECTOR_SIZE := 512
 VOL_LBA := 512
 VOL_SECTORS := 2880
 KERNEL_LBA := 16
-# 224 (was 184): N3-pre size plan (PLAN.md item 8) — the full kernel closed
-# N2d at 183/184 sectors, so ATA scratch moved 200->400 (ATA_SCRATCH_LBA in
-# include/fs.inc) to reopen growth room. Extent [16,240) stays clear of ATA
-# scratch 400, FS scratch 500-511, and volume 512+. Never grow the slot by
-# squeezing scratch: relocate first, then bump (see PLAN.md N4A.3).
-KERNEL_SECTORS := 224
+# 256 (was 224): N4B-pre size plan — asm64_core (~15 KB text+rodata,
+# test 93) needs ~30 sectors past the 199-sector N3.5 kernel, and only 25
+# were free. Extent [16,272) stays clear of ATA scratch 400, FS scratch
+# 500-511, and volume 512+ (no relocation needed this time). Never grow
+# the slot by squeezing scratch: relocate first, then bump (PLAN N4A.3).
+KERNEL_SECTORS := 256
 LAYOUT_INC := $(BUILD)/include/layout.inc
 
 # Reject unsupported layout overrides. (Environment values are already
@@ -97,7 +97,12 @@ FULL_DEFS := -DRUN_SELFTEST -DSELFTEST_DESTRUCTIVE
 # wildcard: crt0.asm must never link into the kernel (duplicate _start).
 SRC_LIBC := src/libc
 LIBC_KERN_SRCS := $(SRC_LIBC)/libc64.asm $(SRC_LIBC)/stdio64.asm
-KERNEL_SRCS := $(wildcard $(SRC_KERNEL)/*.asm) $(wildcard $(SRC_DRIVERS)/*.asm) $(wildcard $(SRC_LIB)/*.asm) $(LIBC_KERN_SRCS)
+# N4B.3 test 93 links the pure assembler core in-harness (single TU:
+# asm64_core.asm %includes ac_tables/parse/enc; asm64_main.asm stays OUT,
+# it is a .COM program with its own entry, never a kernel object).
+SRC_TOOLS := src/tools
+TOOLS_KERN_SRCS := $(SRC_TOOLS)/asm64_core.asm
+KERNEL_SRCS := $(wildcard $(SRC_KERNEL)/*.asm) $(wildcard $(SRC_DRIVERS)/*.asm) $(wildcard $(SRC_LIB)/*.asm) $(LIBC_KERN_SRCS) $(TOOLS_KERN_SRCS)
 KERNEL_OBJS := $(patsubst %.asm,$(BUILD)/%.o,$(KERNEL_SRCS))
 
 # Lean kernel objects (separate dir so full/lean can coexist)
@@ -387,7 +392,7 @@ check-selftest-modes:
 	@! grep -Eq '^NASM_DEFS \?= .*SELFTEST_DESTRUCTIVE' Makefile || (echo "selftest-modes FAIL: default NASM_DEFS must stay smoke (no SELFTEST_DESTRUCTIVE)"; exit 1)
 	@grep -q 'SCRATCH.TXT' include/fs.inc || (echo "selftest-modes FAIL: include/fs.inc missing reserved namespace"; exit 1)
 	@grep -q 'check_volume_clean' include/fs.inc || (echo "selftest-modes FAIL: include/fs.inc must reference check_volume_clean"; exit 1)
-	@echo "Selftest modes OK: smoke (87 + 5 SKIP) default, full (92) via make full"
+	@echo "Selftest modes OK: smoke (88 + 5 SKIP) default, full (93) via make full"
 
 # Debug-hook check — source-level assertion that test/fail-point markers
 # stay out of release objects (same pattern as SELFTEST_DESTRUCTIVE).
@@ -536,6 +541,15 @@ $(ASM64_CHECK): tools/asm64_check.c $(ASM64_CORE_O) | $(BUILD)
 asm64-check: $(ASM64_CHECK) $(ASM64_REFDIR)/hello.com $(ASM64_REFDIR)/echo.com $(ASM64_REFDIR)/cat.com $(ASM64_REFDIR)/write.com
 	$(ASM64_CHECK) $(ASM64_REFDIR) samples
 
+# N4B.3 test 93 embeds the hello corpus: source (checked-in) + expected
+# output (build-generated via system nasm, same bytes asm64-check refs).
+# The selftest objects (smoke/lean/full) depend on the ref so a stale or
+# missing ref fails the build instead of the suite.
+$(BUILD)/hello93.ref: samples/hello.asm | $(BUILD)
+	$(NASM) -f bin $< -o $@
+
+$(BUILD)/src/kernel/selftest64.o $(LEAN_BUILD)/src/kernel/selftest64.o $(FULL_BUILD)/src/kernel/selftest64.o: $(BUILD)/hello93.ref
+
 run-qemu-nasm: $(NASM_IMG)
 	qemu-system-x86_64 -drive file=$(NASM_IMG),format=raw -serial stdio
 
@@ -543,7 +557,7 @@ nasm-clean:
 	rm -rf $(BUILD)/nasm-sub $(SAMPLE_OUTDIR) $(NASM_IMG) $(NASM_IMG).lock
 
 clean:
-	rm -rf $(BUILD)/*.bin $(BUILD)/*.o $(BUILD)/*.img $(BUILD)/*.elf $(BUILD)/*.map $(BUILD)/*.lock
+	rm -rf $(BUILD)/*.bin $(BUILD)/*.o $(BUILD)/*.img $(BUILD)/*.elf $(BUILD)/*.map $(BUILD)/*.lock $(BUILD)/*.ref
 	rm -rf $(BUILD)/src $(BUILD)/lean $(BUILD)/full $(BUILD)/include $(BUILD)/libc
 	rm -rf $(ASM64_CHECK) $(ASM64_CORE_O) $(ASM64_REFDIR)
 
