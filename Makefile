@@ -583,12 +583,40 @@ $(BUILD)/src/kernel/selftest64.o $(LEAN_BUILD)/src/kernel/selftest64.o $(FULL_BU
 run-qemu-nasm: $(NASM_IMG)
 	qemu-system-x86_64 -drive file=$(NASM_IMG),format=raw -serial stdio
 
+# N4A.1 trimmed host build (PLAN N4A item 11; docs/25-n4a1-trim.md,
+# tools/nasm-dos64/). Same cache pattern as nasm-samples: a throwaway copy
+# of the pinned submodule (nasm/ itself is never modified) built with the
+# OF_ONLY+OF_BIN+OF_ELF trim. Asserts the trim still assembles all four N1
+# samples byte-identically to system nasm and reports size. Opt-in only
+# (not part of `all`): `make nasm-trim-check`.
+include tools/nasm-dos64/trim.mk
+NASM_TRIM_BUILD := $(BUILD)/nasm-trim/src
+NASM_TRIM_BIN := $(NASM_TRIM_BUILD)/nasm
+NASM_TRIM_OUT := $(BUILD)/nasm-trim-out
+
+$(NASM_TRIM_BIN):
+	mkdir -p $(BUILD)/nasm-trim
+	cp -a $(NASM_SUB_SRC)/. $(NASM_TRIM_BUILD)/
+	cd $(NASM_TRIM_BUILD) && ./autogen.sh
+	cd $(NASM_TRIM_BUILD) && ./configure --disable-lto --disable-debug
+	$(MAKE) -C $(NASM_TRIM_BUILD) -j nasm CFLAGS="-g -O2 $(NASM_TRIM_PPFLAGS)" CPPFLAGS="$(NASM_TRIM_PPFLAGS)"
+
+nasm-trim-check: $(NASM_TRIM_BIN) $(ASM64_REFDIR)/hello.com $(ASM64_REFDIR)/echo.com $(ASM64_REFDIR)/cat.com $(ASM64_REFDIR)/write.com
+	@mkdir -p $(NASM_TRIM_OUT)
+	@for s in hello echo cat write; do \
+		$(NASM_TRIM_BIN) -f bin samples/$$s.asm -o $(NASM_TRIM_OUT)/$$s.com || exit 1; \
+		cmp $(NASM_TRIM_OUT)/$$s.com $(ASM64_REFDIR)/$$s.com || (echo "trim FAIL: $$s.com differs from system-nasm output"; exit 1); \
+	done
+	@$(NASM_TRIM_BIN) -hf | grep -q bin || (echo "trim FAIL: -f bin missing from trimmed build"; exit 1)
+	@echo "Trimmed nasm -f bin: 4/4 byte-identical to system nasm"
+	@size $(NASM_TRIM_BIN)
+
 nasm-clean:
-	rm -rf $(BUILD)/nasm-sub $(SAMPLE_OUTDIR) $(NASM_IMG) $(NASM_IMG).lock
+	rm -rf $(BUILD)/nasm-sub $(BUILD)/nasm-trim $(NASM_TRIM_OUT) $(SAMPLE_OUTDIR) $(NASM_IMG) $(NASM_IMG).lock
 
 clean:
 	rm -rf $(BUILD)/*.bin $(BUILD)/*.o $(BUILD)/*.img $(BUILD)/*.elf $(BUILD)/*.map $(BUILD)/*.lock $(BUILD)/*.ref $(BUILD)/*.COM $(BUILD)/*.bssend
 	rm -rf $(BUILD)/src $(BUILD)/lean $(BUILD)/full $(BUILD)/include $(BUILD)/libc $(TOOL_BUILD)
 	rm -rf $(ASM64_CHECK) $(ASM64_CORE_O) $(ASM64_REFDIR)
 
-.PHONY: all lean full clean run-qemu run-qemu-lean run-qemu-full check-layout check-layout-neg check-kbc check-serial check-selftest-modes check-debug-symbols nasm-samples run-qemu-nasm nasm-clean libc-userland asm64-check asm64-tool
+.PHONY: all lean full clean run-qemu run-qemu-lean run-qemu-full check-layout check-layout-neg check-kbc check-serial check-selftest-modes check-debug-symbols nasm-samples run-qemu-nasm nasm-clean nasm-trim-check libc-userland asm64-check asm64-tool

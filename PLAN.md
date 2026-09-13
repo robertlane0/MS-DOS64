@@ -426,6 +426,18 @@ Then, towards NASM running on DOS64 (breakdown: `docs/23-…`):
 - [ ] 11. **N4A** full NASM port (N4A.1–N4A.4): submodule build variant,
       `stdio64` backend swap, size decision first, byte-identical corpus.
       Entry: N3.5 + N4B.3.
+      (N4A.1 host half done 2026-09-12: `tools/nasm-dos64/` stack
+      (`trim.mk` OF_ONLY+OF_BIN+OF_ELF, `dos64-config.h` null-feature
+      config, no-fork policy) + `make nasm-trim-check` (cached throwaway
+      copy, 4/4 samples byte-identical, `size` report: text 1041352 /
+      stripped file 2214976 B — backends are only ~150 KB, the 1.16 MB
+      `.data.rel.ro` tables are the floor, and the binary does NOT fit
+      the 1.44 MB volume: N4A.3 defaults to `dos64-tools.img` second
+      image, decided finally at N4A.2 with the real DOS64-linked size.
+      Key finding: NO `file.c`/`mmap.c` backend swap needed — the tree
+      degrades to pure-stdio paths by config alone; N4A.2 is the libc
+      gap table + host-side stdmac codegen. Full record:
+      `docs/25-n4a1-trim.md`. N4A.2–N4A.4 remain open.)
 - [ ] 12. **N5** integration + hardening (HELP/PATH/`ERRORLEVEL`, harness
       round-trips, README/AGENTS/syscall-ref updates, G1–G6-style audit,
       full regression trio).
