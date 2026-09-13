@@ -294,7 +294,7 @@ full-port funding arrives early.**
 
 **Track A (after B is stable): full NASM port. Entry: N3.5 + N4B.3
 green; take the N4A.3 size decision (grow volume vs `dos64-tools.img`)
-first — never squeeze the 224-sector kernel slot.**
+first — never squeeze the 256-sector kernel slot.**
 
 - [ ] Submodule build variant: `nasm/configure` with `--disable-*`,
       keep `asm/parser/preproc`, `nasmlib` (minus `mmap/realpath/rlimit`),
@@ -411,10 +411,18 @@ Then, towards NASM running on DOS64 (breakdown: `docs/23-…`):
       EXEC exact-size staging via new `fs_vol_file_size64` (4KB cap
       silently truncated larger programs). Full 92/92, volumes CLEAN;
       recipe + constraints in `docs/24-c-cross-target.md`.)
-- [ ] 10. **N4B** mini-assembler `ASM64.COM` (N4B.1–N4B.3): spec, two-pass
-      `-f bin` subset in `src/tools/`, on-volume
+- [x] 10. **N4B** mini-assembler `ASM64.COM` (N4B.1–N4B.3): spec, two-pass
+      subset in `src/tools/`, on-volume
       `ASM64 HELLO.ASM -o HELLO.COM` demo, byte-identical round-trips.
-      Needs N2 only — may overlap N3.
+      (Done 2026-09-12: N4B.1 spec; N4B.2 core (7 bug fixes:
+      ident-`_`/`xor`-clears-CF/`mov bl`-BSS-corruption/sizekw-result/
+      mem-`]`-double-consume/reg-form-NASM-parity/times-RBX/jcc-CC/
+      listing-high-32); N4B.3 `make asm64-check` 4/4 + test 93 PURE
+      (smoke 88+5 / full 93 green, volumes CLEAN) + `ASM64.COM`
+      (35,296 B BSS-backed flat image, `ld`+`truncate` — `-f bin`
+      cannot express the BSS pad) ships on `dos64-nasm.img` with
+      `HELLO.ASM`; on-device demo green incl. `-l` listing and
+      error-path exit codes. Required N4B-pre slot `224→256`.)
 - [ ] 11. **N4A** full NASM port (N4A.1–N4A.4): submodule build variant,
       `stdio64` backend swap, size decision first, byte-identical corpus.
       Entry: N3.5 + N4B.3.
@@ -426,6 +434,6 @@ Then, towards NASM running on DOS64 (breakdown: `docs/23-…`):
 
 ---
 *Baseline refs: `Makefile` layout block (`IMG_MB=10, VOL_LBA=512,
-VOL_SECTORS=2880, KERNEL_LBA=16, KERNEL_SECTORS=224`), `src/kernel/
+VOL_SECTORS=2880, KERNEL_LBA=16, KERNEL_SECTORS=256`), `src/kernel/
 proc64.asm:1277`, `src/kernel/syscall64.asm:319`, `include/psp.inc`
 (664 B `PSP64`), `include/mcb.inc` (40 B `MCB64`), `nasm/` @ 3.02.*

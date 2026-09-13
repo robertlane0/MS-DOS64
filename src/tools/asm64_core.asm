@@ -1,9 +1,9 @@
 ; ASM64 core root (N4B.2): pure two-pass assemble-buffer function.
-; %includes tables/parse/encode (single TU for both -f bin via main and
-; -f elf64 for kernel/host-test builds — no ifdefs: section .bss + resb
-; is bin-clean (dropped) and the tables self-zero per call anyway).
-; Assemble with: nasm -f elf64 src/tools/asm64_core.asm (test/kernel) or
-; via %%include from src/tools/asm64_main.asm (nasm -f bin, tool).
+; %includes tables/parse/encode (single TU, always nasm -f elf64: kernel,
+; host-test, and tool builds. NOT -f bin: the ~18 KB BSS needs explicit
+; backing that -f bin cannot express in one pass (circular TIMES), so the
+; tool links main+core with tools.ld and pads to BSS-end via truncate.
+; BSS needs no runtime zeroing: tables are rebuilt per call from scratch.)
 ; Design: re-scan lines every pass (no AST storage); lengths monotonic
 ; non-decreasing (optimistic-short jumps/disp/imm, exact growth on
 ; resolve) so total-length + defined-count stability = convergence

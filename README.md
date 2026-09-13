@@ -10,7 +10,7 @@ Boot runs a short self-test, then drops you at an `A>` prompt.
 ## Status
 
 Works on QEMU. Default build passes 87 checks
-with 5 skipped; `make full` runs all 92, then starts the shell either way.
+with 5 skipped; `make full` runs all 93, then starts the shell either way.
 Design notes live in `docs/`; `AGENTS.md` has the full build record.
 
 ## Requirements
@@ -59,6 +59,24 @@ A> DATE / TIME / CLS / VER / PROMPT / PATH / ECHO text / REM comment / PAUSE
 A> TEST      (runs TEST.COM from the volume)
 A> HELP / EXIT
 ```
+
+On images with developer programs (`make nasm-samples` →
+`build/dos64-nasm.img`), external `.COM` files run with arguments, and
+the native assembler is available:
+
+```
+A> ECHO hello world
+A> WRITE hello         (writes OUT.TXT, exits with the tail length)
+A> CHELLO              (C demo: malloc + file write, exits 0)
+A> ASM64 HELLO.ASM -o AHELLO.COM [-l HELLO.LST]
+A> AHELLO              (runs the on-device assembled program)
+```
+
+`ASM64` assembles the NASM `-f bin` subset from `docs/22-asm64-spec.md`
+(labels, `db/dw/dq`, `mov/add/sub/cmp/test/inc/dec`, `jmp`/`jcc`/`call`,
+`ret`/`int`/`syscall`/`nop`, `times`/`equ`/`%define`, 64-bit registers).
+Exit codes: `0` ok, `1` assembly errors (`FILE:LINE: message`), `2`
+file/usage errors — batch-friendly via `%ERRORLEVEL%`.
 
 Batch files work with `REM`, `%1`–`%9`, and `%%` escapes. Keyboard and
 serial input both work.

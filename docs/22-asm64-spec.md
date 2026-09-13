@@ -8,10 +8,19 @@ primitives Track A needs at ~1/10th the cost. Full NASM stays Track A.
 ## What it is
 
 - `src/tools/asm64_core.asm`: pure assemble-buffer function (no traps,
-  no I/O — host-testable like the libc parsers, dual-built: `-f bin`
-  for the tool, `elf64` for the in-suite test).
-- `src/tools/asm64_main.asm`: `-f bin` I/O wrapper (tail args, handle
-  file I/O, `AH=09h` errors, `AH=4Ch` exit codes) → `ASM64.COM`.
+  no I/O — host-testable like the libc parsers; always `-f elf64`:
+  kernel, host-test, and tool builds share one TU).
+- `src/tools/asm64_main.asm`: I/O wrapper (tail args, handle
+  file I/O, `AH=09h` errors, `AH=4Ch` exit codes) → `ASM64.COM`,
+  linked `ld -T src/tools/tools.ld` (base 0, `_start` first) +
+  `objcopy -O binary` + truncate-to-BSS-end.
+- Build deviation (measured, 2026-09-12): the spec said `-f bin` for the
+  tool, but the core carries ~18 KB of BSS that `-f bin` drops, and NASM
+  rejects the exact back-pad in one pass (`times` circularity:
+  BSS VMA depends on the pad size). The `ld`+`truncate` path from N3.5
+  provides exact BSS backing (zeros in file = zeroed BSS on load, inside
+  the proc block ahead of the child stack) with the same slide-safety
+  bar (no relocs/GOT/`syscall`, entry 0). Same flat `.COM` out.
 - Usage: `ASM64 HELLO.ASM -o HELLO.COM [-l HELLO.LST]`.
 - The corpus contract: `samples/{hello,echo,cat,write}.asm` assemble to
   **byte-identical** output vs host NASM 3.02 `-f bin` (mechanical proof
@@ -129,11 +138,22 @@ BSS zeroed at entry (N3.5 lesson — flat `.COM` has no BSS content).
 - Host `make asm64-check`: C harness links `asm64_core` (`elf64`) and
   assembles all four samples → `memcmp` vs host-`nasm -f bin` outputs.
   Mechanical 4/4 byte-identity, runs on the dev machine.
+  (Done 2026-09-12: PASS, plus a listing smoke.)
 - In-suite PURE test 93 (smoke-safe): embedded `hello.asm` source
   (`incbin`, 844 B, checked-in) + expected output (build-generated
   `build/hello93.ref` via system `nasm -f bin`, `incbin`, ~37 B) →
   `asm64_assemble` → `memcmp`. Guards regressions on-device.
+  (Done 2026-09-12: smoke 88+5 SKIP / full 93 PASS on QEMU.)
+  Required N4B-pre slot growth `224→256` (extent `[16,272)`): core
+  text+rodata needs ~29 sectors past the 199-sector N3.5 kernel and
+  only 25 were free. Same procedure as N3-pre item 8 (no relocation
+  needed: 272 < scratch 400). Test 82 + `check-layout` lock it.
 - Shell demo on `dos64-nasm.img` (ships `ASM64.COM` + `HELLO.ASM`):
   `ASM64 HELLO.ASM -o HELLO.COM` then run it; transcript is the
   evidence. Full-corpus `ECHO`/`CAT`/`WRITE` likewise (covered
   mechanically host-side).
+  (Done 2026-09-12: `ASM64 HELLO.ASM -o AHELLO.COM` → `Exit 0`,
+  `AHELLO.COM` 37 B, runs `Exit 0`; `-l` listing `TYPE`d on-device
+  shows NASM-identical bytes; usage/open-fail/asm-error paths return
+  `Exit 2/2/1` with no partial output; `check_volume_clean.py`
+  extended with the `TOOL_NAMES` allow-list, pre/post CLEAN.)
