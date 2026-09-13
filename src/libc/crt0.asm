@@ -40,6 +40,7 @@ global crt_parse_args
 global crt_parse_env
 
 extern main
+extern crt_envp                  ; N4A.2a: owned by shim64 (kernel-linkable)
 extern _bss_start
 extern _bss_end
 
@@ -53,8 +54,8 @@ extern _bss_end
 
 section .bss
 crt_argv: resq MAX_ARGS + 1       ; argv[0..argc-1] + NULL
-crt_envp: resq MAX_ENV + 1        ; envp[0..envc-1] + NULL
 crt_args_buf: resb TAIL_MAX + 1   ; private tail copy + guaranteed NUL
+; (crt_envp lives in shim64.asm so the in-harness test can plant entries.)
 
 section .rodata
 crt_empty: db 0                   ; argv[0] (no program path from kernel)

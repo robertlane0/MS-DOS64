@@ -339,6 +339,21 @@ extern fflush
 extern feof
 extern ferror
 extern isatty
+extern strcasecmp
+extern strncasecmp
+extern strcspn
+extern strspn
+extern strsep
+extern strtol
+extern strtoul
+extern sscanf
+extern strerror
+extern getenv
+extern time
+extern localtime
+extern strftime
+extern errno
+extern crt_envp
 extern proc_reap64
 extern proc_free_all64
 extern handler_exec
@@ -1991,6 +2006,26 @@ selftest_run64:
     inc r12
     mov rsi, msg_pass
 .t93_done:
+    call vga_print
+    call serial_print64
+
+    ; ---- Test 94: nasm shims (N4A.2a, PURE) ----
+    ; PURE (in-memory string/numeric/time checks + crt_envp plant/restore,
+    ; no traps, no disk I/O): runs in both smoke and full. remove() is NOT
+    ; covered here (it deletes for real) — it rides with test 95.
+    mov rsi, msg_test94
+    call vga_print
+    call serial_print64
+    call test_shim94
+    test rax, rax
+    jz .t94_pass
+    inc r13
+    mov rsi, msg_fail
+    jmp .t94_done
+.t94_pass:
+    inc r12
+    mov rsi, msg_pass
+.t94_done:
     call vga_print
     call serial_print64
 
@@ -11281,6 +11316,237 @@ test_asm64_hello:
     pop rbx
     ret
 
+; test_shim94 — N4A.2a hosted-C shims (PURE). RAX=0 ok, 1 fail.
+test_shim94:
+    push rbx
+    push rcx
+    push rdx
+    push rsi
+    push rdi
+    push r8
+    push r9
+    push r10
+    push r11
+    push r12
+    push r13
+    push r14
+    push r15                      ; 13 pushes: entry 8 -> 0, aligned
+    call mem_reset64
+    call proc_init64
+    ; --- strcasecmp / strncasecmp ---
+    lea rdi, [rel t94_Hello]
+    lea rsi, [rel t94_hello]
+    call strcasecmp
+    test rax, rax
+    jnz .fail94
+    lea rdi, [rel t94_a]
+    lea rsi, [rel t94_b]
+    call strcasecmp
+    cmp rax, -1
+    jne .fail94
+    lea rdi, [rel t94_B]
+    lea rsi, [rel t94_a]
+    call strcasecmp
+    cmp rax, 1
+    jne .fail94
+    lea rdi, [rel t94_HelloW]
+    lea rsi, [rel t94_helloX]
+    mov rdx, 5
+    call strncasecmp
+    test rax, rax
+    jnz .fail94
+    ; --- strcspn / strspn ---
+    lea rdi, [rel t94_hello]
+    lea rsi, [rel t94_o]
+    call strcspn
+    cmp rax, 4
+    jne .fail94
+    lea rdi, [rel t94_aaab]
+    lea rsi, [rel t94_a]
+    call strspn
+    cmp rax, 3
+    jne .fail94
+    ; --- strsep "a:b" ---
+    lea rdi, [rel t94_buf]
+    lea rsi, [rel t94_ab]
+    mov rdx, 4
+    call memcpy
+    lea rax, [rel t94_buf]
+    mov [rel t94_sepptr], rax
+    lea rdi, [rel t94_sepptr]
+    lea rsi, [rel t94_colon]
+    call strsep
+    lea rcx, [rel t94_buf]
+    cmp rax, rcx
+    jne .fail94
+    lea rdi, [rel t94_buf]
+    lea rsi, [rel t94_a]
+    call strcmp
+    test rax, rax
+    jnz .fail94
+    lea rdi, [rel t94_sepptr]
+    lea rsi, [rel t94_colon]
+    call strsep
+    lea rcx, [rel t94_buf+2]
+    cmp rax, rcx
+    jne .fail94
+    cmp qword [rel t94_sepptr], 0
+    jne .fail94
+    ; --- strtol / strtoul ---
+    lea rdi, [rel t94_123]
+    xor esi, esi
+    mov rdx, 10
+    call strtol
+    cmp rax, 123
+    jne .fail94
+    lea rdi, [rel t94_hex]
+    xor esi, esi
+    xor edx, edx
+    call strtol
+    cmp rax, -16
+    jne .fail94
+    lea rdi, [rel t94_oct]
+    xor esi, esi
+    xor edx, edx
+    call strtol
+    cmp rax, 63
+    jne .fail94
+    lea rdi, [rel t94_big]
+    xor esi, esi
+    mov rdx, 10
+    call strtoul
+    mov rcx, 4294967296              ; cmp r64,imm32 cannot encode this
+    cmp rax, rcx
+    jne .fail94
+    mov dword [rel errno], 0
+    lea rdi, [rel t94_huge]
+    xor esi, esi
+    mov rdx, 10
+    call strtol
+    mov rcx, 0x7FFFFFFFFFFFFFFF      ; cmp r64,imm32 cannot encode LONG_MAX
+    cmp rax, rcx
+    jne .fail94
+    cmp dword [rel errno], 34
+    jne .fail94
+    lea rdi, [rel t94_42x]
+    lea rsi, [rel t94_endptr]
+    mov rdx, 10
+    call strtol
+    cmp rax, 42
+    jne .fail94
+    mov rax, [rel t94_endptr]
+    lea rcx, [rel t94_42x+2]
+    cmp rax, rcx
+    jne .fail94
+    ; --- sscanf ---
+    lea rdi, [rel t94_1234]
+    lea rsi, [rel t94_fmt]
+    lea rdx, [rel t94_i1]
+    lea rcx, [rel t94_i2]
+    call sscanf
+    cmp rax, 2
+    jne .fail94
+    cmp dword [rel t94_i1], 12
+    jne .fail94
+    cmp dword [rel t94_i2], 34
+    jne .fail94
+    lea rdi, [rel t94_12]
+    lea rsi, [rel t94_fmtn]
+    lea rdx, [rel t94_i1]
+    lea rcx, [rel t94_n]
+    call sscanf
+    cmp rax, 1
+    jne .fail94
+    cmp dword [rel t94_n], 2
+    jne .fail94
+    ; --- strerror ---
+    mov edi, 2
+    call strerror
+    mov rdi, rax
+    lea rsi, [rel t94_enoent]
+    call strcmp
+    test rax, rax
+    jnz .fail94
+    mov edi, 99
+    call strerror
+    mov rdi, rax
+    lea rsi, [rel t94_unk]
+    mov rdx, 16
+    call strncmp
+    test rax, rax
+    jnz .fail94
+    ; --- getenv (plant, verify, restore) ---
+    lea rax, [rel t94_env0]
+    mov [rel crt_envp], rax
+    lea rax, [rel t94_env1]
+    mov [rel crt_envp+8], rax
+    mov qword [rel crt_envp+16], 0
+    lea rdi, [rel t94_gname]
+    call getenv
+    test rax, rax
+    jz .fail94b
+    mov rdi, rax
+    lea rsi, [rel t94_gval]
+    call strcmp
+    test rax, rax
+    jnz .fail94b
+    lea rdi, [rel t94_nope]
+    call getenv
+    test rax, rax
+    jnz .fail94b
+    mov qword [rel crt_envp], 0
+    mov qword [rel crt_envp+8], 0
+    jmp .t94_time
+.fail94b:
+    mov qword [rel crt_envp], 0   ; restore even on failure
+    mov qword [rel crt_envp+8], 0
+    jmp .fail94
+.t94_time:
+    ; --- time / localtime / strftime ---
+    xor edi, edi
+    call time
+    cmp rax, 418046400
+    jne .fail94
+    lea rdi, [rel t94_t]
+    call time
+    cmp qword [rel t94_t], 418046400
+    jne .fail94
+    xor edi, edi
+    call localtime
+    cmp dword [rax + 8], 12       ; tm_hour
+    jne .fail94
+    mov rcx, rax                  ; tm for strftime
+    lea rdi, [rel t94_out]
+    mov rsi, 32
+    lea rdx, [rel t94_ymd]
+    call strftime
+    cmp rax, 10
+    jne .fail94
+    lea rdi, [rel t94_out]
+    lea rsi, [rel t94_ymd_exp]
+    call strcmp
+    test rax, rax
+    jnz .fail94
+    xor eax, eax
+    jmp .done94
+.fail94:
+    mov rax, 1
+.done94:
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop r11
+    pop r10
+    pop r9
+    pop r8
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rcx
+    pop rbx
+    ret
+
 ; ------------------------------------------------------------
 
 section .rodata
@@ -11379,6 +11645,37 @@ t90_errsrc db "%ERRORLEVEL%",0
 msg_test91 db " [91] libc core (string/heap/printf)... ",0
 msg_test92 db " [92] stdio64 round-trip (fopen/rw/seek)... ",0
 msg_test93 db " [93] ASM64 hello round-trip (assemble+memcmp)... ",0
+msg_test94 db " [94] nasm shims (cmp/span/strtol/sscanf/errno/time)... ",0
+t94_Hello db "Hello",0
+t94_hello db "hello",0
+t94_a db "a",0
+t94_b db "b",0
+t94_B db "B",0
+t94_HelloW db "HelloWorld",0
+t94_helloX db "hello!",0
+t94_o db "o",0
+t94_aaab db "aaab",0
+t94_ab db "a:b",0
+t94_colon db ":",0
+t94_123 db "123",0
+t94_hex db "-0x10",0
+t94_oct db "077",0
+t94_big db "4294967296",0
+t94_huge db "99999999999999999999",0
+t94_42x db "42x",0
+t94_1234 db "12:34",0
+t94_fmt db "%d:%d",0
+t94_12 db "12",0
+t94_fmtn db "%d%n",0
+t94_enoent db "No such file or directory",0
+t94_unk db "Unknown error 99",0
+t94_env0 db "N4A2A=1",0
+t94_env1 db "PATH=.",0
+t94_gname db "N4A2A",0
+t94_gval db "1",0
+t94_nope db "NOPE",0
+t94_ymd db "%Y-%m-%d",0
+t94_ymd_exp db "1983-04-01",0
 ; Test 93 corpus (N4B.3, PURE): embedded source + build-generated ref.
 ; hello.asm is checked-in (844 B); hello93.ref is stamped by make from the
 ; same file via host `nasm -f bin` (Makefile: build/hello93.ref rule).
@@ -11708,6 +12005,15 @@ t93_outlen equ 256
 t93_errlen equ 256
 t93_out: resb 256
 t93_err: resb 256
+; --- Test 94: shim scratch (PURE) ---
+t94_buf: resb 16
+t94_sepptr: resq 1
+t94_endptr: resq 1
+t94_i1: resd 1
+t94_i2: resd 1
+t94_n: resd 1
+t94_t: resq 1
+t94_out: resb 32
 
 
 %else

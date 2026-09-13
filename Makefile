@@ -96,7 +96,7 @@ FULL_DEFS := -DRUN_SELFTEST -DSELFTEST_DESTRUCTIVE
 # identically from harness and child context). Listed EXPLICITLY, never by
 # wildcard: crt0.asm must never link into the kernel (duplicate _start).
 SRC_LIBC := src/libc
-LIBC_KERN_SRCS := $(SRC_LIBC)/libc64.asm $(SRC_LIBC)/stdio64.asm
+LIBC_KERN_SRCS := $(SRC_LIBC)/libc64.asm $(SRC_LIBC)/stdio64.asm $(SRC_LIBC)/shim64.asm
 # N4B.3 test 93 links the pure assembler core in-harness (single TU:
 # asm64_core.asm %includes ac_tables/parse/enc; asm64_main.asm stays OUT,
 # it is a .COM program with its own entry, never a kernel object).
@@ -392,7 +392,7 @@ check-selftest-modes:
 	@! grep -Eq '^NASM_DEFS \?= .*SELFTEST_DESTRUCTIVE' Makefile || (echo "selftest-modes FAIL: default NASM_DEFS must stay smoke (no SELFTEST_DESTRUCTIVE)"; exit 1)
 	@grep -q 'SCRATCH.TXT' include/fs.inc || (echo "selftest-modes FAIL: include/fs.inc missing reserved namespace"; exit 1)
 	@grep -q 'check_volume_clean' include/fs.inc || (echo "selftest-modes FAIL: include/fs.inc must reference check_volume_clean"; exit 1)
-	@echo "Selftest modes OK: smoke (88 + 5 SKIP) default, full (93) via make full"
+	@echo "Selftest modes OK: smoke (89 + 5 SKIP) default, full (94) via make full"
 
 # Debug-hook check — source-level assertion that test/fail-point markers
 # stay out of release objects (same pattern as SELFTEST_DESTRUCTIVE).
@@ -491,7 +491,7 @@ $(SAMPLE_OUTDIR)/WRITE.COM: samples/write.asm $(NASM_SUB_BIN) | $(BUILD)
 # (base 0, _start first) + objcopy -O binary. The loader does NO relocation,
 # so the image must be slide-safe: -fPIE codegen + static link (GOT relaxed
 # to RIP-relative LEA) with readelf/objdump acceptance below, not by script.
-LIBC_USERLAND := $(BUILD)/libc/crt0.o $(BUILD)/libc/libc64.o $(BUILD)/libc/stdio64.o
+LIBC_USERLAND := $(BUILD)/libc/crt0.o $(BUILD)/libc/libc64.o $(BUILD)/libc/stdio64.o $(BUILD)/libc/shim64.o
 UCFLAGS := -ffreestanding -nostdlib -m64 -fPIE -mno-red-zone -fno-stack-protector -fno-unwind-tables -fno-asynchronous-unwind-tables -Wall -Werror -Os
 
 $(BUILD)/libc/%.o: $(SRC_LIBC)/%.asm | $(BUILD)

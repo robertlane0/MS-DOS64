@@ -90,9 +90,9 @@ the kept core, verified by grep). `HAVE` = in `libc64`/`stdio64` today.
 | `__libc_start_main` | host CRT | N/A (`crt0._start` already serves it) |
 
 Kernel-slot note: `libc64`/`stdio64` link into the kernel image for the
-in-harness tests, so every ADD grows the kernel slot (now 230/256
-sectors, 26 free ≈ 13 KB). The table above totals ~2–4 KB — fits, but
-N4A.2 must `size` the kernel after each addition. The buffered-`FILE*`
+in-harness tests, so every ADD grows the kernel slot (239/256 sectors
+after N4A.2a + test 94, 17 free ≈ 8.7 KB — was 230/256 at N4A.1).
+The table above totals ~2–4 KB — fits, but N4A.2 must `size` the kernel after each addition. The buffered-`FILE*`
 item is the only one that may want its own design note.
 
 ## 4. N4A.3 size decision (analysis; decision lands with N4A.2 actuals)

@@ -1,7 +1,7 @@
 # AGENTS.md: Converting MS-DOS v1.25 ASM to 64-bit BIOS Bootable System
 
-> **Status (2026-09-12): implementation complete — smoke 88 + 5 SKIP
-> (`make`, default, non-destructive) and full 93/93 PASS (`make full`,
+> **Status (2026-09-12): implementation complete — smoke 89 + 5 SKIP
+> (`make`, default, non-destructive) and full 94/94 PASS (`make full`,
 > destructive 71/83/88/89/92 in the reserved SCRATCH/RENAMED/CRASH namespace with
 > mount-time recovery) on QEMU, then the interactive `COMMAND64`
 > shell (`src/kernel/shell64.asm`).
@@ -33,7 +33,7 @@
 > `ld -T tools.ld` + `truncate`-to-BSS-end flat image, same slide-safety
 > bar as `CHELLO.COM`); ships on `dos64-nasm.img` with `HELLO.ASM` —
 > on-device `ASM64 HELLO.ASM -o AHELLO.COM` → working 37 B `AHELLO.COM`.
-> Smoke 88+5 SKIP / full 93 PASS on QEMU, volumes CLEAN.
+> Smoke 89+5 SKIP / full 94 PASS on QEMU, volumes CLEAN.
 > The phase plan below is kept as the build record; every checklist item is done.
 > Current entry points: `README.md` (what works / memory / disk / shell),
 > `docs/18-truth-gap-analysis.md` + `docs/19-closure-g1-g6.md` (audit trail for
