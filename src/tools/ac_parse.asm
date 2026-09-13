@@ -13,6 +13,8 @@ ac_is_ident0:
     jb .ii_dot
     cmp al, 'Z'
     jbe .ii_yes
+    cmp al, '_'
+    je .ii_yes
     cmp al, 'a'
     jb .ii_no
     cmp al, 'z'
@@ -195,8 +197,8 @@ ac_reg_lookup:
     dec r13d
     jmp .rl_loop
 .rl_miss:
-    stc
     xor eax, eax
+    stc
     pop r15
     pop r14
     pop r13
@@ -238,8 +240,8 @@ ac_cc_lookup:
     dec r13d
     jmp .cl_loop
 .cl_miss:
-    stc
     xor eax, eax
+    stc
     pop r15
     pop r14
     pop r13
@@ -354,8 +356,8 @@ ac_sym_get:
     pop rbx
     ret
 .sg_full:
-    stc
     xor eax, eax
+    stc
     add rsp, 8
     pop r14
     pop r13

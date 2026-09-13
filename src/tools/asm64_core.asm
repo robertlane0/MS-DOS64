@@ -74,6 +74,7 @@ ac_prevdef: resq 1
 ac_prep_after: resq 1             ; prep: after-line cursor (expansion clobbers
 ac_sublvl:  resd 1               ; >0 inside times bodies (no listing)
 ac_liston:  resd 1                    ; listing enabled (list+cap given)
+ac_ccsave:  resd 1               ; jcc number across split_operands (R10B volatile)
 
 section .text
 
@@ -686,12 +687,13 @@ ac_process_line:
     mov rsi, r13
     call ac_cc_lookup                ; RAX=cc / CF=miss
     jc .pl_badmnem
-    mov r10b, al
+    mov [rel ac_ccsave], eax        ; stash (split clobbers volatile R10B)
     mov rdi, r14
     call ac_split_operands
     jc .pl_err
     mov [rel ac_opcount], eax
     mov rbx, rdi
+    mov r10b, [rel ac_ccsave]
     call ac_enc_jcc                  ; (R10B=cc)
     jc .pl_err
     jmp .pl_eol
@@ -786,18 +788,28 @@ ac_process_line:
     jmp .pl_err                       ; (CF=1 from recursion)
 .tm_edone:
     dec dword [rel ac_sublvl]
-    jmp .pl_eol                       ; len via sink delta (N×len1 emitted)
+    mov rbx, r13                      ; callee preserves RBX: resync to body...
+    jmp .tm_resync                    ; ...and run it to EOL (body ends at EOL)
 .pl_times_len:
     inc dword [rel ac_sublvl]
     mov rbx, r13
-    call ac_process_line              ; body once (RBX=after, RAX=len1)
+    call ac_process_line              ; body once (RAX=len1; RBX preserved)
     dec dword [rel ac_sublvl]
     jc .pl_err
     mov r14, rax                      ; len1 (R14 free: token bounds dead)
     mov rax, r12                      ; N
     mul r14                           ; RDX:RAX = N*len1 (CF/OF on overflow)
     jc .pl_tm_ovf
-    jmp .pl_eol_explicit              ; (RBX=after ✓, RAX=total ✓)
+    mov rbx, r13                      ; resync (see above)
+.tm_resync:
+    cmp byte [rbx], 0                 ; body runs to EOL: scan to the NUL
+    je .tm_synced
+    inc rbx
+    jmp .tm_resync
+.tm_synced:
+    cmp dword [rel ac_emit], 0        ; LENGTH came via .pl_times_len...
+    jne .pl_eol                       ; ...EMIT via .tm_edone (sink-delta len)
+    jmp .pl_eol_explicit              ; (RBX=EOL ✓, RAX=total ✓)
 .pl_tm_ovf:
     lea rdi, [rel ac_e_outbig]
     call ac_error_msg

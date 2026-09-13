@@ -166,11 +166,12 @@ ac_parse_operand:
     mov rdi, rax
     mov rsi, rcx                  ; (len)
     call ac_sizekw_lookup         ; RAX=1/2/4/8, CF=0 / CF=1 miss
+    mov r10b, al                  ; stash size (pops restore RAX: result would die)
     pop rdi
     pop rcx
     pop rax
     jc .op_no_kw2                 ; ident, not a size keyword
-    mov [r12+19], al              ; mem_sizekw
+    mov [r12+19], r10b            ; mem_sizekw
     call ac_skip_ws
     mov rdi, rax
     cmp byte [rdi], '['
@@ -232,6 +233,7 @@ ac_parse_operand:
     jmp .op_done
 .op_mem_go:
     inc rdi                       ; past '['
+    mov rsi, r12                  ; slot (sizekw_lookup trashed RSI; R12 kept it)
     call ac_parse_mem             ; (below; fills slot, RDI=after `]`)
     jmp .op_done2                 ; CF passes through
 .op_bad:
@@ -344,8 +346,7 @@ ac_parse_mem:
     stc
     jmp .pm_out
 .pm_bare:
-    inc rdi
-    mov qword [r15+20], 0         ; disp = 0
+    mov qword [r15+20], 0         ; disp = 0 (RDI still at `]`; pm_close consumes)
     mov byte [r15+28], 0
     jmp .pm_close
 .pm_off:
@@ -757,6 +758,70 @@ ac_sym_target:
     pop rbx
     ret
 
+; ac_const_resolve(RBX=slot kind=4) -> slot normalized to kind=2, CF=0;
+;   CF=1 error (message recorded). Bare-ident operand in immediate
+;   position (`mov ecx, BUF_LEN`): CONST -> value (known); address label
+;   -> "absolute" error (flat image: absolute label immediates are bugs);
+;   unknown -> LENGTH: kind=2-unknown (optimistic-short, growth on
+;   resolve), EMIT: "undefined symbol 'name'". The slot's name/len are
+;   consumed by the conversion (no unk-pair needed: LENGTH short-circuits
+;   in ac_need_known, EMIT re-parses fresh). Preserves RBX/R12-R15.
+ac_const_resolve:
+    push r12
+    push r13
+    push r14
+    mov r12, [rbx+8]              ; name
+    mov r13, [rbx+16]             ; len
+    mov rdi, r12
+    mov rsi, r13
+    call ac_sym_find
+    test rax, rax
+    jz .cr_unk
+    test byte [rax + AC_SYM_FLAGS], AC_SF_DEFINED
+    jz .cr_unk
+    test byte [rax + AC_SYM_FLAGS], AC_SF_CONST
+    jz .cr_abs
+    mov r14, [rax + AC_SYM_ADDR]  ; const value
+    mov [rbx+8], r14              ; -> kind=2 known imm
+    mov qword [rbx+16], 0         ; unk=0
+    mov byte [rbx+17], 0          ; labelflag=0
+    mov byte [rbx], 2
+    clc
+    pop r14
+    pop r13
+    pop r12
+    ret
+.cr_unk:
+    cmp dword [rel ac_emit], 0
+    je .cr_ok_unk
+    mov rdx, r13
+    mov rsi, r12
+    lea rdi, [rel ac_e_undef]
+    call ac_error_sym
+    stc
+    pop r14
+    pop r13
+    pop r12
+    ret
+.cr_ok_unk:
+    mov qword [rbx+8], 0          ; -> kind=2 unknown imm
+    mov qword [rbx+16], 1         ; unk=1
+    mov byte [rbx+17], 0
+    mov byte [rbx], 2
+    clc
+    pop r14
+    pop r13
+    pop r12
+    ret
+.cr_abs:
+    lea rdi, [rel ac_e_abs]       ; label address as data-imm: honest error
+    call ac_error_msg
+    stc
+    pop r14
+    pop r13
+    pop r12
+    ret
+
 ; ac_mem_emit(RSI=mem slot, R10B=reg-field code, BL=W-bit,
 ;   R11B=bit0 dst-legacy-high, bit1 dst-force-REX, R14B=lead count (0/2),
 ;   R15W=lead bytes low-first) -> CF=1 error.
@@ -972,6 +1037,13 @@ ac_enc_mov:
     mov r15b, al                  ; dst flags
     lea rsi, [rel ac_op2]
     mov cl, [rsi]
+    cmp cl, 4
+    jne .mv_nosym
+    lea rbx, [rel ac_op2]
+    call ac_const_resolve         ; bare-ident imm: CONST -> kind=2 value
+    jc .mv_out
+    mov cl, 2
+.mv_nosym:
     cmp cl, 2
     je .mv_imm
     cmp cl, 1
@@ -1082,27 +1154,27 @@ ac_enc_mov:
     jne .mv_reg_nw
     mov bl, 1                     ; W
 .mv_reg_nw:
-    mov cl, r14b                  ; dcode
-    mov dl, r13b                  ; scode
-    mov r10b, r15b                ; dflags
-    mov r11b, [rsi+3]             ; sflags (RSI still op2: movzx spared it)
+    mov cl, r13b                  ; R = src>=8 (89-form: reg field = src)
+    mov dl, r14b                  ; B = dst>=8 (rm field = dst)
+    mov r10b, [rsi+3]             ; sflags
+    mov r11b, r15b                ; dflags
     call ac_rex_for
     jc .mv_out
-    mov al, 0x8B
+    mov al, 0x89                  ; 89 /r (mov r/m, r: NASM canonical)
     cmp r12d, 8
     jne .mv_reg_op
-    mov al, 0x8A
+    mov al, 0x88
 .mv_reg_op:
     call ac_outb
     jc .mv_out
     mov al, 0xC0
-    mov dl, r14b
+    mov dl, r13b
     and dl, 7
     shl dl, 3
     or al, dl
-    mov dl, r13b
+    mov dl, r14b
     and dl, 7
-    or al, dl                     ; mod=11 reg=dst rm=src
+    or al, dl                     ; mod=11 reg=src rm=dst
     call ac_outb
     jc .mv_out
     jmp .mv_ok
@@ -1178,11 +1250,12 @@ ac_enc_movzx:
     jne .mz_opds
     cmp byte [rbx+2], 8           ; src must be 8-bit
     jne .mz_opds
+    mov dl, [rbx+1]               ; scode (before BL clobbers RBX low byte)
+    mov r11b, [rbx+3]             ; sflags
+    mov r13b, dl                  ; stash src code (ModRM below needs it post-REX)
     mov bl, 0                     ; W=0
     mov cl, r14b                  ; dcode
-    mov dl, [rbx+1]               ; scode
     mov r10b, 0                   ; dflags (32-bit: none possible)
-    mov r11b, [rbx+3]             ; sflags
     call ac_rex_for
     jc .mz_out
     mov al, 0x0F                  ; 0F B6 /r
@@ -1196,7 +1269,7 @@ ac_enc_movzx:
     and dl, 7
     shl dl, 3
     or al, dl
-    mov dl, [rbx+1]
+    mov dl, r13b
     and dl, 7
     or al, dl
     call ac_outb
@@ -1205,12 +1278,12 @@ ac_enc_movzx:
 .mz_mem:
     cmp byte [rbx+19], 1          ; size keyword must be `byte`
     jne .mz_opds
+    mov rsi, rbx                  ; slot (before BL clobbers RBX low byte)
     mov bl, 0                     ; W=0
     mov r10b, r14b                ; regcode = dst (REX.R via mem_emit)
     xor r11b, r11b                ; dst 32-bit: no legacy/force possible
     mov r14b, 2                   ; lead = 0F B6 (low-first)
     mov r15w, 0xB60F
-    mov rsi, rbx
     call ac_mem_emit
     jc .mz_out
     jmp .mz_ok
@@ -1309,6 +1382,11 @@ ac_alu_core:
     movzx eax, byte [rsi+1]
     mov r14b, al                  ; dst code
     lea rbx, [rel ac_op2]
+    cmp byte [rbx], 4
+    jne .al_nosym
+    call ac_const_resolve         ; bare-ident imm: CONST -> kind=2 value
+    jc .al_out
+.al_nosym:
     cmp byte [rbx], 1
     je .al_reg
     cmp byte [rbx], 2
@@ -1331,12 +1409,12 @@ ac_alu_core:
     jne .al_rr_nw
     mov bl, 1
 .al_rr_nw:
-    mov cl, r14b                  ; dcode
-    mov dl, r13b                  ; scode
-    lea rsi, [rel ac_op1]
-    mov r10b, [rsi+3]             ; dflags
+    mov cl, r13b                  ; R = src>=8 (01-form: reg field = src)
+    mov dl, r14b                  ; B = dst>=8 (rm field = dst)
     lea rsi, [rel ac_op2]
-    mov r11b, [rsi+3]             ; sflags
+    mov r10b, [rsi+3]             ; sflags
+    lea rsi, [rel ac_op1]
+    mov r11b, [rsi+3]             ; dflags
     call ac_rex_for
     jc .al_out_pop
     pop rax                       ; opcode
@@ -1345,13 +1423,13 @@ ac_alu_core:
     pop rax
     jc .al_out
     mov al, 0xC0
-    mov dl, r14b
+    mov dl, r13b
     and dl, 7
     shl dl, 3
     or al, dl
-    mov dl, r13b
+    mov dl, r14b
     and dl, 7
-    or al, dl
+    or al, dl                     ; mod=11 reg=src rm=dst
     call ac_outb
     jc .al_out
     jmp .al_ok
@@ -1641,6 +1719,11 @@ ac_enc_test:
     movzx eax, byte [rsi+3]
     mov r15b, al
     lea rbx, [rel ac_op2]
+    cmp byte [rbx], 4
+    jne .tt_nosym
+    call ac_const_resolve         ; bare-ident imm: CONST -> kind=2 value
+    jc .tt_out
+.tt_nosym:
     cmp byte [rbx], 1
     je .tt_reg
     cmp byte [rbx], 2
@@ -1653,15 +1736,16 @@ ac_enc_test:
     cmp r12d, 16
     je .tt_r16
     mov r13b, [rbx+1]
+    mov r11b, [rbx+3]             ; sflags (before BL clobbers RBX low byte)
     mov bl, 0
     cmp r12d, 64
     jne .tt_reg_nw
     mov bl, 1
 .tt_reg_nw:
-    mov cl, r14b
-    mov dl, r13b
-    mov r10b, r15b
-    mov r11b, [rbx+3]
+    mov cl, r13b                  ; R = src>=8 (85-form: reg field = src)
+    mov dl, r14b                  ; B = dst>=8 (rm field = dst)
+    mov r10b, r11b                ; sflags (saved pre-BL: r11b free now)
+    mov r11b, r15b                ; dflags
     call ac_rex_for
     jc .tt_out
     mov al, 0x85
@@ -1672,13 +1756,13 @@ ac_enc_test:
     call ac_outb
     jc .tt_out
     mov al, 0xC0
-    mov dl, r14b
+    mov dl, r13b
     and dl, 7
     shl dl, 3
     or al, dl
-    mov dl, r13b
+    mov dl, r14b
     and dl, 7
-    or al, dl
+    or al, dl                     ; mod=11 reg=src rm=dst
     call ac_outb
     jc .tt_out
     jmp .tt_ok
