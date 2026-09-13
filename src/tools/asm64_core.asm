@@ -1402,6 +1402,7 @@ ac_list_emit:
     mov r14, [rel ac_listp]       ; dst cursor
     mov r15, [rel ac_listleft]    ; remaining
     mov rax, [rel ac_lineoff]
+    rol rax, 32                   ; low 32 bits -> high (loop prints top 8 nibbles)
     mov ebx, 8                    ; 8 hex digits, high first
 .le_h8:
     rol rax, 4                    ; top nibble -> low (wraps around)
