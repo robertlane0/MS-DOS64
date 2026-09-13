@@ -51,12 +51,17 @@ DATABIN_NAME = b"DATA    BIN"
 # N1 cross-assembled samples (optional: allowed but never required).
 # `make nasm-samples` stages these onto dos64-nasm.img via mkfat12.py
 # --extra-file; the default smoke/full/lean images omit them. When present
-# they must be chain-valid (checked by the generic walk below) and small
-# enough for the shell's 4 KiB staging buffer (sh_file); anything else
-# (live test names, missing base files, dangling/xlink/orphans) is dirty
-# exactly as before.
+# they must be chain-valid (checked by the generic walk below) and within
+# the per-set size cap; anything else (live test names, missing base
+# files, dangling/xlink/orphans) is dirty exactly as before.
 SAMPLE_NAMES = {b"HELLO   COM", b"ECHO    COM", b"CAT     COM", b"WRITE   COM"}
 SAMPLE_MAX_BYTES = 4096
+
+# N3.5/N4B residents (optional: dos64-nasm.img only, same staging path).
+# Larger than samples (whole-file EXEC staging, no 4 KiB cap since N3.5);
+# TOOL_MAX_BYTES mirrors the Makefile 128 KiB sanity cap for ASM64.COM.
+TOOL_NAMES = {b"CHELLO  COM", b"ASM64   COM", b"HELLO   ASM"}
+TOOL_MAX_BYTES = 131072
 
 
 def _env_int(name):
@@ -186,6 +191,12 @@ def main(argv=None):
             if s < 1 or s > SAMPLE_MAX_BYTES:
                 errors.append(f"sample {want.decode()} size {s} outside "
                               f"1..{SAMPLE_MAX_BYTES} (shell staging limit)")
+    for want in TOOL_NAMES:
+        if want in by_name:
+            _, s = by_name[want]
+            if s < 1 or s > TOOL_MAX_BYTES:
+                errors.append(f"tool {want.decode()} size {s} outside "
+                              f"1..{TOOL_MAX_BYTES}")
 
     def read_chain(firstclus, size):
         if size == 0:

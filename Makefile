@@ -510,13 +510,43 @@ $(BUILD)/CHELLO.COM: $(BUILD)/chello.elf
 
 libc-userland: $(LIBC_USERLAND)
 
-$(NASM_IMG): $(BUILD)/mbr.bin $(BUILD)/stage2.bin $(BUILD)/kernel.bin $(SAMPLE_OUTS) $(BUILD)/CHELLO.COM check-layout check-kbc check-serial check-selftest-modes check-debug-symbols | $(BUILD)
+# N4B.3c native tool: ASM64.COM (asm64_main + asm64_core, base-0 flat link
+# like the N3.5 C target, NOT -f bin: the core's ~18 KB BSS needs explicit
+# backing, which NASM cannot express in one -f bin pass (circular TIMES).
+# The image is padded with truncate-to-BSS-end (zeros): this both backs the
+# tables inside the proc block and satisfies zeroed-BSS on load. Same
+# slide-safety bar as CHELLO (no relocs/GOT/syscalls, entry 0).
+TOOL_BUILD := $(BUILD)/tools
+TOOL_OBJS := $(TOOL_BUILD)/asm64_main.o $(ASM64_CORE_O)
+TOOL_ELF := $(BUILD)/asm64.elf
+TOOL_COM := $(BUILD)/ASM64.COM
+
+$(TOOL_BUILD)/%.o: $(SRC_TOOLS)/%.asm | $(BUILD)
+	mkdir -p $(TOOL_BUILD)
+	$(NASM_ELF) $< -o $@
+
+$(TOOL_ELF): $(TOOL_OBJS) $(SRC_TOOLS)/tools.ld
+	ld -T $(SRC_TOOLS)/tools.ld -o $@ $(TOOL_BUILD)/asm64_main.o $(ASM64_CORE_O) -nostdlib --fatal-warnings
+
+$(TOOL_COM): $(TOOL_ELF)
+	objcopy -O binary $< $@
+	@test $$(readelf -h $< | grep Entry | grep -q '0x0$$' && echo yes) = yes || (echo "ASM64 entry != 0"; exit 1)
+	@! readelf -r $< | grep -q R_X86_64 || (echo "ASM64 has relocations (not slide-safe)"; readelf -r $<; exit 1)
+	@! readelf -S $< | grep -q '\.got' || (echo "ASM64 has .got (not slide-safe)"; exit 1)
+	@! objdump -b binary -m i386:x86-64 -d $@ | grep -q syscall || (echo "ASM64 has Linux syscalls"; exit 1)
+	@B1=$$(python3 -c "import re,subprocess; o=subprocess.check_output(['readelf','-SW','$<']).decode(); m=re.search(r'\.bss\s+\w+\s+([0-9a-f]+)\s+[0-9a-f]+\s+([0-9a-f]+)',o); print(int(m.group(1),16)+int(m.group(2),16))"); test $$B1 -ge $$(stat -c %s $@) || (echo "ASM64 BSS overlaps file ($$B1 < $$(stat -c %s $@))"; exit 1); truncate -s $$B1 $@
+	@test $$(stat -c %s $@) -le 131072 || (echo "ASM64.COM exceeds 128 KiB sanity cap"; exit 1)
+	@echo "ASM64.COM: $$(stat -c %s $@) bytes (BSS-backed flat image)"
+
+asm64-tool: $(TOOL_COM)
+
+$(NASM_IMG): $(BUILD)/mbr.bin $(BUILD)/stage2.bin $(BUILD)/kernel.bin $(SAMPLE_OUTS) $(BUILD)/CHELLO.COM $(TOOL_COM) check-layout check-kbc check-serial check-selftest-modes check-debug-symbols | $(BUILD)
 	dd if=/dev/zero of=$@ bs=1M count=$(IMG_MB) status=none
 	dd if=$(BUILD)/mbr.bin of=$@ conv=notrunc status=none
 	dd if=$(BUILD)/stage2.bin of=$@ bs=$(IMG_SECTOR_SIZE) seek=1 conv=notrunc status=none
 	dd if=$(BUILD)/kernel.bin of=$@ bs=$(IMG_SECTOR_SIZE) seek=$(KERNEL_LBA) conv=notrunc status=none
-	python3 -W error tools/mkfat12.py --vol-lba $(VOL_LBA) --vol-totsec $(VOL_SECTORS) --sector-size $(IMG_SECTOR_SIZE) --kernel-lba $(KERNEL_LBA) --kernel-sectors $(KERNEL_SECTORS) --extra-file HELLO.COM=$(SAMPLE_OUTDIR)/HELLO.COM --extra-file ECHO.COM=$(SAMPLE_OUTDIR)/ECHO.COM --extra-file CAT.COM=$(SAMPLE_OUTDIR)/CAT.COM --extra-file WRITE.COM=$(SAMPLE_OUTDIR)/WRITE.COM --extra-file CHELLO.COM=$(BUILD)/CHELLO.COM $@
-	@echo "Created $@ ($$(stat -c %s $@) bytes, with N1+N2d samples + N3.5 CHELLO)"
+	python3 -W error tools/mkfat12.py --vol-lba $(VOL_LBA) --vol-totsec $(VOL_SECTORS) --sector-size $(IMG_SECTOR_SIZE) --kernel-lba $(KERNEL_LBA) --kernel-sectors $(KERNEL_SECTORS) --extra-file HELLO.COM=$(SAMPLE_OUTDIR)/HELLO.COM --extra-file ECHO.COM=$(SAMPLE_OUTDIR)/ECHO.COM --extra-file CAT.COM=$(SAMPLE_OUTDIR)/CAT.COM --extra-file WRITE.COM=$(SAMPLE_OUTDIR)/WRITE.COM --extra-file CHELLO.COM=$(BUILD)/CHELLO.COM --extra-file ASM64.COM=$(TOOL_COM) --extra-file HELLO.ASM=samples/hello.asm $@
+	@echo "Created $@ ($$(stat -c %s $@) bytes, with N1+N2d samples + N3.5 CHELLO + N4B ASM64)"
 
 nasm-samples: $(NASM_IMG)
 
@@ -557,8 +587,8 @@ nasm-clean:
 	rm -rf $(BUILD)/nasm-sub $(SAMPLE_OUTDIR) $(NASM_IMG) $(NASM_IMG).lock
 
 clean:
-	rm -rf $(BUILD)/*.bin $(BUILD)/*.o $(BUILD)/*.img $(BUILD)/*.elf $(BUILD)/*.map $(BUILD)/*.lock $(BUILD)/*.ref
-	rm -rf $(BUILD)/src $(BUILD)/lean $(BUILD)/full $(BUILD)/include $(BUILD)/libc
+	rm -rf $(BUILD)/*.bin $(BUILD)/*.o $(BUILD)/*.img $(BUILD)/*.elf $(BUILD)/*.map $(BUILD)/*.lock $(BUILD)/*.ref $(BUILD)/*.COM $(BUILD)/*.bssend
+	rm -rf $(BUILD)/src $(BUILD)/lean $(BUILD)/full $(BUILD)/include $(BUILD)/libc $(TOOL_BUILD)
 	rm -rf $(ASM64_CHECK) $(ASM64_CORE_O) $(ASM64_REFDIR)
 
-.PHONY: all lean full clean run-qemu run-qemu-lean run-qemu-full check-layout check-layout-neg check-kbc check-serial check-selftest-modes check-debug-symbols nasm-samples run-qemu-nasm nasm-clean libc-userland asm64-check
+.PHONY: all lean full clean run-qemu run-qemu-lean run-qemu-full check-layout check-layout-neg check-kbc check-serial check-selftest-modes check-debug-symbols nasm-samples run-qemu-nasm nasm-clean libc-userland asm64-check asm64-tool
