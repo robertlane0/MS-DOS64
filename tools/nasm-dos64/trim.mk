@@ -23,7 +23,21 @@ NASM_TRIM_PPFLAGS := -DOF_ONLY -DOF_BIN -DOF_ELF
 NASM_TRIM_CUTS := outmacho outcoff outobj outas86 outieee outaout dwarf codeview
 # Source files dropped from the DOS64 build list (N4A.2):
 # nasmlib/mmap.c KEPT (compiles to the NULL stub under dos64-config.h),
-# nasmlib/realpath.c + nasmlib/rlimit.c DROPPED (no entry point needs them),
+# nasmlib/realpath.c + nasmlib/rlimit.c DROPPED (replaced by
+# dos64-nasm-shim.c: nasm_realpath/nasm_get_stack_size_limit),
 # asm/uncompress.c DROPPED (stdmac decompressed host-side instead),
+# nasmlib/asprintf.c DROPPED (its vsnprintf sizing loop has no DOS64
+# counterpart; nasm_vasprintf/nasm_asprintf reimplemented in
+# dos64-nasm-shim.c over vfprintf), stdlib/vsnprintf.c DROPPED
+# (HAVE_VSNPRINTF is defined; no vsnprintf symbol is needed anywhere),
 # nasm/zlib/ DROPPED whole.
-NASM_DOS64_DROP := nasmlib/realpath.c nasmlib/rlimit.c asm/uncompress.c
+NASM_DOS64_DROP := nasmlib/realpath.c nasmlib/rlimit.c asm/uncompress.c nasmlib/asprintf.c stdlib/vsnprintf.c
+# DOS64 cross-compile flags (N4A.2d): freestanding x86-64, PIE codegen for
+# the slide-safe flat link (same bar as CHELLO.COM: no relocs, no GOT, no
+# syscall, entry 0), unknown-compiler branch (no HAVE_CONFIG_H) tuned by
+# dos64-config.h, OF trim, GNU89 inline semantics (extern_inline emits no
+# out-of-line copies except ilog2.c's ILOG2_C ones), no fortify (would
+# reference __*_chk), -Wno-comment (generated macros.c nests comments).
+# NOTE: keep -Wall but NOT -Werror here: upstream warnings (if any) must
+# not block the port; correctness is proven by byte-identity runs.
+NASM_XCFLAGS := -ffreestanding -nostdlib -m64 -fPIE -mno-red-zone -fno-stack-protector -fno-unwind-tables -fno-asynchronous-unwind-tables -Os -Wall -Wno-comment -UHAVE_CONFIG_H -DOF_ONLY -DOF_BIN -DOF_ELF -U_FORTIFY_SOURCE -fgnu89-inline -include tools/nasm-dos64/dos64-config.h

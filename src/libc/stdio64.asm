@@ -70,6 +70,7 @@ global setvbuf
 global stdin
 global stdout
 global stderr
+global file_table                 ; N4A.2b: host-harness slot access (harmless)
 
 extern memcpy
 extern memset
@@ -79,6 +80,8 @@ extern free
 extern null_str                   ; N4A.2b: owned by libc64 (shared tables)
 extern hexdig_lo
 extern hexdig_hi
+extern pf_pctch
+extern octdig
 
 %define F_INUSE    1
 %define F_WRITE    2
@@ -1283,18 +1286,24 @@ vf_next:
     ret
 
 ; vfprintf(RDI=fp, RSI=fmt, RDX=ap) -> RAX=chars / -1 on stream error.
-; Verbs: bare {d,i,u,x,X,p,s,c,%} (same set + semantics as printf:
-; d/i/u/x/X are C int 32-bit, p is 64-bit, s NULL renders "(null)").
-; Frame: 5 pushes (40) + sub 48 (88: entry 8 -> 0, aligned).
-; [rsp+0..24) = va copy, [rsp+24..48) = 24 B numbuf (end at [rsp+48]).
-; Live: RBX=fmt cursor, R12=slot, R13=count, R14=digit table, R15=va base.
+; Verbs: flags/width/prec/lengths/%o + {d,i,u,o,x,X,p,s,c,%} (same set +
+; semantics as printf: d/i/u/o/x/X are C int 32-bit unless l/ll/z, p is
+; 64-bit, s NULL renders "(null)"). stream_putc sink (clobbers
+; RAX,RCX,RDX,RDI,RSI), so sequencers stash (ptr,len) in eptr/elen and
+; pad in the consumed width slot; sign lives in R14B (callee-saved,
+; stream_putc preserves it).
+; Frame: 5 pushes (40) + sub 80 (120: entry 8 -> 0, aligned).
+; [rsp+0..24) = va copy, [rsp+24] width, [rsp+32] prec, [rsp+40] eptr,
+; [rsp+48] elen, [rsp+56,rsp+80) 24B numbuf (end at [rsp+80]).
+; Live: RBX=fmt cursor, R12=slot, R13=count, R14=table/sign, R15=va base.
+; R11D=flags (bit0 LEFT, bit1 ZERO, bit2 IS64, bit3 HAS_PREC).
 vfprintf:
     push rbx
     push r12
     push r13
     push r14
     push r15
-    sub rsp, 48
+    sub rsp, 80
     mov rbx, rsi                  ; fmt (save across stdio_init: callee-saved)
     mov r12, rdi                  ; fp
     mov r14, rdx                  ; ap (struct ptr)
@@ -1328,11 +1337,145 @@ vfprintf:
     inc rbx
     jmp .vf_loop
 .vf_verb:
-    inc rbx
-    mov al, [rbx]
-    test al, al
-    jz .vf_pct_end
-    inc rbx
+    inc rbx                     ; past '%'
+    call .vf_adv                ; AL = first spec char (RBX past it)
+    jz .vf_pct_end              ; lone trailing %: emit it, stop
+    xor r11d, r11d              ; flags
+    mov qword [rsp+24], -1      ; width: none
+    mov qword [rsp+32], -1      ; prec: none
+.vf_flag:
+    cmp al, '-'
+    jne .vf_fl1
+    or r11d, 1
+    call .vf_adv
+    jz .vf_done
+    jmp .vf_flag
+.vf_fl1:
+    cmp al, '0'
+    jne .vf_width
+    or r11d, 2
+    call .vf_adv
+    jz .vf_done
+    jmp .vf_flag
+.vf_width:
+    cmp al, '*'
+    jne .vf_wdigits
+    call vf_next                ; width from arg (negative: LEFT + positive)
+    test eax, eax
+    jns .vf_wstore
+    or r11d, 1
+    neg eax
+.vf_wstore:
+    movsxd rax, eax
+    mov [rsp+24], rax
+    call .vf_adv
+    jz .vf_done
+    jmp .vf_prec
+.vf_wdigits:
+    cmp al, '0'
+    jb .vf_prec
+    cmp al, '9'
+    ja .vf_prec
+    xor ecx, ecx
+.vf_wloop:
+    imul ecx, ecx, 10
+    movzx eax, al
+    sub eax, '0'
+    add ecx, eax
+    call .vf_adv
+    jz .vf_wdone0
+    cmp al, '0'
+    jb .vf_wdone
+    cmp al, '9'
+    ja .vf_wdone
+    jmp .vf_wloop
+.vf_wdone0:
+    movsxd rcx, ecx
+    mov [rsp+24], rcx
+    jmp .vf_done
+.vf_wdone:
+    movsxd rcx, ecx
+    mov [rsp+24], rcx
+.vf_prec:
+    cmp al, '.'
+    jne .vf_len
+    call .vf_adv                ; '.' consumed; bare '.' means prec 0
+    jz .vf_pdone0
+    mov qword [rsp+32], 0
+    or r11d, 8                  ; HAS_PREC
+    cmp al, '*'
+    jne .vf_pdigits
+    call vf_next
+    test eax, eax
+    js .vf_pnone                ; negative prec: none (C99)
+    movsxd rax, eax
+    mov [rsp+32], rax
+    or r11d, 8                  ; HAS_PREC
+    call .vf_adv
+    jz .vf_done
+    jmp .vf_len
+.vf_pnone:
+    mov qword [rsp+32], -1
+    call .vf_adv
+    jz .vf_done
+    jmp .vf_len
+.vf_pdone0:
+    mov qword [rsp+32], 0
+    jmp .vf_done
+.vf_pdigits:
+    cmp al, '0'
+    jb .vf_len
+    cmp al, '9'
+    ja .vf_len
+    xor ecx, ecx
+.vf_ploop:
+    imul ecx, ecx, 10
+    movzx eax, al
+    sub eax, '0'
+    add ecx, eax
+    call .vf_adv
+    jz .vf_pdone0b
+    cmp al, '0'
+    jb .vf_pdone
+    cmp al, '9'
+    ja .vf_pdone
+    jmp .vf_ploop
+.vf_pdone0b:
+    movsxd rcx, ecx
+    mov [rsp+32], rcx
+    jmp .vf_done
+.vf_pdone:
+    movsxd rcx, ecx
+    mov [rsp+32], rcx
+    or r11d, 8                  ; HAS_PREC
+.vf_len:
+    cmp al, 'h'
+    jne .vf_l1
+    call .vf_adv                ; h/hh accepted, ignored (int slots)
+    jz .vf_done
+    cmp al, 'h'
+    jne .vf_conv
+    call .vf_adv
+    jz .vf_done
+    jmp .vf_conv
+.vf_l1:
+    cmp al, 'l'
+    jne .vf_l2
+    or r11d, 4                  ; l/ll: 64-bit value
+    call .vf_adv
+    jz .vf_done
+    cmp al, 'l'
+    jne .vf_conv
+    call .vf_adv
+    jz .vf_done
+    jmp .vf_conv
+.vf_l2:
+    cmp al, 'z'                 ; z: size_t (64-bit here)
+    jne .vf_conv
+    or r11d, 4
+    call .vf_adv
+    jz .vf_done
+.vf_conv:
     cmp al, '%'
     je .vf_pct
     cmp al, 'c'
@@ -1345,6 +1488,8 @@ vfprintf:
     je .vf_d
     cmp al, 'u'
     je .vf_u
+    cmp al, 'o'
+    je .vf_o
     cmp al, 'x'
     je .vf_x
     cmp al, 'X'
@@ -1352,14 +1497,22 @@ vfprintf:
     cmp al, 'p'
     je .vf_p
     jmp .vf_unknown
+.vf_adv:                        ; next fmt char into AL (ZF set on NUL).
+    mov al, [rbx]               ; callers follow with `jz .vf_done`
+    inc rbx
+    test al, al
+    ret
 .vf_pct:
-    mov edi, '%'
-    mov rsi, r12
-    call stream_putc
-    test rax, rax
-    jnz .vf_err
-    inc r13
-    jmp .vf_loop
+    test r11d, 2                ; '0' flag: zero pad (C allows %05%)
+    jz .vf_pctsp
+    mov r8b, '0'
+    jmp .vf_pctgo
+.vf_pctsp:
+    mov r8b, ' '
+.vf_pctgo:
+    lea rsi, [rel pf_pctch]
+    mov rcx, 1
+    jmp .vf_stremit
 .vf_pct_end:
     mov edi, '%'
     mov rsi, r12
@@ -1369,7 +1522,7 @@ vfprintf:
     inc r13
     jmp .vf_done
 .vf_unknown:
-    mov r14, rax                  ; stash verb (R14 free here; putc spares it)
+    mov r14, rax                ; stash verb (R14 free here)
     mov edi, '%'
     mov rsi, r12
     call stream_putc
@@ -1386,38 +1539,52 @@ vfprintf:
     jmp .vf_loop
 .vf_c:
     call vf_next
-    movzx edi, al
-    mov rsi, r12
-    call stream_putc
-    test rax, rax
-    jnz .vf_err
-    inc r13
-    jmp .vf_loop
+    movzx eax, al               ; low byte only (C int promotion)
+    mov [rsp+56], al            ; 1-byte body in numbuf scratch
+    lea rsi, [rsp+56]
+    mov rcx, 1
+    mov r8b, ' '                ; '0' ignored for %c
+    jmp .vf_stremit
 .vf_s:
     call vf_next
     test rax, rax
     jnz .vf_s_str
     lea rax, [rel null_str]
 .vf_s_str:
-    mov r14, rax
-.vf_s_loop:
-    mov al, [r14]
-    test al, al
-    jz .vf_loop
-    movzx edi, al
-    mov rsi, r12
-    call stream_putc
-    test rax, rax
-    jnz .vf_err
-    inc r13
-    inc r14
-    jmp .vf_s_loop
+    mov rsi, rax
+    mov rcx, [rsp+32]           ; prec: max chars (-1: unbounded)
+    cmp rcx, -1
+    je .vf_s_full
+    xor r8d, r8d                ; bounded length count
+.vf_s_cap:
+    cmp r8, rcx
+    jae .vf_s_got
+    cmp byte [rsi + r8], 0
+    je .vf_s_got
+    inc r8
+    jmp .vf_s_cap
+.vf_s_got:
+    mov rcx, r8
+    jmp .vf_s_emit
+.vf_s_full:
+    xor ecx, ecx                ; strlen loop
+.vf_s_cnt:
+    cmp byte [rsi + rcx], 0
+    je .vf_s_emit
+    inc rcx
+    jmp .vf_s_cnt
+.vf_s_emit:
+    mov r8b, ' '                ; strings always space-pad
+    jmp .vf_stremit
 .vf_d:
     call vf_next
-    movsxd rax, eax               ; C int, sign-extended
+    test r11d, 4                ; 64-bit value?
+    jnz .vf_d64
+    movsxd rax, eax             ; C int: low 32, sign-extended
+.vf_d64:
     test rax, rax
-    jns .vf_num
-    mov r14, rax                  ; stash (putc spares R14)
+    jns .vf_dmag
+    mov r14, rax                ; stash magnitude source (R14 free here)
     mov edi, '-'
     mov rsi, r12
     call stream_putc
@@ -1425,28 +1592,141 @@ vfprintf:
     jnz .vf_err
     inc r13
     mov rax, r14
-    neg rax
-    jmp .vf_num
+    neg rax                     ; magnitude as unsigned (MIN wraps ok)
+    cmp qword [rsp+24], -1      ; width set? body shrank by the sign
+    je .vf_dmag
+    dec qword [rsp+24]
+    jmp .vf_dmag
+.vf_dmag:
+    lea rdi, [rsp+80]
+    cmp qword [rsp+32], 0       ; prec==0 && value==0 renders empty (C99)
+    jne .vf_drender
+    test rax, rax
+    jz .vf_dempty
+.vf_drender:
+    call .vf_udiv10
+    jmp .vf_numemit
+.vf_dempty:
+    lea rsi, [rdi]
+    xor ecx, ecx
+    jmp .vf_numemit
 .vf_u:
     call vf_next
+    test r11d, 4
+    jnz .vf_u64
+    shl rax, 32                 ; C unsigned int: low 32
+    shr rax, 32
+.vf_u64:
+    lea rdi, [rsp+80]
+    cmp qword [rsp+32], 0
+    jne .vf_urender
+    test rax, rax
+    jz .vf_uempty
+.vf_urender:
+    call .vf_udiv10
+    jmp .vf_numemit
+.vf_uempty:
+    lea rsi, [rdi]
+    xor ecx, ecx
+    jmp .vf_numemit
+.vf_o:
+    call vf_next
+    test r11d, 4
+    jnz .vf_o64
     shl rax, 32
     shr rax, 32
-    jmp .vf_num
+.vf_o64:
+    lea rdi, [rsp+80]
+    cmp qword [rsp+32], 0
+    jne .vf_orender
+    test rax, rax
+    jz .vf_oempty
+.vf_orender:
+    call .vf_uoct
+    jmp .vf_numemit
+.vf_oempty:
+    lea rsi, [rdi]
+    xor ecx, ecx
+    jmp .vf_numemit
 .vf_x:
     call vf_next
+    test r11d, 4
+    jnz .vf_x64
     shl rax, 32
     shr rax, 32
+.vf_x64:
     lea r14, [rel hexdig_lo]
-    jmp .vf_hex
+    lea rdi, [rsp+80]
+    cmp qword [rsp+32], 0
+    jne .vf_xrender
+    test rax, rax
+    jz .vf_xempty
+.vf_xrender:
+    call .vf_uhex
+    jmp .vf_numemit
+.vf_xempty:
+    lea rsi, [rdi]
+    xor ecx, ecx
+    jmp .vf_numemit
 .vf_X:
     call vf_next
+    test r11d, 4
+    jnz .vf_X64
     shl rax, 32
     shr rax, 32
+.vf_X64:
     lea r14, [rel hexdig_hi]
-    jmp .vf_hex
+    lea rdi, [rsp+80]
+    cmp qword [rsp+32], 0
+    jne .vf_Xrender
+    test rax, rax
+    jz .vf_Xempty
+.vf_Xrender:
+    call .vf_uhex
+    jmp .vf_numemit
+.vf_Xempty:
+    lea rsi, [rdi]
+    xor ecx, ecx
+    jmp .vf_numemit
 .vf_p:
-    call vf_next
-    mov r14, rax
+    call vf_next                ; full 64-bit value, "0x" + hex
+    lea r14, [rel hexdig_lo]
+    lea rdi, [rsp+80]
+    call .vf_uhex               ; RSI=hex, RCX=hexlen
+    mov [rsp+40], rsi           ; stash hex (stream_putc kills RSI/RCX)
+    mov [rsp+48], rcx
+    mov rax, [rsp+24]           ; width
+    cmp rax, -1
+    je .vf_pplain               ; no width: straight "0x"+hex
+    sub rax, rcx
+    sub rax, 2                  ; pad = width - hexlen - 2
+    jbe .vf_pplain
+    mov [rsp+24], rax           ; pad (width slot, consumed)
+    test r11d, 1                ; LEFT?
+    jnz .vf_pleft
+    test r11d, 2                ; ZERO?
+    jz .vf_ppadsp
+    mov edi, '0'                ; zeros after 0x
+    mov rsi, r12
+    call stream_putc
+    test rax, rax
+    jnz .vf_err
+    inc r13
+    mov edi, 'x'
+    mov rsi, r12
+    call stream_putc
+    test rax, rax
+    jnz .vf_err
+    inc r13
+    mov edi, '0'
+    mov ecx, [rsp+24]
+    call .vf_pad
+    jmp .vf_phex
+.vf_ppadsp:
+    mov edi, ' '
+    mov ecx, [rsp+24]
+    call .vf_pad
+.vf_pplain:
     mov edi, '0'
     mov rsi, r12
     call stream_putc
@@ -1459,38 +1739,170 @@ vfprintf:
     test rax, rax
     jnz .vf_err
     inc r13
-    mov rax, r14
-    lea r14, [rel hexdig_lo]
-    jmp .vf_hex
-.vf_num:
-    lea rdi, [rsp + 48]
-    call .vf_udiv10
-    jmp .vf_emitbuf
-.vf_hex:
-    lea rdi, [rsp + 48]
-    call .vf_uhex
-    jmp .vf_emitbuf
-.vf_emitbuf:                      ; RSI=first digit, RCX=len
+.vf_phex:
+    mov rsi, [rsp+40]
+    mov rcx, [rsp+48]
+    call .vf_emitstr
+    jmp .vf_loop
+.vf_pleft:
+    mov edi, '0'
+    mov rsi, r12
+    call stream_putc
+    test rax, rax
+    jnz .vf_err
+    inc r13
+    mov edi, 'x'
+    mov rsi, r12
+    call stream_putc
+    test rax, rax
+    jnz .vf_err
+    inc r13
+    mov rsi, [rsp+40]
+    mov rcx, [rsp+48]
+    call .vf_emitstr
+    mov edi, ' '
+    mov ecx, [rsp+24]
+    call .vf_pad
+    jmp .vf_loop
+; .vf_numemit: R14B=sign (0/'-'), RSI=digits, RCX=ndigits. Width/prec/ZERO/
+; LEFT from stack/flags. State stashed in eptr/elen; pad in width slot.
+.vf_numemit:
+    mov [rsp+40], rsi
+    mov [rsp+48], rcx
+    mov rax, [rsp+32]           ; prec
+    cmp rax, -1
+    je .vf_nm_noprec
+    sub rax, rcx                ; prec - ndigits
+    jbe .vf_nm_noprec
+    mov [rsp+32], rax           ; prec zeros (slot reused)
+    jmp .vf_nm_body
+.vf_nm_noprec:
+    mov qword [rsp+32], 0
+.vf_nm_body:
+    mov rax, [rsp+48]           ; body = ndigits + preczeros (sign already
+    add rax, [rsp+32]           ; emitted by .vf_d with width adjusted)
+    mov rdx, [rsp+24]           ; width
+    cmp rdx, -1
+    je .vf_nm_nowidth
+    sub rdx, rax                ; pad = width - body
+    ja .vf_nm_padok
+.vf_nm_nowidth:
+    xor edx, edx
+.vf_nm_padok:
+    mov [rsp+24], rdx           ; pad (width slot, consumed)
+    test r11d, 1                ; LEFT?
+    jnz .vf_nm_left
+    test r11d, 2                ; ZERO (ignored when prec present)?
+    jz .vf_nm_padsp
+    test r11d, 8                ; HAS_PREC?
+    jnz .vf_nm_padsp
+    mov edi, '0'                ; ZERO, no prec: zero pad, then digits
+    mov ecx, [rsp+24]
+    call .vf_pad
+    jmp .vf_nm_digits
+.vf_nm_padsp:
+    mov edi, ' '
+    mov ecx, [rsp+24]
+    call .vf_pad
+.vf_nm_zeros:
+    mov edi, '0'
+    mov ecx, [rsp+32]
+    call .vf_pad
+.vf_nm_digits:
+    mov rsi, [rsp+40]
+    mov rcx, [rsp+48]
+    call .vf_emitstr
+    jmp .vf_loop
+.vf_nm_left:
+    mov edi, '0'
+    mov ecx, [rsp+32]
+    call .vf_pad
+    mov rsi, [rsp+40]
+    mov rcx, [rsp+48]
+    call .vf_emitstr
+    mov edi, ' '
+    mov ecx, [rsp+24]
+    call .vf_pad
+    jmp .vf_loop
+; .vf_stremit: R8B=padchar, RSI=ptr, RCX=len. Width pads (LEFT aware).
+.vf_stremit:
+    mov [rsp+40], rsi
+    mov [rsp+48], rcx
+    mov rax, [rsp+24]           ; width
+    cmp rax, -1
+    je .vf_strbody
+    sub rax, rcx                ; pad = width - len
+    jbe .vf_strbody
+    mov [rsp+24], rax           ; pad
+    test r11d, 1
+    jnz .vf_strleft
+    movzx edi, r8b
+    mov ecx, [rsp+24]
+    call .vf_pad
+    jmp .vf_strbody
+.vf_strleft:
+    mov rsi, [rsp+40]
+    mov rcx, [rsp+48]
+    call .vf_emitstr
+    mov edi, ' '
+    mov ecx, [rsp+24]
+    call .vf_pad
+    jmp .vf_loop
+.vf_strbody:
+    mov rsi, [rsp+40]
+    mov rcx, [rsp+48]
+    call .vf_emitstr
+    jmp .vf_loop
+; .vf_pad: ECX copies of EDI. Push/pop stash (stream_putc kills RCX/RDI).
+; Incs R13 per char.
+.vf_pad:
+    test ecx, ecx
+    jz .vp_done
+    push rcx
+    push rdi
+    mov rsi, r12
+    call stream_putc
+    pop rdi
+    pop rcx
+    test rax, rax
+    jnz .vp_err
+    inc r13
+    dec ecx
+    jmp .vf_pad
+.vp_done:
+    ret
+.vp_err:
+    pop rcx                     ; unwind stash (one level: systemic error,
+    pop rsi                     ; caller returns -1 via .vf_err)
+    mov rax, -1
+    ret
+; .vf_emitstr: RSI=ptr, RCX=len. Same push/pop discipline as .vf_pad.
+.vf_emitstr:
     test rcx, rcx
-    jz .vf_loop
-.vf_emitloop:
+    jz .ve_done
+    push rsi
+    push rcx
     movzx edi, byte [rsi]
-    push rsi                      ; stash across stream_putc (stack, not the
-    push rcx                      ; live numbuf region below [rsp+48))
     mov rsi, r12
     call stream_putc
     pop rcx
     pop rsi
     test rax, rax
-    jnz .vf_err
+    jnz .ve_err
     inc r13
     inc rsi
     dec rcx
-    jnz .vf_emitloop
-    jmp .vf_loop
+    jnz .vf_emitstr
+.ve_done:
+    ret
+.ve_err:
+    pop rcx
+    pop rsi
+    mov rax, -1
+    ret
 .vf_done:
     mov rax, r13
-    add rsp, 48
+    add rsp, 80
     pop r15
     pop r14
     pop r13
@@ -1499,7 +1911,7 @@ vfprintf:
     ret
 .vf_err:
     mov rax, -1
-    add rsp, 48
+    add rsp, 80
     pop r15
     pop r14
     pop r13
@@ -1508,7 +1920,7 @@ vfprintf:
     ret
 .vf_err0:
     mov rax, -1
-    add rsp, 48
+    add rsp, 80
     pop r15
     pop r14
     pop r13
@@ -1549,6 +1961,30 @@ vfprintf:
     mov [rsi], dl
     shr rax, 4
     jnz .vf_ux_loop
+    lea rcx, [rdi]
+    sub rcx, rsi
+    ret
+; .vf_uoct: RAX=value, RDI=buf-end (22B usable below RDI: 64-bit octal is
+; 22 digits max). Out: RSI=first digit, RCX=len (0 -> "0").
+; Self-contained table (no R14 use: callers may hold sign there).
+; Clobbers RAX,RCX,RDX,RSI.
+.vf_uoct:
+    lea rsi, [rdi]
+    test rax, rax
+    jnz .vf_uo_loop
+    dec rsi
+    mov byte [rsi], '0'
+    mov ecx, 1
+    ret
+.vf_uo_loop:
+    mov rdx, rax
+    and edx, 7
+    lea rcx, [rel octdig]         ; (no RIP+index form: base it)
+    mov dl, [rcx + rdx]
+    dec rsi
+    mov [rsi], dl
+    shr rax, 3
+    jnz .vf_uo_loop
     lea rcx, [rdi]
     sub rcx, rsi
     ret

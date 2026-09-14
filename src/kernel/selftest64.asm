@@ -363,6 +363,14 @@ extern fprintf
 extern setvbuf
 extern remove
 extern stdout
+extern mempcpy
+extern strpbrk
+extern memchr
+extern atoi
+extern tolower
+extern isspace
+extern isdigit
+extern fileno
 extern stdin
 extern proc_reap64
 extern proc_free_all64
@@ -11493,6 +11501,76 @@ test_shim94:
     jne .fail94
     cmp dword [rel t94_n], 2
     jne .fail94
+    ; --- sprintf width/prec/length (N4A.2d engines, PURE) ---
+    lea rdi, [rel t94_out]
+    lea rsi, [rel t94_spfmt]
+    mov edx, 42
+    lea rcx, [rel t94_hi]
+    mov r8d, 42
+    call sprintf
+    cmp rax, 15
+    jne .fail94
+    lea rdi, [rel t94_out]
+    lea rsi, [rel t94_spexp]
+    mov rdx, 15
+    call memcmp
+    test rax, rax
+    jnz .fail94
+    lea rdi, [rel t94_out]
+    lea rsi, [rel t94_spfmt2]
+    mov edx, 12
+    mov ecx, 511
+    mov r8d, 123456
+    call sprintf
+    cmp rax, 19
+    jne .fail94
+    lea rdi, [rel t94_out]
+    lea rsi, [rel t94_spexp2]
+    mov rdx, 19
+    call memcmp
+    test rax, rax
+    jnz .fail94
+    ; --- N4A.2d cross-link leaves (mempcpy/strpbrk/memchr/atoi/ctype) ---
+    lea rdi, [rel t94_buf]
+    lea rsi, [rel t94_ab]
+    mov rdx, 4
+    call mempcpy                 ; copy "a:b"+NUL, return end
+    lea rcx, [rel t94_buf+4]
+    cmp rax, rcx
+    jne .fail94
+    lea rdi, [rel t94_buf]
+    lea rsi, [rel t94_colon]
+    call strpbrk                 ; first ':' at buf+1
+    lea rcx, [rel t94_buf+1]
+    cmp rax, rcx
+    jne .fail94
+    lea rdi, [rel t94_buf]
+    mov esi, 'b'
+    mov rdx, 4
+    call memchr                  ; 'b' at buf+2
+    lea rcx, [rel t94_buf+2]
+    cmp rax, rcx
+    jne .fail94
+    lea rdi, [rel t94_123]
+    call atoi
+    cmp rax, 123
+    jne .fail94
+    mov edi, 'A'
+    call tolower
+    cmp rax, 'a'
+    jne .fail94
+    mov edi, ' '
+    call isspace
+    test rax, rax
+    jz .fail94
+    mov edi, '5'
+    call isdigit
+    test rax, rax
+    jz .fail94
+    mov edi, 'x'
+    call isdigit                 ; 'x' is not a digit
+    test rax, rax
+    jnz .fail94
     ; --- strerror ---
     mov edi, 2
     call strerror
@@ -11622,8 +11700,9 @@ test_stdio95:
     lea rsi, [rel t95_fmt]
     lea rdx, [rel t95_x]
     mov ecx, 42
-    call fprintf                  ; "X=42\n" -> 5
-    cmp rax, 5
+    mov r8d, 0xab
+    call fprintf                  ; "X=42|00AB\n" -> 10 (vfprintf width+hex)
+    cmp rax, 10
     jne .fail95
     mov rdi, r15
     call fclose
@@ -11658,19 +11737,19 @@ test_stdio95:
     cmp rax, 'C'
     jne .fail95
     mov rdi, r15
-    call fgetc                    ; drains pushback, still at "X=42\n"
+    call fgetc                    ; drains pushback, still at body
     cmp rax, 'C'
     jne .fail95
     lea rdi, [rel t95_buf]
     mov rsi, 1
-    mov rdx, 5
+    mov rdx, 10
     mov rcx, r15
     call fread
-    cmp rax, 5
+    cmp rax, 10
     jne .fail95
     lea rdi, [rel t95_buf]
     lea rsi, [rel t95_line2]
-    mov rdx, 5
+    mov rdx, 10
     call memcmp
     test rax, rax
     jnz .fail95
@@ -11904,13 +11983,18 @@ t94_gval db "1",0
 t94_nope db "NOPE",0
 t94_ymd db "%Y-%m-%d",0
 t94_ymd_exp db "1983-04-01",0
+t94_spfmt db "%05d|%-6s|%.2x",0
+t94_spexp db "00042|hi    |2a",0
+t94_hi db "hi",0
+t94_spfmt2 db "%8.3d|%o|%zu",0
+t94_spexp2 db "     012|777|123456",0
 t95_name db "N4A.TXT",0
 t95_w db "w",0
 t95_r db "r",0
 t95_line1 db "AB",10,0
-t95_fmt db "%s=%d",10,0
+t95_fmt db "%s=%d|%04X",10,0
 t95_x db "X",0
-t95_line2 db "X=42",10,0
+t95_line2 db "X=42|00AB",10,0
 t95_marker db "[95]con",10,0
 ; Test 93 corpus (N4B.3, PURE): embedded source + build-generated ref.
 ; hello.asm is checked-in (844 B); hello93.ref is stamped by make from the

@@ -28,6 +28,7 @@ default rel
 
 global strcasecmp
 global strncasecmp
+global mempcpy
 global strcspn
 global strspn
 global strsep
@@ -45,12 +46,30 @@ global localtime
 global gmtime
 global strftime
 global errno
+global memchr
+global strpbrk
+global atoi
+global tolower
+global toupper
+global isspace
+global isdigit
+global isalpha
+global isalnum
+global isxdigit
+global iscntrl
+global ispunct
+global fileno
+global _fileno
+global __isoc23_strtol
+global __isoc23_strtoul
+global __isoc23_sscanf
 global crt_envp                  ; envp block (owned here so the kernel link
                                  ; has it; crt0 fills it via extern)
 
 extern putchar
 extern strlen
 extern exit
+extern memmove                   ; libc64: mempcpy builds on it
 
 %define ERANGE_NO 34
 %define EINVAL_NO 22
@@ -151,6 +170,15 @@ strncasecmp:
     ja .sn_done
     mov rax, -1
 .sn_done:
+    ret
+
+; mempcpy(RDI=dst, RSI=src, RDX=n) -> RAX=end (dst+n). Overlap-safe
+; (via memmove, which preserves RDX: only RAX/RCX/RSI/RDI move).
+mempcpy:
+    sub rsp, 8                  ; align for the call (entry 8 -> 0)
+    call memmove                ; RAX = dst
+    lea rax, [rax + rdx]
+    add rsp, 8
     ret
 
 ; ---- span/search ----
@@ -1351,3 +1379,224 @@ strftime:
     pop rbx
     ret
 ; (end of strftime; end of shim64 N4A.2a)
+
+; ------------------------------------------------------------
+; N4A.2d cross-link gap closures (see docs/25-n4a1-trim.md §3 + link log).
+; Small leaves the kept NASM sources reference that have no handler or
+; table yet: memchr/strpbrk (nasmlib fallbacks use them), atoi/abs
+; (directiv/outbin), ctype functions (nctype + 30 call sites; glibc
+; macros suppressed via __NO_CTYPE in dos64-config.h so these real
+; functions serve), fileno/_fileno (honest -1: file.c's os_fstat path is
+; compiled out without stat support, but the caller still evaluates
+; fileno(f)), __isoc23_* aliases (glibc ≥2.38 C23 versioned symbols for
+; strtol/strtoul/sscanf under gcc 16 defaults).
+; ------------------------------------------------------------
+
+; memchr(RDI=s, RSI=c-low-byte, RDX=n) -> RAX=match / NULL.
+memchr:
+    test rdx, rdx
+    jz .mc_null
+.mc_loop:
+    mov al, [rdi]
+    cmp al, sil
+    je .mc_found
+    inc rdi
+    dec rdx
+    jnz .mc_loop
+.mc_null:
+    xor eax, eax
+    ret
+.mc_found:
+    mov rax, rdi
+    ret
+
+; strpbrk(RDI=s, RSI=accept) -> RAX=first match / NULL.
+strpbrk:
+    push rbx
+    mov rbx, rsi                ; accept set
+.sp_loop:
+    mov al, [rdi]
+    test al, al
+    jz .sp_null
+    mov rdx, rbx
+.sp_scan:
+    mov cl, [rdx]
+    test cl, cl
+    jz .sp_adv
+    cmp al, cl
+    je .sp_found
+    inc rdx
+    jmp .sp_scan
+.sp_adv:
+    inc rdi
+    jmp .sp_loop
+.sp_found:
+    mov rax, rdi
+    pop rbx
+    ret
+.sp_null:
+    xor eax, eax
+    pop rbx
+    ret
+
+; atoi(RDI=s) -> RAX=(int)strtol(s, NULL, 10). Tail call via stack args.
+atoi:
+    push rbx                    ; align (entry 8 -> 0) for the call below
+    xor esi, esi
+    mov edx, 10
+    call strtol
+    movsxd rax, eax             ; (strtol already computed it; narrow+extend)
+    pop rbx
+    ret
+
+; ---- ctype (ASCII only). Predicates take C int (RDI); values outside
+; the unsigned-char domain (incl. EOF=-1) fail like glibc. tolower/toupper
+; pass through out-of-range values unchanged (C99 §7.4).
+isspace:
+    mov eax, edi
+    cmp eax, 255
+    ja ct_no
+    cmp al, ' '
+    je ct_yes
+    cmp al, 9
+    jb ct_no
+    cmp al, 13
+    jbe ct_yes
+    jmp ct_no
+
+isdigit:
+    mov eax, edi
+    cmp eax, 255
+    ja ct_no
+    cmp al, '0'
+    jb ct_no
+    cmp al, '9'
+    ja ct_no
+    mov eax, 1
+    ret
+
+isalpha:
+    mov eax, edi
+    cmp eax, 255
+    ja ct_no
+    or al, 32                   ; fold: a-z check covers A-Z
+    cmp al, 'a'
+    jb ct_no
+    cmp al, 'z'
+    ja ct_no
+    mov eax, 1
+    ret
+
+isalnum:
+    mov eax, edi
+    cmp eax, 255
+    ja ct_no
+    cmp al, '0'
+    jb ct_noA
+    cmp al, '9'
+    jbe ct_yes
+    or al, 32
+    cmp al, 'a'
+    jb ct_no
+    cmp al, 'z'
+    ja ct_no
+    mov eax, 1
+    ret
+
+isxdigit:
+    mov eax, edi
+    cmp eax, 255
+    ja ct_no
+    cmp al, '0'
+    jb ct_no
+    cmp al, '9'
+    jbe ct_yes
+    or al, 32
+    cmp al, 'a'
+    jb ct_no
+    cmp al, 'f'
+    ja ct_no
+    mov eax, 1
+    ret
+
+iscntrl:
+    mov eax, edi
+    cmp eax, 255
+    ja ct_no
+    cmp al, 32
+    jb ct_yes
+    cmp al, 127
+    je ct_yes
+    xor eax, eax
+    ret
+
+ispunct:
+    mov eax, edi
+    cmp eax, 255
+    ja ct_no
+    cmp al, 33
+    jb ct_no
+    cmp al, 47
+    jbe ct_yes
+    cmp al, 58
+    jb ct_no
+    cmp al, 64
+    jbe ct_yes
+    cmp al, 91
+    jb ct_no
+    cmp al, 96
+    jbe ct_yes
+    cmp al, 123
+    jb ct_no
+    cmp al, 126
+    ja ct_no
+    mov eax, 1
+    ret
+ct_no:
+    xor eax, eax
+    ret
+ct_yes:
+    mov eax, 1
+    ret
+ct_noA:                         ; (isalnum below-'0' entry: alpha check follows)
+
+tolower:
+    mov eax, edi
+    cmp eax, 255
+    ja .tl_ret                   ; out of domain: unchanged
+    cmp al, 'A'
+    jb .tl_ret
+    cmp al, 'Z'
+    ja .tl_ret
+    add eax, 32
+.tl_ret:
+    ret
+
+toupper:
+    mov eax, edi
+    cmp eax, 255
+    ja .tu_ret
+    cmp al, 'a'
+    jb .tu_ret
+    cmp al, 'z'
+    ja .tu_ret
+    sub eax, 32
+.tu_ret:
+    ret
+
+; fileno(RDI=fp) / _fileno: honest -1 (no OS fds; file.c's stat path is
+; compiled out, but callers still evaluate fileno(f)).
+fileno:
+    mov eax, -1
+    ret
+_fileno:
+    mov eax, -1
+    ret
+
+; __isoc23_* aliases (glibc ≥2.38 C23 versioned entry points).
+__isoc23_strtol:
+    jmp strtol
+__isoc23_strtoul:
+    jmp strtoul
+__isoc23_sscanf:
+    jmp sscanf

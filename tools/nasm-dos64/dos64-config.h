@@ -20,6 +20,48 @@
 #define HAVE_INTTYPES_H 1
 #define HAVE_STDBOOL_H 1
 #define HAVE_TYPEOF 1
+#define inline inline
+
+/* Keep the `inline` keyword: without HAVE_CONFIG_H, compiler.h falls back
+ * to config/unknown.h ("assume the worst"), which does `#ifndef inline /
+ * #define inline <empty>` for pre-C99 compilers. Since `inline` is a
+ * keyword (not a macro), the guard always fires and wipes it — turning
+ * every `extern_inline` definition into a plain external definition in
+ * every TU (mass multiple-definition link errors). Defining it to itself
+ * blocks that (self-reference is not re-expanded). Requires gcc inline
+ * support, which we have; pair with -fgnu89-inline so `extern_inline`
+ * (= `extern inline`, HAVE_GNU_INLINE branch) emits no out-of-line
+ * copies except ilog2.c's ILOG2_C ones. */
+
+/* mempcpy is provided by libc (shim64); defining HAVE_MEMPCPY suppresses
+ * compiler.h's `static inline` fallback, which would otherwise clash
+ * with the host string.h non-static declaration under -ffreestanding.
+ * All other string fallbacks stay undefined (the stdlib dir provides
+ * them as real objects). */
+#define HAVE_MEMPCPY 1
+
+/* htole16/32/64 come from the host <endian.h> (identity on little-endian
+ * x86-64); defining HAVE_HTOLE* suppresses bytesex.h's `static inline`
+ * versions, which would otherwise collide with glibc's function-like
+ * macros of the same names. */
+#define HAVE_HTOLE16 1
+#define HAVE_HTOLE32 1
+#define HAVE_HTOLE64 1
+
+/* snprintf/vsnprintf are provided by libc (libc64/stdio64); defining the
+ * HAVE_* suppresses nasm/stdlib fallbacks (which would multiply-define
+ * snprintf) and compiler.h's declarations. NOTE: vsnprintf itself is NOT
+ * provided as a symbol — nasm_asprintf (the only in-tree vsnprintf user
+ * via asprintf.c, which is dropped from the build list) is reimplemented
+ * in dos64-nasm-shim.c over vfprintf. */
+#define HAVE_SNPRINTF 1
+#define HAVE_VSNPRINTF 1
+
+/* Force function (not macro) forms of the ctype.h classification calls:
+ * glibc's macros expand to __ctype_b_loc table lookups (glibc-internal,
+ * unavailable freestanding). With __NO_CTYPE, calls resolve to real
+ * functions, provided by shim64 (isspace/isdigit/.../tolower/toupper). */
+#define __NO_CTYPE 1
 
 /* x86-64 is little-endian with flat addressing (compiler.h would
  * conclude this on its own from __x86_64__, listed for explicitness). */

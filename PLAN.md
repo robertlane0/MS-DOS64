@@ -438,6 +438,17 @@ Then, towards NASM running on DOS64 (breakdown: `docs/23-…`):
       degrades to pure-stdio paths by config alone; N4A.2 is the libc
       gap table + host-side stdmac codegen. Full record:
       `docs/25-n4a1-trim.md`. N4A.2–N4A.4 remain open.)
+      (N4A.1 acceptance + N4A.2 backend done 2026-09-13: `make
+      nasm-cross` — 69 kept objects + `dos64-nasm-shim.c` +
+      `crt0`/`libc64`/`stdio64`/`shim64` via `userland.ld` →
+      slide-safe `NASM64.COM` 2,323,668 B (entry 0, no relocs/GOT/
+      `syscall`); `make nasm-stdmac-raw` (17 raw packages);
+      full `printf`-family subset in all three engines (host-verified
+      48-verb `printf`, `sprintf`/`snprintf`, `vfprintf` + on-device
+      tests 94/95); zero `dos64-*.patch` files needed. Kernel closed
+      at 255/256 sectors (smoke+full) — next kernel change opens with
+      slot growth. Remaining: N4A.3 `dos64-tools.img` →
+      N4A.4 on-image byte-identity → N5. Record: `docs/25` §5/§6.)
 - [ ] 12. **N5** integration + hardening (HELP/PATH/`ERRORLEVEL`, harness
       round-trips, README/AGENTS/syscall-ref updates, G1–G6-style audit,
       full regression trio).

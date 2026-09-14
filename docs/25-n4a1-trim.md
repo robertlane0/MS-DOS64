@@ -55,7 +55,7 @@ here), seek-to-end filesize, fopen-probe existence. **N4A.2 needs no
 `file.c`/`mmap.c` backend swap** — the milestone shrinks to the libc
 symbols in §3 plus the stdmac codegen.
 
-## 3. libc gap table (N4A.2 work list)
+## 3. libc gap table (N4A.2 work list — all landed; see §5/§6 record)
 
 Derived from `nm -D /usr/bin/nasm` (full-build undefined set; the trim
 drops only `qsort` via `outmacho.c` — everything else below is linked by
@@ -67,7 +67,7 @@ the kept core, verified by grep). `HAVE` = in `libc64`/`stdio64` today.
 | `fopen/fclose/fread/fwrite/fseek/ftell/fflush/feof/ferror` | `file.c`, preproc, listing | HAVE (`stdio64.asm`) |
 | `printf/sprintf/snprintf`, `puts/putchar`, `exit` | diagnostics, `exit_group` path | HAVE (`libc64.asm`) |
 | `snprintf/vsnprintf/strlcpy/strnlen` | `compiler.h` fallback decls | VENDORED (`nasm/stdlib/*.c` compile when `HAVE_*` absent — free) |
-| `mempcpy` | `nasmlib/string.c` et al. | FREE (`compiler.h` inlines it when `HAVE_MEMPCPY` absent) |
+| `mempcpy` | `nasmlib/string.c` et al. | ADD in shim (over `memmove`; `HAVE_MEMPCPY` defined to kill compiler.h's clashing inline) |
 | `strcasecmp/strncasecmp` | directives, cmdline, `outbin.c` | ADD (tiny, ~30 lines over `strcmp` core) |
 | `strcspn/strspn/strsep` | `directiv.c`, `nasm.c`, `nasmlib/string.c` | ADD (tiny, byte loops) |
 | `strtol/strtoul/sscanf` | `nasm.c`, `preproc.c` (`%d:%d` line ranges) | ADD (`strtol/ul` needed; `sscanf` only for one `%d:%d` — a 10-line local parser or minimal `sscanf` subset) |
@@ -103,7 +103,13 @@ item is the only one that may want its own design note.
   ~40 KB used by N1/N3.5/N4B extras. **It does not fit, by ~0.8 MB** —
   and the DOS64-target static build sheds only reloc/debug overhead
   (already stripped above), not the 1.16 MB tables.
-- Spawn budget is NOT the blocker: 2.2 MB payload + heap fits the 6 MiB
+- DOS64-linked actual (N4A.2d, `make nasm-cross`): **NASM64.COM
+  2,323,668 B** (text 419 KB, data 1.9 MB — the `.data.rel.ro` pointer
+  tables; slide-safe: entry 0, no relocs, no GOT, no `syscall`).
+  Confirms the analysis: ~0.9 MB over the volume. Decision: **(c)** —
+  ship on a second optional `dos64-tools.img`. Never squeeze the
+  256-sector kernel slot (which closed N4A.2 at 255/256 — see §6).
+- Spawn budget is NOT the blocker: 2.3 MB payload + heap fits the 6 MiB
   proc block if sources stay small (N0 measured NASM's Linux RSS at
   ~14 MB, but that includes libc/loader; DOS64 heap needs its own
   measurement at N4A.4).
@@ -113,19 +119,82 @@ item is the only one that may want its own design note.
   change past ~2 MB (FAT12/1-sector-cluster ceiling) and FAT-engine
   review; (c) ship `NASM.COM` on a second optional `dos64-tools.img`
   with a bigger FAT12 volume at the same `VOL_LBA` geometry family.
-- Recommendation: decide at N4A.2 completion with the real DOS64-linked
-  binary size in hand; default to (c) — it keeps the base image's
-  layout block, `check-layout` arithmetic, and test-82 invariants
-  untouched. Never squeeze the 256-sector kernel slot.
+- Recommendation: (c) — it keeps the base image's layout block,
+  `check-layout` arithmetic, and test-82 invariants untouched. Never
+  squeeze the 256-sector kernel slot.
 
-## 5. What N4A.2 is now (shrunk by this slice)
+## 5. What N4A.2 was (done 2026-09-13; was "shrunk" list, now record)
 
 1. Buffered input (`fgets/fgetc/ungetc`) + `vfprintf`/`stderr` + small
-   string/numeric adds in `src/libc/` (kernel-size-checked per addition).
-2. Host-side stdmac decompression codegen (replace `uncompress.c`).
-3. `dos64-*.patch` files only if the cross-compile surfaces a real
-   incompatibility (none known after this slice — the tree degrades
-   cleanly by config alone).
-4. Cross-link `nasm` objects with `crt0`+`libc64`+`stdio64` via
-   `userland.ld`-family script; acceptance per `docs/24-*`: no relocs,
-   no GOT, no `syscall`, entry 0.
+   string/numeric adds in `src/libc/` — done (tests 94/95).
+   Supplement (found at cross-link): full `printf`-family subset in all
+   three engines — flags `-`/`0`, width (`*`/digits), precision
+   (`.`/`.*`), lengths `h`/`l`/`ll`/`z` (64-bit), `%o` — because kept
+   sources use `%02X`/`%08x`/`%-20s`/`%li`/`%zu`/`%lld`/`%o`/`%p`
+   (measured inventory, §3 table extended in code comments). Verified
+   host-side against the real objects (48-verb `printf`, `sprintf` incl.
+   `snprintf` bounds, `vfprintf` over a real `va_list`), plus on-device
+   test-94 (`sprintf`) and test-95 (`fprintf` to file) extensions.
+2. Host-side stdmac codegen — done: `tools/nasm-dos64/stdmac-raw.pl` +
+   `make nasm-stdmac-raw` (17 packages, all `dsize == zsize`; submodule
+   read-only, output under `build/nasm-raw`).
+3. `dos64-*.patch` files: NONE NEEDED — the tree degrades cleanly by
+   config + the two mechanism fixes below. No fork, no patch stack.
+4. Cross-link — done: `make nasm-cross` (N4A.1 acceptance). 69 kept
+   objects + `dos64-nasm-shim.c` + `crt0`/`libc64`/`stdio64`/`shim64`
+   via `userland.ld` → slide-safe `NASM64.COM` (see §6).
+
+## 6. N4A.2d cross-link record (2026-09-13)
+
+Recipe (`make nasm-cross`; experiment script was `/tmp` scratch):
+throwaway copy → host `autogen/configure/make nasm` (generated
+`*.ph`/tables only) → raw stdmac overwrite → cross-compile kept set
+with `NASM_XCFLAGS` (trim.mk) → `ld -T userland.ld` → `objcopy -O binary`.
+
+Mechanism fixes required (all in-repo, none in the submodule):
+- `dos64-config.h`: `HAVE_MEMPCPY` (we provide it; kills compiler.h's
+  clashing `static inline`), `HAVE_HTOLE16/32/64` (glibc macros vs
+  bytesex.h inlines), `HAVE_SNPRINTF`/`HAVE_VSNPRINTF` (we provide
+  snprintf; vsnprintf unneeded — asprintf reimplemented),
+  `__NO_CTYPE` (glibc macro→`__ctype_b_loc` unavailable; real
+  functions in shim64 instead), `inline`→`inline` (unknown.h would
+  `#define` it away, multiplying every `extern_inline` definition).
+- Flags: `-fgnu89-inline` (with the above, `extern_inline` emits no
+  out-of-line copies except ilog2.c's), `-U_FORTIFY_SOURCE`
+  (no `__*_chk`), `-Wno-comment` (generated macros.c).
+- `shim64` additions: `mempcpy`, `memchr`, `strpbrk`, `atoi`,
+  `isspace/isdigit/isalpha/isalnum/isxdigit/iscntrl/ispunct`,
+  `tolower/toupper`, `fileno`/`_fileno` (-1, honest: stat path compiled
+  out but callers evaluate it), `__isoc23_strtol/strtoul/sscanf`
+  aliases (glibc ≥2.38 C23 symbols under gcc 16), `errno` already had.
+  (`abs` lives in dos64-nasm-shim.c: `abs` is a NASM keyword and cannot
+  be an asm label.)
+- `dos64-nasm-shim.c` (new, cross-flags C): `nasm_vasprintf/asprintf/
+  vaxprintf/axprintf` over `vfprintf` into a heap image (tracks
+  `_nasm_last_string_size`), `uncompress_stdmac` (raw-blob copy),
+  `nasm_realpath` (`nasm_strdup`; FAT12 has no symlinks),
+  `nasm_get_stack_size_limit` (`SIZE_MAX`, like upstream's fallback),
+  `abs`.
+- Dropped (trim.mk `NASM_DOS64_DROP`): `realpath.c`, `rlimit.c`,
+  `uncompress.c`, `asprintf.c`, `vsnprintf.c`, `zlib/`.
+- Kept as-is by config: `mmap.c` (NULL stub), `file.c` (pure-stdio
+  fallbacks), `fileio.c` (zero-fill loop; ftruncate branch out).
+
+Result: `NASM64.COM` 2,323,668 B — entry `0x0`, no relocations, no
+`.got`, no `syscall` (all asserted by the target). 71→69 compiled
+objects (2 dropped) + shim + libc.
+
+Kernel-slot pressure (all libc links into the kernel for the harness):
+smoke 230→255/256, full 230→255/256 through N4A.2 (format engines ≈
+5 KB, shims ≈ 2 KB, tests ≈ 2 KB). **1 sector free.** Any further
+kernel change (including N4A.4 debug) must open with the slot-growth
+procedure (PLAN item 8 pattern: relocate scratch first, then bump
+`KERNEL_SECTORS`; test 82 + `check-layout` lock it). The cross-link
+itself needs no kernel change.
+
+Next (not this slice): N4A.3 `dos64-tools.img` (bigger FAT12 volume
+for the 2.3 MB binary) → N4A.4 on-image `NASM -f bin` byte-identity
+corpus → N5 integration. The 2 KB child stack (`PROC_STACK_SIZE`,
+`stack_size` advisory 2048) is the top N4A.4 risk after delivery:
+NASM's preproc/eval recursion ran under an 8 MB Linux stack; measure
+heap/stack high-water on first execution.

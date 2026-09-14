@@ -11,7 +11,9 @@ copies (same pattern as `make nasm-samples`: `cp -a nasm/. build/...`).
 |---|---|
 | `dos64-config.h` | Force-include (`-include`) feature config for the DOS64 cross-target. Selects the graceful-degradation paths NASM already ships (pure-stdio `file.c`, NULL-`mmap`, `fseek`-as-`fseeko`, vendored `stdlib/` fallbacks). Each block names the fallback it selects and the libc64 symbol it needs. |
 | `trim.mk` | Canonical trim flags (`OF_ONLY`/`OF_BIN`/`OF_ELF`) + the backend-cut list. Included by the top `Makefile` (`nasm-trim-check`); the numbers it quotes are measured in `docs/25-n4a1-trim.md`. |
-| `dos64-*.patch` | (N4A.2) Future source patches, one concern per file, applied with `patch -p1` to the build copy only. None yet — N4A.1 needs none. |
+| `stdmac-raw.pl` | Raw-`macros.c` codegen driver (N4A.2c): neutralizes zlib so every blob has `dsize == zsize` (`make nasm-stdmac-raw`). Reads the submodule read-only. |
+| `dos64-nasm-shim.c` | NASM-specific C shims for the cross-target (N4A.2d): `nasm_vasprintf/asprintf/vaxprintf/axprintf` (over `vfprintf`), `uncompress_stdmac` (raw-blob copy), `nasm_realpath`, `nasm_get_stack_size_limit`, `abs` (here — `abs` is a NASM keyword and cannot be an asm label). |
+| `dos64-*.patch` | Source patches, one concern per file, applied with `patch -p1` to the build copy only. None needed to date (N4A.2 landed patch-free — config + mechanism fixes sufficed). |
 
 ## Policy (PLAN §7: no fork)
 

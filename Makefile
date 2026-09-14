@@ -611,12 +611,77 @@ nasm-trim-check: $(NASM_TRIM_BIN) $(ASM64_REFDIR)/hello.com $(ASM64_REFDIR)/echo
 	@echo "Trimmed nasm -f bin: 4/4 byte-identical to system nasm"
 	@size $(NASM_TRIM_BIN)
 
+# N4A.2c raw stdmac codegen (docs/25-n4a1-trim.md §2; tools/nasm-dos64/).
+# Regenerates macros.c with zlib neutralized (every blob dsize == zsize,
+# which preproc.c consumes directly — no uncompress_stdmac, no zlib on
+# target). Reads the pinned submodule read-only; writes ONLY under
+# build/nasm-raw (CWD-gated: macros.pl emits to ./macros/macros.c).
+# Asserts: every `macros_t X = { A, B, ...}` has A == B, and the result
+# compiles (syntax-only) with the DOS64 cross flags.
+NASM_RAW_DIR := $(BUILD)/nasm-raw
+NASM_RAW_C := $(NASM_RAW_DIR)/macros/macros.c
+
+$(NASM_RAW_C):
+	@mkdir -p $(NASM_RAW_DIR)/macros $(NASM_RAW_DIR)/output $(NASM_RAW_DIR)/perllib
+	perl $(NASM_SUB_SRC)/version.pl mac < $(NASM_SUB_SRC)/version > $(NASM_RAW_DIR)/version.mac
+	cp $(NASM_SUB_SRC)/macros/*.mac $(NASM_RAW_DIR)/macros/
+	cp $(NASM_SUB_SRC)/output/*.mac $(NASM_RAW_DIR)/output/
+	cp $(NASM_SUB_SRC)/perllib/*.ph $(NASM_RAW_DIR)/perllib/
+	cd $(NASM_RAW_DIR) && NASM_MACROS_PL=$(CURDIR)/$(NASM_SUB_SRC)/macros/macros.pl perl -Iperllib $(CURDIR)/tools/nasm-dos64/stdmac-raw.pl version.mac "macros/*.mac" "output/*.mac"
+	@test $$(grep -c 'macros_t nasm_stdmac' $@) -ge 3 || (echo "stdmac-raw FAIL: expected >=3 packages"; exit 1)
+	@python3 -c "import re,sys; txt=open('$@').read(); ms=re.findall(r'macros_t (\w+) = \{\s*(\d+),\s*(\d+),', txt); assert len(ms) >= 3, ms; bad=[m for m in ms if m[1] != m[2]]; print('packages:', [(m[0], m[1]) for m in ms]); sys.exit(1 if bad else 0)" || (echo "stdmac-raw FAIL: compressed blob remains"; exit 1)
+	@echo "stdmac-raw OK: all blobs dsize == zsize (no uncompress path)"
+
+nasm-stdmac-raw: $(NASM_RAW_C)
+
+# N4A.2d cross-build (PLAN N4A item 11 acceptance: host cross-build of the
+# trimmed NASM succeeds; docs/25-n4a1-trim.md §5). Throwaway copy of the
+# pinned submodule (nasm/ never modified): host-configured for the
+# generated files (*.ph, macros tables), stdmac regenerated raw, kept
+# sources cross-compiled with NASM_XCFLAGS, linked with crt0 + libc
+# (slide-safety bar: entry 0, no relocs/GOT/syscall, like CHELLO.COM).
+# Opt-in (not part of `all`): `make nasm-cross`. Cached under
+# build/nasm-x (gitignored); `make nasm-clean` drops it.
+NASM_X_SRC := $(BUILD)/nasm-x/src
+NASM_X_OBJ := $(BUILD)/nasm-x/obj
+NASM_X_ELF := $(BUILD)/nasm64.elf
+NASM_X_COM := $(BUILD)/NASM64.COM
+
+$(NASM_X_ELF): $(LAYOUT_INC) tools/nasm-dos64/trim.mk tools/nasm-dos64/dos64-config.h tools/nasm-dos64/stdmac-raw.pl tools/nasm-dos64/dos64-nasm-shim.c src/libc/userland.ld $(LIBC_USERLAND)
+	rm -rf $(BUILD)/nasm-x
+	mkdir -p $(BUILD)/nasm-x
+	cp -a $(NASM_SUB_SRC)/. $(NASM_X_SRC)/
+	cd $(NASM_X_SRC) && ./autogen.sh
+	cd $(NASM_X_SRC) && ./configure --disable-lto --disable-debug
+	$(MAKE) -C $(NASM_X_SRC) -j nasm
+	cd $(NASM_X_SRC) && perl -Iperllib $(CURDIR)/tools/nasm-dos64/stdmac-raw.pl version.mac "macros/*.mac" "output/*.mac"
+	mkdir -p $(NASM_X_OBJ)
+	@for f in $(NASM_X_SRC)/asm/*.c $(NASM_X_SRC)/nasmlib/*.c $(NASM_X_SRC)/common/*.c $(NASM_X_SRC)/stdlib/*.c $(NASM_X_SRC)/output/outbin.c $(NASM_X_SRC)/output/outelf.c $(NASM_X_SRC)/output/outform.c $(NASM_X_SRC)/output/outlib.c $(NASM_X_SRC)/output/nulldbg.c $(NASM_X_SRC)/output/nullout.c $(NASM_X_SRC)/x86/*.c $(NASM_X_SRC)/macros/macros.c; do \
+		case $$(basename $$f) in uncompress.c|realpath.c|rlimit.c|asprintf.c|vsnprintf.c) continue;; esac; \
+		o=$(NASM_X_OBJ)/$$(echo $$(basename $$f) | sed 's|\.c$$|.o|'); \
+		gcc $(NASM_XCFLAGS) -I$(NASM_X_SRC) -I$(NASM_X_SRC)/include -I$(NASM_X_SRC)/x86 -I$(NASM_X_SRC)/asm -I$(NASM_X_SRC)/disasm -I$(NASM_X_SRC)/output -c $$f -o $$o || exit 1; \
+	done
+	gcc $(NASM_XCFLAGS) -c tools/nasm-dos64/dos64-nasm-shim.c -o $(NASM_X_OBJ)/dos64_nasm_shim.o || exit 1
+	ld -T $(SRC_LIBC)/userland.ld -o $@ $(BUILD)/libc/crt0.o $(NASM_X_OBJ)/*.o $(filter-out $(BUILD)/libc/crt0.o,$(LIBC_USERLAND)) -nostdlib --fatal-warnings
+	@echo "nasm64 linked: $$(stat -c %s $@) bytes"
+
+$(NASM_X_COM): $(NASM_X_ELF)
+	objcopy -O binary $< $@
+	@test $$(readelf -h $< | grep Entry | grep -q '0x0$$' && echo yes) = yes || (echo "NASM64 entry != 0"; exit 1)
+	@! readelf -r $< | grep -q R_X86_64 || (echo "NASM64 has relocations (not slide-safe)"; readelf -r $<; exit 1)
+	@! readelf -S $< | grep -q '\.got' || (echo "NASM64 has .got (not slide-safe)"; exit 1)
+	@! objdump -b binary -m i386:x86-64 -d $@ | grep -q syscall || (echo "NASM64 has Linux syscalls"; exit 1)
+	@echo "NASM64.COM: $$(stat -c %s $@) bytes (slide-safe flat image)"
+	@size $<
+
+nasm-cross: $(NASM_X_COM)
+
 nasm-clean:
-	rm -rf $(BUILD)/nasm-sub $(BUILD)/nasm-trim $(NASM_TRIM_OUT) $(SAMPLE_OUTDIR) $(NASM_IMG) $(NASM_IMG).lock
+	rm -rf $(BUILD)/nasm-sub $(BUILD)/nasm-trim $(BUILD)/nasm-raw $(BUILD)/nasm-x $(NASM_TRIM_OUT) $(SAMPLE_OUTDIR) $(NASM_IMG) $(NASM_IMG).lock
 
 clean:
 	rm -rf $(BUILD)/*.bin $(BUILD)/*.o $(BUILD)/*.img $(BUILD)/*.elf $(BUILD)/*.map $(BUILD)/*.lock $(BUILD)/*.ref $(BUILD)/*.COM $(BUILD)/*.bssend
 	rm -rf $(BUILD)/src $(BUILD)/lean $(BUILD)/full $(BUILD)/include $(BUILD)/libc $(TOOL_BUILD)
 	rm -rf $(ASM64_CHECK) $(ASM64_CORE_O) $(ASM64_REFDIR)
 
-.PHONY: all lean full clean run-qemu run-qemu-lean run-qemu-full check-layout check-layout-neg check-kbc check-serial check-selftest-modes check-debug-symbols nasm-samples run-qemu-nasm nasm-clean nasm-trim-check libc-userland asm64-check asm64-tool
+.PHONY: all lean full clean run-qemu run-qemu-lean run-qemu-full check-layout check-layout-neg check-kbc check-serial check-selftest-modes check-debug-symbols nasm-samples run-qemu-nasm nasm-clean nasm-trim-check nasm-stdmac-raw nasm-cross libc-userland asm64-check asm64-tool
