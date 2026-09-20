@@ -48,12 +48,12 @@
 #define HAVE_HTOLE32 1
 #define HAVE_HTOLE64 1
 
-/* snprintf/vsnprintf are provided by libc (libc64/stdio64); defining the
+/* snprintf/vsnprintf are provided by libc (libc64/stdio64: snprintf in
+ * libc64, vsnprintf in stdio64 over an F_MEM memory stream); defining the
  * HAVE_* suppresses nasm/stdlib fallbacks (which would multiply-define
- * snprintf) and compiler.h's declarations. NOTE: vsnprintf itself is NOT
- * provided as a symbol — nasm_asprintf (the only in-tree vsnprintf user
- * via asprintf.c, which is dropped from the build list) is reimplemented
- * in dos64-nasm-shim.c over vfprintf. */
+ * snprintf) and compiler.h's declarations. dos64-nasm-shim.c's
+ * nasm_vaxprintf follows upstream nasmlib/asprintf.c verbatim (vsnprintf
+ * sizing call + second formatting call). */
 #define HAVE_SNPRINTF 1
 #define HAVE_VSNPRINTF 1
 

@@ -43,6 +43,9 @@
 ; - vfprintf over a real va_list struct walker (GP-only, like printf);
 ;   fprintf builds the struct and delegates. setvbuf accepts and returns
 ;   0 (fixed stream policy).
+; - vsnprintf over an F_MEM memory stream (stack FILE64, accepted by
+;   stream_slot's custom path): two-pass sizing compatible, so
+;   nasm_vaxprintf can follow upstream asprintf.c verbatim.
 
 bits 64
 default rel
@@ -66,6 +69,7 @@ global fputs
 global ungetc
 global vfprintf
 global fprintf
+global vsnprintf
 global setvbuf
 global stdin
 global stdout
@@ -89,6 +93,7 @@ extern octdig
 %define F_ERR      8
 %define F_DIRTY    16
 %define F_CONSOLE  32
+%define F_MEM      64
 
 %define NFILE      13
 %define SLURP_CHUNK 4096
@@ -265,9 +270,13 @@ stdio_init:
     ret
 
 ; stream_slot(RDI=fp) -> RAX=slot / NULL. Accepts table slots (via
-; file_slot) AND the three console objects. Clobbers RAX, RCX, RDX, RDI.
+; file_slot), the three console objects, and custom memory streams
+; (F_MEM, e.g. vsnprintf's stack FILE64: 8-aligned + F_INUSE + F_MEM).
+; Clobbers RAX, RCX, RDX, RDI.
 ; Callers must have run stdio_init first (every public entry does).
 stream_slot:
+    test rdi, rdi
+    jz .ss_bad
     lea rax, [rel stdin_obj]
     cmp rdi, rax
     je .ss_hit
@@ -277,7 +286,25 @@ stream_slot:
     lea rax, [rel stderr_obj]
     cmp rdi, rax
     je .ss_hit
-    jmp file_slot               ; tail call: contract identical
+    lea rax, [rel file_table]
+    cmp rdi, rax
+    jb .ss_custom
+    lea rdx, [rax + FILE64_size * NFILE]
+    cmp rdi, rdx
+    jae .ss_custom
+    jmp file_slot               ; in table: validate slot index + alignment
+.ss_custom:
+    test dil, 7                 ; must be 8-byte aligned
+    jnz .ss_bad
+    test dword [rdi + FILE64.flags], F_INUSE
+    jz .ss_bad
+    test dword [rdi + FILE64.flags], F_MEM
+    jz .ss_bad                  ; custom streams are memory streams only
+    mov rax, rdi
+    ret
+.ss_bad:
+    xor eax, eax
+    ret
 .ss_hit:
     ret
 
@@ -956,6 +983,8 @@ isatty:
 stream_putc:
     test dword [rsi + FILE64.flags], F_WRITE
     jz .spc_err                   ; read-only stream
+    test dword [rsi + FILE64.flags], F_MEM
+    jnz .spc_mem
     test dword [rsi + FILE64.flags], F_CONSOLE
     jnz .spc_con
     ; file "w": grow + append (mirrors fwrite, single byte)
@@ -1003,6 +1032,20 @@ stream_putc:
     pop r13
     pop r12
     pop rbx
+    jmp .spc_err                  ; realloc failure is an error (don't fall into .spc_mem)
+.spc_mem:
+    inc qword [rsi + FILE64.len]
+    mov rcx, [rsi + FILE64.pos]
+    cmp rcx, [rsi + FILE64.cap]
+    jae .spc_mem_full
+    mov rax, [rsi + FILE64.buf]
+    test rax, rax
+    jz .spc_mem_full
+    mov [rax + rcx], dil
+    inc qword [rsi + FILE64.pos]
+.spc_mem_full:
+    xor eax, eax
+    ret
 .spc_err:
     or dword [rsi + FILE64.flags], F_ERR
     mov rax, -1
@@ -1993,22 +2036,23 @@ vfprintf:
 ; and delegates to vfprintf (single format core, no duplication).
 ; Frame: 2 pushes (16) + sub 72 (88: entry 8 -> 0, aligned).
 ; [rsp+0..24) = va struct (gp,fp,overflow,reg_save), [rsp+24..72) = 48 B
-; reg_save_area (RDX,RCX,R8,R9 + zero pad). RBX=fp, R12=fmt.
+; reg_save_area: offset 16=RDX, 24=RCX, 32=R8, 40=R9 per System V AMD64 ABI.
+; RBX=fp, R12=fmt.
 fprintf:
     push rbx
     push r12
     sub rsp, 72
     mov rbx, rdi
     mov r12, rsi
-    mov [rsp + 24], rdx
-    mov [rsp + 32], rcx
-    mov [rsp + 40], r8
-    mov [rsp + 48], r9
-    mov qword [rsp + 56], 0
-    mov qword [rsp + 64], 0
-    mov dword [rsp + 0], 0        ; gp_offset: varargs start at reg_save[0]
+    mov qword [rsp + 24], 0       ; reg_save[0]: unused (varargs start at [16])
+    mov qword [rsp + 32], 0       ; reg_save[8]: unused (never read, keep clean)
+    mov [rsp + 40], rdx           ; offset 16: RDX (1st vararg)
+    mov [rsp + 48], rcx           ; offset 24: RCX (2nd vararg)
+    mov [rsp + 56], r8            ; offset 32: R8 (3rd vararg)
+    mov [rsp + 64], r9            ; offset 40: R9 (4th vararg)
+    mov dword [rsp + 0], 16       ; gp_offset: varargs start at reg_save[16]
     mov dword [rsp + 4], 48       ; fp_offset: no FP varargs (GP-only verbs)
-    mov rax, [rsp + 96]           ; stk0 = [E+8] (E = rsp+88)
+    lea rax, [rsp + 96]           ; stk0 = [E+8] (E = rsp+88), pointer to stack args
     mov [rsp + 8], rax            ; overflow_arg_area
     lea rax, [rsp + 24]
     mov [rsp + 16], rax           ; reg_save_area
@@ -2017,6 +2061,54 @@ fprintf:
     lea rdx, [rsp]
     call vfprintf                 ; RAX passes straight through
     add rsp, 72
+    pop r12
+    pop rbx
+    ret
+
+; vsnprintf(RDI=str, RSI=size, RDX=fmt, RCX=ap) -> RAX=chars that would be written / -1.
+; Formats into str (at most size-1 chars + NUL). If size==0, str may be NULL.
+; Returns total chars that would have been written (excluding NUL), or -1 on error.
+; Frame: 4 pushes (32) + sub 56 = 88 + entry 8 = 96 (aligned). The FILE64
+; struct (48 B) lives at [rsp..rsp+48); [rsp+48..56) is alignment pad.
+; Local FILE64 struct at [rsp + 0..48).
+vsnprintf:
+    push rbx
+    push r12
+    push r13
+    push r14
+    sub rsp, 56
+    mov rbx, rdi                  ; str
+    mov r13, rsi                  ; original size
+    mov dword [rsp + FILE64.flags], F_INUSE | F_WRITE | F_MEM
+    mov dword [rsp + FILE64.fd], -1
+    mov [rsp + FILE64.buf], rbx
+    xor eax, eax
+    test r13, r13
+    jz .vsn_sz0
+    lea rax, [r13 - 1]            ; cap = size - 1 (reserve 1 for NUL)
+.vsn_sz0:
+    mov [rsp + FILE64.cap], rax
+    mov qword [rsp + FILE64.len], 0
+    mov qword [rsp + FILE64.pos], 0
+    mov qword [rsp + FILE64.pb], PB_EMPTY
+    lea rdi, [rsp]
+    mov rsi, rdx                  ; fmt
+    mov rdx, rcx                  ; ap
+    call vfprintf
+    test rax, rax
+    js .vsn_err
+    test r13, r13
+    jz .vsn_done
+    test rbx, rbx
+    jz .vsn_done
+    mov rcx, [rsp + FILE64.pos]
+    mov byte [rbx + rcx], 0
+.vsn_done:
+    mov rax, [rsp + FILE64.len]
+.vsn_err:
+    add rsp, 56
+    pop r14
+    pop r13
     pop r12
     pop rbx
     ret

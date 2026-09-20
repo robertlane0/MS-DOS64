@@ -154,8 +154,8 @@ with `NASM_XCFLAGS` (trim.mk) → `ld -T userland.ld` → `objcopy -O binary`.
 Mechanism fixes required (all in-repo, none in the submodule):
 - `dos64-config.h`: `HAVE_MEMPCPY` (we provide it; kills compiler.h's
   clashing `static inline`), `HAVE_HTOLE16/32/64` (glibc macros vs
-  bytesex.h inlines), `HAVE_SNPRINTF`/`HAVE_VSNPRINTF` (we provide
-  snprintf; vsnprintf unneeded — asprintf reimplemented),
+  bytesex.h inlines), `HAVE_SNPRINTF`/`HAVE_VSNPRINTF` (snprintf in
+  `libc64`, vsnprintf in `stdio64` over an `F_MEM` memory stream),
   `__NO_CTYPE` (glibc macro→`__ctype_b_loc` unavailable; real
   functions in shim64 instead), `inline`→`inline` (unknown.h would
   `#define` it away, multiplying every `extern_inline` definition).
@@ -170,8 +170,9 @@ Mechanism fixes required (all in-repo, none in the submodule):
   (`abs` lives in dos64-nasm-shim.c: `abs` is a NASM keyword and cannot
   be an asm label.)
 - `dos64-nasm-shim.c` (new, cross-flags C): `nasm_vasprintf/asprintf/
-  vaxprintf/axprintf` over `vfprintf` into a heap image (tracks
-  `_nasm_last_string_size`), `uncompress_stdmac` (raw-blob copy),
+  vaxprintf/axprintf` with verbatim upstream `nasmlib/asprintf.c` logic
+  (vsnprintf sizing call + second formatting call, over stdio64
+  `vsnprintf`; tracks `_nasm_last_string_size`), `uncompress_stdmac` (raw-blob copy),
   `nasm_realpath` (`nasm_strdup`; FAT12 has no symlinks),
   `nasm_get_stack_size_limit` (`SIZE_MAX`, like upstream's fallback),
   `abs`.
@@ -545,7 +546,29 @@ likely a *second, distinct* uninitialized-memory or argument-count
 issue (in the vein of the `malloc`-zeroing fix from §7) rather than a
 gap in the relocation mechanism itself, though this is not yet
 confirmed. Recommended next step: a conditional GDB breakpoint at the
-fault address that stops only when `RSI` is non-canonical or points
-outside `[load_base, load_base+mem_size)`, to isolate the specific
-call site the way the return-address technique in §7 isolated the
-`ofmt` bug.
+ fault address that stops only when `RSI` is non-canonical or points
+ outside `[load_base, load_base+mem_size)`, to isolate the specific
+ call site the way the return-address technique in §7 isolated the
+ `ofmt` bug.
+
+## §9 — `vsnprintf` + upstream-parity `nasm_vaxprintf` (candidate for the §8 fault)
+
+`stdio64.asm` gains `vsnprintf` (new `F_MEM` memory-stream kind: the
+`stream_putc` mem path counts `len` as would-have-written while storing
+at most `cap = size-1` bytes + NUL; `stream_slot` accepts the stack
+`FILE64` via a custom path gated on 8-alignment + `F_INUSE` + `F_MEM`)
+and `fprintf`'s hand-built `va_list` is corrected to the ABI-faithful
+shape (`gp_offset = 16`, `RDX` at `reg_save[16]` — the old compact
+`gp_offset = 0` layout read two zero-pad slots as phantom 5th/6th reg
+args for calls with 5+ varargs). `dos64-nasm-shim.c`'s `nasm_vaxprintf`
+then drops its `vfprintf`-into-heap-image workaround (which could never
+have worked: the old `stream_slot` rejected stack `FILE*`, so every
+call returned −1 → `NULL`) and follows upstream `nasmlib/asprintf.c`
+verbatim (vsnprintf sizing call + second formatting call).
+`HAVE_VSNPRINTF` now means "provided by stdio64", not "unneeded".
+Why this is a candidate for the §8 `#GP`-in-`strlen` fault: every
+`nasm_vaxprintf` caller (`strlist.c` et al.) received `NULL` under the
+old code — the exact shape (bad pointer into a shared string helper)
+§8 observed. Smoke 89/89 + full 95/95 + `nasm-cross` re-verified;
+kernel still 255/256 sectors. On-device `NASM64.COM` run (tools-img)
+still needed to confirm N4A.4 closes.

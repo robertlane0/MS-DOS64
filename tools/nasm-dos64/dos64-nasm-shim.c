@@ -5,10 +5,10 @@
  *
  * Contents (each maps to a file dropped from NASM_DOS64_DROP):
  * - nasm_vasprintf/nasm_asprintf/nasm_vaxprintf/nasm_axprintf: replace
- *   nasmlib/asprintf.c (whose vsnprintf sizing loop has no DOS64
- *   counterpart). Implemented over vfprintf into a heap image (the same
- *   growth path stdio64's "w" streams use: exact-fit realloc, no mmap).
- *   Tracks _nasm_last_string_size like upstream (strlist.c reads it).
+ *   nasmlib/asprintf.c (verbatim upstream logic: vsnprintf sizing call
+ *   + second formatting call, over stdio64 vsnprintf's F_MEM memory
+ *   stream). Tracks _nasm_last_string_size like upstream (strlist.c
+ *   reads it).
  * - uncompress_stdmac: replace asm/uncompress.c + zlib. The DOS64 codegen
  *   (make nasm-stdmac-raw) emits raw blobs (dsize == zsize), so this is a
  *   plain copy — correct for every blob we generate. (A compressed blob
@@ -33,69 +33,38 @@ extern void *malloc(size_t);
 extern void *realloc(void *, size_t);
 extern void free(void *);
 extern void *memcpy(void *, const void *, size_t);
+extern void *memset(void *, int, size_t);
 extern size_t strlen(const char *);
-
-/* FILE64 layout mirror (must match src/libc/stdio64.asm struc). */
-typedef struct {
-    int flags;
-    int fd;
-    char *buf;
-    size_t cap;
-    size_t len;
-    size_t pos;
-    long pb;
-} file64_t;
-extern int vfprintf(file64_t *, const char *, va_list);
+extern int vsnprintf(char *, size_t, const char *, va_list);
 
 /* --- nasm alloc (nasmlib/alloc.c, kept) --- */
 extern void *nasm_malloc(size_t);
 extern void nasm_free(void *);
 extern size_t _nasm_last_string_size;
 
-/* nasm_vaxprintf/nasm_asprintf (upstream contract, minus vsnprintf). */
+/* nasm_vaxprintf/nasm_asprintf (upstream contract via vsnprintf). */
 void *nasm_vaxprintf(size_t extra, const char *fmt, va_list ap)
 {
-    file64_t f;
-    char *img;
+    char *strp;
+    va_list xap;
+    size_t bytes;
     int len;
 
-    img = nasm_malloc(extra + 128);
-    if (!img)
+    va_copy(xap, ap);
+    len = vsnprintf(NULL, 0, fmt, xap);
+    va_end(xap);
+    if (len < 0)
         return NULL;
-    f.flags = 1 | 2;            /* F_INUSE | F_WRITE (cf. stdio64.asm) */
-    f.fd = -1;
-    f.buf = img + extra;
-    f.cap = 128;
-    f.len = 0;
-    f.pos = 0;
-    f.pb = -1;
-    len = vfprintf(&f, fmt, ap);
-    if (len < 0) {
-        nasm_free(img);
+    bytes = (size_t)len + 1;
+    _nasm_last_string_size = bytes;
+
+    strp = nasm_malloc(extra + bytes);
+    if (!strp)
         return NULL;
-    }
-    /* NUL-terminate inside the image (grow once if exactly full). */
-    if (f.pos >= f.cap) {
-        char *bigger = nasm_malloc(extra + f.cap + 1);
-        if (!bigger) {
-            nasm_free(img);
-            return NULL;
-        }
-        memcpy(bigger, img, extra + f.cap);
-        nasm_free(img);
-        img = bigger;
-        f.buf = img + extra;
-        f.cap = f.cap + 1;
-    }
-    f.buf[f.pos] = '\0';
-    _nasm_last_string_size = (size_t)len + 1;
-    if (extra) {
-        /* Zero the user prefix like upstream (memset(strp, 0, extra)). */
-        for (size_t i = 0; i < extra; i++)
-            img[i] = 0;
-        return img;
-    }
-    return f.buf;
+    memset(strp, 0, extra);
+    vsnprintf(strp + extra, bytes, fmt, ap);
+    strp[extra + bytes - 1] = '\0';
+    return strp;
 }
 
 char *nasm_vasprintf(const char *fmt, va_list ap)

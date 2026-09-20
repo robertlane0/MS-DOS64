@@ -26,10 +26,10 @@ NASM_TRIM_CUTS := outmacho outcoff outobj outas86 outieee outaout dwarf codeview
 # nasmlib/realpath.c + nasmlib/rlimit.c DROPPED (replaced by
 # dos64-nasm-shim.c: nasm_realpath/nasm_get_stack_size_limit),
 # asm/uncompress.c DROPPED (stdmac decompressed host-side instead),
-# nasmlib/asprintf.c DROPPED (its vsnprintf sizing loop has no DOS64
-# counterpart; nasm_vasprintf/nasm_asprintf reimplemented in
-# dos64-nasm-shim.c over vfprintf), stdlib/vsnprintf.c DROPPED
-# (HAVE_VSNPRINTF is defined; no vsnprintf symbol is needed anywhere),
+# nasmlib/asprintf.c DROPPED (reimplemented verbatim in
+# dos64-nasm-shim.c over stdio64 vsnprintf, tracking
+# _nasm_last_string_size like upstream), stdlib/vsnprintf.c DROPPED
+# (HAVE_VSNPRINTF is defined; the symbol comes from stdio64 instead),
 # nasm/zlib/ DROPPED whole.
 NASM_DOS64_DROP := nasmlib/realpath.c nasmlib/rlimit.c asm/uncompress.c nasmlib/asprintf.c stdlib/vsnprintf.c
 # DOS64 cross-compile flags (N4A.2d): freestanding x86-64, PIE codegen for
