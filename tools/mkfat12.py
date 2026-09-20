@@ -1,12 +1,21 @@
 #!/usr/bin/env python3
-"""Stamp a real FAT12 volume into dos64.img at the canonical VOL_LBA.
+"""Stamp a real FAT12 volume into a dos64 image at the canonical VOL_LBA.
 
-Layout (1.44M geometry, 2880 sectors):
+Layout (default 1.44M geometry, 2880 sectors, 1 sector/cluster):
   LBA+0        : boot sector with BPB + AA55 (data only; never executed)
   LBA+1..9     : FAT #1 (9 sectors)
   LBA+10..18   : FAT #2 (mirror)
   LBA+19..32   : root dir (14 sectors, 224 entries)
   LBA+33..     : data clusters 2..2848 (1 sector each)
+
+Bigger volumes (PLAN.md N4A.3, `dos64-tools.img`): `--sec-per-clus` grows
+the cluster size (sectors/cluster, power-of-2) so a larger `--vol-totsec`
+still fits FAT12's ~4084-cluster ceiling. FAT size (sectors/FAT) is
+computed from cluster count, not hardcoded, so the default 1-sector-
+cluster/2880-sector geometry above still yields the historical 9-sector
+FAT byte-for-byte; only bigger/differently-shaped volumes see a
+different FATSZ. Root dir stays 14 sectors/224 entries in every case
+(more than enough for any corpus shipped so far).
 
 Idempotent: rebuilds the region from scratch on every run so repeated
 `make` boots stay deterministic. Files with fixed content:
@@ -17,9 +26,11 @@ Idempotent: rebuilds the region from scratch on every run so repeated
 
 Client files (N1 cross-assembled samples): `--extra-file NAME=HOSTPATH`
 appends one 8.3 file per flag (e.g. `HELLO.COM=build/nasm-samples/HELLO.COM`).
-Used by `make nasm-samples` for the dos64-nasm.img variant; the default
-`make` image carries only the four fixed files. Extra files must fit the
-remaining clusters and must not collide with fixed or reserved test names.
+Used by `make nasm-samples` for the dos64-nasm.img variant and by
+`make dos64-tools.img` (N4A.3) for the bigger NASM64.COM volume; the
+default `make` image carries only the four fixed files. Extra files must
+fit the remaining clusters and must not collide with fixed or reserved
+test names.
 
 Single source of truth: the Makefile disk-layout block is canonical. It
 generates build/include/layout.inc for the bootloader/kernel and passes
@@ -41,9 +52,11 @@ import re
 import struct
 import sys
 
-FATSZ = 9
 ROOTSEC = 14
 NROOT = 224
+# FAT12 requires CountOfClusters < 4085 (else the volume is FAT16+ by the
+# Microsoft FAT spec); leave a little headroom under the true ceiling.
+FAT12_MAX_CLUSTERS = 4084
 
 HELLO = (b"Hello from MS-DOS64 FAT12 volume!\r\n"
          b"This file lives on the real disk image at LBA 512+.\r\n"
@@ -105,6 +118,11 @@ def parse_args(argv=None):
                    help="kernel start LBA, for overlap check (or DOS64_KERNEL_LBA)")
     p.add_argument("--kernel-sectors", type=_int, default=None,
                     help="kernel extent in sectors, for overlap check (or DOS64_KERNEL_SECTORS)")
+    p.add_argument("--sec-per-clus", dest="sec_per_clus", type=_int, default=1,
+                    help="sectors per cluster, power of 2 (default 1, the "
+                         "1.44M-floppy geometry). Bigger volumes (N4A.3 "
+                         "dos64-tools.img) need >1 to stay under FAT12's "
+                         "~4084-cluster ceiling; FAT size is computed to fit.")
     p.add_argument("--extra-file", dest="extra_files", action="append",
                     default=[],
                     metavar="NAME=HOSTPATH",
@@ -157,6 +175,34 @@ def chain_for(nclusters, start):
     return list(range(start, start + nclusters))
 
 
+def calc_fatsz(totsec, secsiz, sec_per_clus, rootsec):
+    """Compute FAT size in sectors for a FAT12 volume, iteratively (the
+    classic circular FAT-sizing formula: FAT size depends on cluster
+    count, cluster count depends on data-area size, data-area size
+    depends on FAT size). Converges in a couple of iterations since FATSZ
+    is tiny relative to TOTSEC. Mirrors real FAT12 formatters; for the
+    canonical 2880-sector/1-sector-cluster geometry this reproduces the
+    historical FATSZ=9 exactly (verified by check-layout / test-82
+    invariants elsewhere), so the default image is unaffected byte-for-
+    byte. Returns (fatsz_sectors, data_clusters).
+    """
+    fatsz = 1
+    for _ in range(32):
+        data_sectors = totsec - 1 - 2 * fatsz - rootsec
+        if data_sectors <= 0:
+            sys.exit(f"mkfat12: volume too small: {totsec} sectors leaves no "
+                      f"room for data after 1 boot + 2x{fatsz} FAT + "
+                      f"{rootsec} root")
+        clusters = data_sectors // sec_per_clus
+        # Each FAT12 entry is 12 bits; N entries need ceil(N*3/2) bytes.
+        fat_bytes_needed = ((clusters + 2) * 3 + 1) // 2
+        needed = (fat_bytes_needed + secsiz - 1) // secsiz
+        if needed == fatsz:
+            return fatsz, clusters
+        fatsz = needed
+    sys.exit("mkfat12: FAT size calculation did not converge")
+
+
 def main(img_path=None, argv=None):
     """Entry point. CLI: main() parses sys.argv. Programmatic legacy
     style main("path/to.img") still works (layout via DOS64_* env)."""
@@ -178,10 +224,14 @@ def main(img_path=None, argv=None):
     KERNEL_LBA = _resolve(args.kernel_lba, "DOS64_KERNEL_LBA", "--kernel-lba")
     KERNEL_SECTORS = _resolve(args.kernel_sectors, "DOS64_KERNEL_SECTORS",
                               "--kernel-sectors")
+    SECPERCLUS = args.sec_per_clus
 
     if SECSIZ != 512:
         sys.exit(f"mkfat12: unsupported sector size {SECSIZ}: "
                  f"FAT12 geometry assumes 512 (canonical Makefile value)")
+    if SECPERCLUS <= 0 or (SECPERCLUS & (SECPERCLUS - 1)) != 0:
+        sys.exit(f"mkfat12: --sec-per-clus {SECPERCLUS} must be a positive "
+                 f"power of 2")
     if VOL_LBA < 0 or TOTSEC <= 0:
         sys.exit(f"mkfat12: bad volume extent LBA {VOL_LBA}+{TOTSEC}")
     if KERNEL_LBA < 0 or KERNEL_SECTORS <= 0:
@@ -191,6 +241,13 @@ def main(img_path=None, argv=None):
     if KERNEL_LBA < v_end and VOL_LBA < k_end:
         sys.exit(f"mkfat12: layout overlap: kernel [{KERNEL_LBA},{k_end}) "
                  f"vs volume [{VOL_LBA},{v_end})")
+
+    FATSZ, maxclus = calc_fatsz(TOTSEC, SECSIZ, SECPERCLUS, ROOTSEC)
+    if maxclus >= FAT12_MAX_CLUSTERS:
+        sys.exit(f"mkfat12: {maxclus} clusters exceeds the FAT12 ceiling "
+                 f"({FAT12_MAX_CLUSTERS}): raise --sec-per-clus or shrink "
+                 f"--vol-totsec")
+    CLUSSIZ = SECSIZ * SECPERCLUS
 
     files = [
         ("HELLO   TXT", 0x20, HELLO),
@@ -205,14 +262,13 @@ def main(img_path=None, argv=None):
             sys.exit(f"mkfat12: duplicate --extra-file {dir11!r}")
         seen.add(dir11)
         files.append((dir11, 0x20, data))
-    # Assign clusters sequentially from 2.
+    # Assign clusters sequentially from 2 (cluster size = SECPERCLUS sectors).
     clus = 2
     layout = []
     for name, attr, data in files:
-        n = (len(data) + SECSIZ - 1) // SECSIZ
+        n = (len(data) + CLUSSIZ - 1) // CLUSSIZ
         layout.append((name, attr, data, chain_for(n, clus)))
         clus += n
-    maxclus = (TOTSEC - (1 + 2 * FATSZ + ROOTSEC)) + 1
     if clus - 2 > maxclus:
         sys.exit(f"mkfat12: volume full: {len(files)} files need {clus - 2} "
                  f"clusters, have {maxclus}")
@@ -227,7 +283,7 @@ def main(img_path=None, argv=None):
     bs[0:3] = b"\xeb\x3c\x90"
     bs[3:11] = b"MSDOS64 "
     struct.pack_into("<H", bs, 11, SECSIZ)
-    bs[13] = 1
+    bs[13] = SECPERCLUS
     struct.pack_into("<H", bs, 14, 1)
     bs[16] = 2
     struct.pack_into("<H", bs, 17, NROOT)
@@ -275,13 +331,14 @@ def main(img_path=None, argv=None):
         root_off_i = root_off + i * 32
         vol[root_off_i:root_off_i + 32] = e
 
-    # Data area: cluster c -> volume-relative sector 19+14+(c-2) = 31+c.
+    # Data area: cluster c -> volume-relative sector data_base+(c-2)*SECPERCLUS,
+    # each cluster spanning CLUSSIZ = SECSIZ*SECPERCLUS bytes.
     data_base = 1 + 2 * FATSZ + ROOTSEC
     for name, attr, data, chain in layout:
         for i, c in enumerate(chain):
-            chunk = data[i * SECSIZ:(i + 1) * SECSIZ]
-            sec = data_base + (c - 2)
-            vol[sec * SECSIZ:sec * SECSIZ + len(chunk)] = chunk
+            chunk = data[i * CLUSSIZ:(i + 1) * CLUSSIZ]
+            off = (data_base + (c - 2) * SECPERCLUS) * SECSIZ
+            vol[off:off + len(chunk)] = chunk
 
     need = (VOL_LBA + TOTSEC) * SECSIZ
     try:

@@ -386,9 +386,16 @@ pmode:
     test edx, 1 << 29
     jz no_long_mode_32
 
-    ; ----- Enable PAE -----
+    ; ----- Enable PAE + SSE (OSFXSR/OSXMMEXCPT) -----
+    ; Without CR4.OSFXSR (bit 9), any SSE instruction (MOVAPS/MOVUPS/etc,
+    ; which gcc emits by default for x86-64 even in code with no explicit
+    ; floating point, e.g. struct init/copy) raises #UD. Small hand-built
+    ; userland programs (CHELLO.COM, ASM64.COM) never happened to trigger
+    ; this; NASM64.COM (PLAN.md N4A.3/N4A.4), being real cross-compiled C,
+    ; does. OSXMMEXCPT (bit 10) additionally routes SIMD FP exceptions to
+    ; #XM (19) instead of raising #UD too, so both bits go together.
     mov eax, cr4
-    or eax, 1 << 5
+    or eax, (1 << 5) | (1 << 9) | (1 << 10)
     mov cr4, eax
 
     ; ----- Build page tables at 0x1000 -----

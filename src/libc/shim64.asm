@@ -63,6 +63,9 @@ global _fileno
 global __isoc23_strtol
 global __isoc23_strtoul
 global __isoc23_sscanf
+global __isoc99_strtol
+global __isoc99_strtoul
+global __isoc99_sscanf
 global crt_envp                  ; envp block (owned here so the kernel link
                                  ; has it; crt0 fills it via extern)
 
@@ -1593,10 +1596,22 @@ _fileno:
     mov eax, -1
     ret
 
-; __isoc23_* aliases (glibc ≥2.38 C23 versioned entry points).
+; __isoc23_* aliases (glibc >=2.38 C23 versioned entry points, gcc >=16
+; default -std=gnu23) and __isoc99_* aliases (glibc's older/traditional
+; ISO C99 versioned entry points for the scanf family + strtol/strtoul,
+; the default redirect target for gcc <16 / -std=gnu17 and earlier —
+; both are compiled here since the host toolchain doing the cross-build
+; may be either vintage; only the pair the actual host glibc headers
+; pick gets referenced, the other sits unused).
 __isoc23_strtol:
     jmp strtol
 __isoc23_strtoul:
     jmp strtoul
 __isoc23_sscanf:
+    jmp sscanf
+__isoc99_strtol:
+    jmp strtol
+__isoc99_strtoul:
+    jmp strtoul
+__isoc99_sscanf:
     jmp sscanf

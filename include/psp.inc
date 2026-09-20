@@ -1,6 +1,15 @@
 ; 64-bit PSP (Program Segment Prefix) — expands MSDOS.ASM PSP concept (MSDOS.ASM:3374)
 ; Original PSP was 256 bytes at program segment base, 16-bit segment pointers.
-; 64-bit PSP is 664 bytes (PSP64_size 0x298), flat 64-bit linear addresses, preserves DOS 1.25 compatibility fields.
+; 64-bit PSP is 672 bytes (PSP64_size 0x2A0), flat 64-bit linear addresses, preserves DOS 1.25 compatibility fields.
+; 672 (not the tighter-packed 664) is deliberate (PLAN.md N4A.3/N4A.4
+; finding): proc_load_image64 loads .COM images at PSP+PSP_SIZE, and PSP
+; is always 16-byte aligned (heap allocator invariant), so PSP+PSP_SIZE
+; is only guaranteed 16-aligned in turn if PSP_SIZE itself is a multiple
+; of 16 (664 is not; 672 is: 42*16). gcc-compiled C (unlike the
+; hand-written N1/N4B asm samples) freely emits SSE instructions (e.g.
+; MOVAPS for struct init/copy) needing a 16-byte-aligned memory operand
+; for constants/statics; NASM64.COM faulted #UD on exactly this before
+; the padding below was widened from 64 to 72 bytes.
 ; See docs/03-memory-layout.md and AGENTS.md Phase 8.
 
 %ifndef PSP64_INC
@@ -51,13 +60,15 @@ struc PSP64
                           ; slots 0-2 hold 0/1/2 (console identity), slots
                           ; 3-15 hold 1-based global-desc indexes, FREE is -1
                           ; (0xFFFF...). NEVER assume 0 means free here.
-    .pad2       resb 64   ; +0x258..0x298: reserved to reach 664 (PSP64_size 0x298)
+    .pad2       resb 72   ; +0x258..0x2A0: reserved to reach 672 (PSP64_size 0x2A0;
+                          ; was 64/664/0x298 — widened by 8 bytes so PSP_SIZE is a
+                          ; multiple of 16, see file header comment)
 endstruc
 %define PSPSIZ64 PSP64_size
 
-; Compile-time check: must be 664 bytes (0x298)
-; %if PSPSIZ64 != 664
-; %error "PSP64 size must be 664"
+; Compile-time check: must be 672 bytes (0x2A0)
+; %if PSPSIZ64 != 672
+; %error "PSP64 size must be 672"
 ; %endif
 
 %endif

@@ -306,7 +306,29 @@ malloc:
     mov rdx, [rsp]              ; requested size
     mov [rcx - HEAP_HDRSZ + 8], rdx
     mov [rcx - HEAP_HDRSZ + 16], rax   ; true base for 49h
-    mov rax, rcx
+    ; Zero the payload. Many ported C codebases (NASM's included) have a
+    ; latent "malloc returns zeroed memory" assumption — technically UB,
+    ; but it silently "works" on Linux because fresh mmap pages are
+    ; kernel-zeroed. DOS64's AH=48h allocator hands out raw, recycled
+    ; MCB bytes (real MS-DOS semantics: uninitialized, like glibc's
+    ; malloc really promises), so a freshly malloc'd block can contain
+    ; stale bytes from whatever occupied that memory before (e.g. a
+    ; just-freed EXEC staging buffer full of another program's machine
+    ; code) and a latent "assumes zero" field read turns into a wild
+    ; pointer instead of NULL/0 (PLAN.md N4A.4 finding: this is exactly
+    ; what broke NASM64.COM's first fputs() — a garbage RDI faulting
+    ; #GP on the first character read).
+    push rcx                    ; payload ptr (becomes the return value)
+    push rdi
+    push rsi
+    mov rdi, rcx                ; dest = payload
+    mov rcx, rdx                ; count = requested size (rdx still live)
+    xor eax, eax
+    cld
+    rep stosb
+    pop rsi
+    pop rdi
+    pop rax                     ; payload ptr -> return value
     add rsp, 8
     ret
 .m_null:

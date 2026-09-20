@@ -5,7 +5,7 @@
 ; Original: 256B PSP at segment DX, INT 20h CD20, top_seg para, CALL5 EAh far ptr,
 ;           INT22/23/24 vectors, FCB1@5Ch/FCB2@6Ch, cmd tail@80h, SETBASE via INT21.
 ;           COM loads at PSP+0x100, EXE with MZ header reloc, SS:SP=BX:CX.
-; 64-bit:   PSP64 664B (PSP64_size, include/psp.inc), flat linear, INT20 kept
+; 64-bit:   PSP64 672B (PSP64_size, include/psp.inc), flat linear, INT20 kept
 ;           as debug bytes, top_mem dq linear, call5_ptr dq, exit/cont/error
 ;           RIP dq, FCB 32B each, cmd tail 127B @0xA0, env_ptr dq, CR3/RSP/
 ;           RFLAGS, R8-R15 save, fd_table16.
@@ -68,10 +68,60 @@ extern mem_validate64
 %define PROC_ZOMBIE 2
 
 %define PSP_SIZE PSP64_size
-%define PROC_STACK_SIZE 2048
+%define PROC_STACK_SIZE 262144    ; 256 KiB (was 2048; PLAN.md N4A.3/N4A.4
+                                  ; finding: real ported C (NASM) overflows
+                                  ; a 2 KiB stack silently — this OS reuses
+                                  ; the current stack for exception frames
+                                  ; (no TSS.IST stack switch), so an
+                                  ; overflowed child stack corrupts its own
+                                  ; exception-handling state too, producing
+                                  ; seemingly-random faults with garbage
+                                  ; diagnostic captures. The hand-written
+                                  ; N1/N4B asm samples never approached
+                                  ; 2 KiB of stack use, so this never
+                                  ; surfaced before. 256 KiB leaves ample
+                                  ; headroom under the 6 MiB heap ceiling
+                                  ; even alongside a multi-MB EXEC staging
+                                  ; buffer for the same spawn.
 %define PROC_ENV_SIZE 1024
 %define EXE64_MAGIC 0x34365A4D   ; 'MZ64' LE: 4D 5A 36 34
-%define EXE64_HDR_SIZE 32
+; EXE64 header, 48 bytes (widened from 32 2026-09-16, PLAN.md item 11
+; N4A.3/N4A.4 record — see docs/25-n4a1-trim.md §7 for the full design
+; rationale). Layout:
+;   +0  (4B) magic       'MZ64' (EXE64_MAGIC)
+;   +4  (4B) hdr_size    EXE64_HDR_SIZE (48)
+;   +8  (8B) image_size  bytes to copy from src+hdr_size to dest (code+
+;                        data payload; excludes .bss and the reloc
+;                        table below, both appended after in the file)
+;   +16 (4B) entry_off   dest-relative offset to the entry point
+;   +20 (4B) stack_size  requested stack size, 0..65536
+;   +24 (4B) reloc_count number of EXE64_RELOC entries (0 = none)
+;   +28 (4B) reloc_off   file offset (from src, i.e. hdr-relative) to
+;                        the first EXE64_RELOC entry; only meaningful
+;                        if reloc_count > 0
+;   +32 (8B) mem_size    total memory footprint from dest (>= image_
+;                        size; the extra covers .bss — a plain COM
+;                        image's allocation used to size itself on
+;                        FILE size alone, silently under-allocating by
+;                        however much .bss needed beyond it, letting
+;                        crt0's bss-zeroing loop write past the
+;                        allocated block into whatever heap content
+;                        came next; EXE64 closes that gap by making the
+;                        loader allocate and zero the true footprint)
+;   +40 (8B) reserved    zero
+; Each EXE64_RELOC entry is 16 bytes: dest-relative offset (8B) + base-
+; 0-linked addend (8B). At load time the loader writes QWORD
+; (dest + addend) to (dest + offset) for every entry — the standard
+; R_X86_64_RELATIVE fixup, applied once, by hand, since this loader has
+; no ELF/dynamic-linker machinery. This is what makes a real (non-hand-
+; written-asm) C program's static data pointers-to-statics (e.g. a
+; dispatch table like `static T *table[] = {&foo, ...}`) correct at the
+; nonzero, allocation-dependent load address every DOS64 process gets —
+; plain RIP-relative code addressing (what makes the rest of a "slide-
+; safe" COM image position-independent) does NOT cover this case, since
+; the pointer VALUE itself, once computed, is stored as inert data and
+; never re-adjusts itself for wherever it ends up loaded.
+%define EXE64_HDR_SIZE 48
 %define MEM_END_ADDR 0x800000
 
 section .bss
@@ -1141,6 +1191,8 @@ proc_verify_image64:
     push rbx
     push rcx
     push rsi
+    push r8
+    push r9
     test rsi, rsi
     jz .bad_v
     test rdx, rdx
@@ -1152,14 +1204,14 @@ proc_verify_image64:
     mov eax, [rsi]      ; magic
     cmp eax, EXE64_MAGIC
     jne .is_com
-    ; check hdr_size ==32
+    ; check hdr_size == EXE64_HDR_SIZE (48)
     mov eax, [rsi+4]
     cmp eax, EXE64_HDR_SIZE
     jne .bad_v
     ; image_size qword at +8
     mov rax, [rsi+8]
     cmp rax, rdx
-    ja .bad_v           ; image larger than file? Actually file = hdr+image, so image <= size-32
+    ja .bad_v           ; image larger than file? Actually file = hdr+image, so image <= size-48
     mov rbx, rdx
     sub rbx, EXE64_HDR_SIZE
     cmp rax, rbx
@@ -1168,27 +1220,61 @@ proc_verify_image64:
     jz .bad_v
     cmp rax, 8*1024*1024
     ja .bad_v
+    mov r8, rax          ; r8 = image_size (kept for reloc/mem_size checks below)
     ; entry_offset dword at +16
     mov ecx, [rsi+16]
-    cmp rcx, rax
+    cmp rcx, r8
     jae .bad_v          ; entry must be < image_size
     ; stack_size at +20 (0..64K)
     mov eax, [rsi+20]
     cmp eax, 65536
     ja .bad_v
+    ; reloc_count/reloc_off at +24/+28, mem_size at +32 (0 count = no
+    ; relocations, the common case for a plain non-PIE EXE64 image).
+    mov eax, [rsi+24]    ; reloc_count
+    test eax, eax
+    jz .no_reloc_v
+    mov r9, rax          ; r9 = reloc_count
+    mov eax, [rsi+28]    ; reloc_off (must equal hdr_size+image_size: reloc
+    mov rbx, r8          ; table always immediately follows the payload)
+    add rbx, EXE64_HDR_SIZE
+    cmp rax, rbx
+    jne .bad_v
+    ; total file size must cover header + image + reloc_count*16
+    mov rax, r9
+    shl rax, 4           ; *16 (each entry: 8B offset + 8B addend)
+    add rax, rbx         ; + hdr_size + image_size
+    cmp rax, rdx
+    ja .bad_v
+.no_reloc_v:
+    ; mem_size qword at +32: total memory footprint from dest, covers
+    ; .bss beyond the copied image (must be >= image_size, capped like
+    ; image_size above so a COM-style allocation can't be tricked into
+    ; an oversized request).
+    mov rax, [rsi+32]
+    cmp rax, r8
+    jb .bad_v
+    cmp rax, 8*1024*1024
+    ja .bad_v
     mov rax, 1          ; EXE64
+    pop r9
+    pop r8
     pop rsi
     pop rcx
     pop rbx
     ret
 .is_com:
     xor eax, eax
+    pop r9
+    pop r8
     pop rsi
     pop rcx
     pop rbx
     ret
 .bad_v:
     mov rax, 2
+    pop r9
+    pop r8
     pop rsi
     pop rcx
     pop rbx
@@ -1209,6 +1295,8 @@ proc_load_image64:
     push r8
     push r9
     push r10
+    push r11
+    push r12
     test rdi, rdi
     jz .fail_l
     test rsi, rsi
@@ -1220,12 +1308,14 @@ proc_load_image64:
     cmp rax, 2
     je .fail_l
     mov r8, rax          ; type 0 COM,1 EXE
-    ; reload src/size after call? RSI,RDX preserved? proc_verify pushes rsi, so RSI preserved. RDX? It doesn't push RDX, but doesn't modify RDX? It uses RDX for cmp, but doesn't change? It does cmp, no mov to RDX, so preserved. Good. RDI preserved (push rdi in outer, verify doesn't touch RDI). Good.
-    ; Retrieve orig values from stack: pushes rbx,rcx,rdx,rsi,rdi,r8,r9,r10 (8 pushes). RSP->r10. Orig RDI at [rsp+?]: r10(0),r9(8),r8(16),rdi(24),rsi(32),rdx(40),rcx(48),rbx(56). So orig psp=[rsp+24], src=[rsp+32], size=[rsp+40].
-    mov r9, [rsp + 24]   ; psp
-    mov r10, [rsp + 32]  ; src
-    ; size in RDX? Use stack size
-    mov rcx, [rsp + 40]  ; size
+    ; reload src/size after call (2 more pushes than before: r11,r12).
+    ; pushes: rbx,rcx,rdx,rsi,rdi,r8,r9,r10,r11,r12 (10). RSP->r12.
+    ; Offsets: r12(0),r11(8),r10(16),r9(24),r8(32),rdi(40),rsi(48),
+    ; rdx(56),rcx(64),rbx(72). So orig psp=[rsp+40], src=[rsp+48],
+    ; size=[rsp+56].
+    mov r9, [rsp + 40]   ; psp
+    mov r10, [rsp + 48]  ; src
+    mov rcx, [rsp + 56]  ; size
     cmp r8, 1
     je .exe_load
     ; COM: payload = entire file, dest = psp+PSP_SIZE, entry = dest
@@ -1245,26 +1335,72 @@ proc_load_image64:
     add rax, PSP_SIZE
     jmp .ok_l
 .exe_load:
-    ; EXE64: payload after 32B header, image_size at src+8, entry_off at src+16
+    ; EXE64: payload after EXE64_HDR_SIZE(48)B header. image_size at
+    ; src+8, entry_off at src+16, reloc_count/reloc_off at src+24/+28,
+    ; mem_size at src+32 (see the field-layout comment above
+    ; EXE64_HDR_SIZE's %define for the full design rationale).
     mov rax, [r10 + 8]   ; image_size
     mov rbx, rax         ; save image_size
-    mov ecx, [r10 + 16]  ; entry_off (32-bit)
     ; dest = psp+PSP_SIZE
     mov rsi, r9
-    add rsi, PSP_SIZE     ; dest base
-    mov rdi, rsi
-    add rdi, rbx          ; dest+image_size
+    add rsi, PSP_SIZE     ; dest base -> r11 (keep rsi free for movsb)
+    mov r11, rsi
+    ; bounds check against mem_size (>= image_size, covers .bss), not
+    ; just image_size: an under-sized allocation here would let the
+    ; zero-fill below (or crt0's own BSS zeroing) write past the
+    ; process's allocated block into whatever heap content comes next.
+    mov rax, [r10 + 32]  ; mem_size
+    mov r12, rax
+    mov rdi, r11
+    add rdi, r12          ; dest+mem_size
     cmp rdi, MEM_END_ADDR
     jae .fail_l
-    ; copy image_size bytes from src+32 to dest
-    mov rdi, rsi          ; dest
-    lea rsi, [r10 + 32]   ; src payload
-    mov rcx, rbx          ; count
+    ; copy image_size bytes from src+EXE64_HDR_SIZE to dest
+    mov rdi, r11          ; dest
+    lea rsi, [r10 + EXE64_HDR_SIZE]  ; src payload
+    mov rcx, rbx          ; count = image_size
     cld
     rep movsb
-    ; entry = psp+PSP_SIZE+entry_off
-    mov rax, r9
-    add rax, PSP_SIZE
+    ; zero [dest+image_size, dest+mem_size) — the .bss the file itself
+    ; carries no bytes for (objcopy -O binary never emits NOBITS
+    ; content). crt0 also zeroes its own [_bss_start,_bss_end) once it
+    ; starts running; doing it here too is redundant-but-harmless and
+    ; guarantees the memory is actually part of THIS process's
+    ; allocation before anything touches it.
+    mov rdi, r11
+    add rdi, rbx          ; dest+image_size
+    mov rcx, r12
+    sub rcx, rbx          ; mem_size-image_size = bss bytes to zero
+    jz .exe_no_bss
+    xor eax, eax
+    cld
+    rep stosb
+.exe_no_bss:
+    ; apply relocations, if any: reloc_count at src+24, table at
+    ; src+EXE64_HDR_SIZE+image_size, each entry 16B (8B dest-relative
+    ; offset + 8B base-0-linked addend) -> write QWORD (dest+addend) to
+    ; (dest+offset). See the EXE64_HDR_SIZE comment for why this exists
+    ; (static data initialized to the address of another static, e.g. a
+    ; gcc-emitted dispatch table, is NOT made correct by RIP-relative
+    ; CODE addressing alone at a nonzero load address).
+    mov eax, [r10 + 24]  ; reloc_count
+    test eax, eax
+    jz .exe_no_reloc
+    mov r9, rax                      ; r9 = remaining reloc count (reusing r9; psp no longer needed below)
+    lea r8, [r10 + EXE64_HDR_SIZE]
+    add r8, rbx                      ; r8 = reloc table base (src+hdr+image_size)
+.reloc_loop:
+    mov rax, [r8 + 8]     ; addend
+    add rax, r11          ; dest + addend
+    mov rcx, [r8]         ; dest-relative offset
+    add rcx, r11          ; dest + offset (target address)
+    mov [rcx], rax
+    add r8, 16
+    dec r9
+    jnz .reloc_loop
+.exe_no_reloc:
+    ; entry = psp+PSP_SIZE+entry_off = dest+entry_off
+    mov rax, r11
     mov ecx, [r10 + 16]
     add rax, rcx
     jmp .ok_l
@@ -1273,9 +1409,11 @@ proc_load_image64:
     stc
     jmp .done_l
 .ok_l:
-    ; RAX=entry, preserve? pops will preserve RAX? POP does not touch RAX except restoring? Our pushes include rbx..r10, pops restore them but RAX is return, not pushed, so preserved. Good. Clear CF.
+    ; RAX=entry, preserve? pops will preserve RAX? POP does not touch RAX except restoring? Our pushes include rbx..r12, pops restore them but RAX is return, not pushed, so preserved. Good. Clear CF.
     clc
 .done_l:
+    pop r12
+    pop r11
     pop r10
     pop r9
     pop r8
@@ -1319,12 +1457,16 @@ proc_spawn64:
     cmp rax, 2
     je .fail_spawn_verify
     mov r14, rax         ; type
-    ; payload size: COM=size, EXE=image_size
+    ; payload size for allocation: COM=file size, EXE64=mem_size (NOT
+    ; image_size — mem_size covers .bss too, see the EXE64_HDR_SIZE
+    ; field-layout comment; using image_size here would silently
+    ; under-allocate by however much .bss needs beyond the copied
+    ; image, the bug this field exists to close).
     mov rdx, [rsp + 72]  ; size
     cmp r14, 1
     jne .have_payload
     mov rsi, [rsp + 64]  ; src
-    mov rax, [rsi + 8]   ; image_size
+    mov rax, [rsi + 32]  ; mem_size
     mov r15, rax
     jmp .got_payload
 .have_payload:

@@ -2990,18 +2990,28 @@ fs_vol_read_file64:
 .copy_loop:
     cmp r11, r9
     jae .ok_done
-    ; read cluster r10 -> iobuf (spc==1, one sector)
+    ; read cluster r10 -> iobuf (secPerClus sectors -> secPerClus*secsiz
+    ; bytes; fs_file_read_cluster64 already reads the whole cluster
+    ; generically via DPB64.clusmsk, so the copy-out below must match
+    ; that width instead of assuming secPerClus==1/512B, or volumes with
+    ; bigger clusters (PLAN.md N4A.3 dos64-tools.img) silently drop the
+    ; unread tail of every cluster and run out of chain before the
+    ; requested size is satisfied.)
     lea rdi, [rel fs_vol_iobuf]
     mov rbx, r10
     call fs_file_read_cluster64
     test rax, rax
     jnz .fail_rf
-    ; chunk = min(512, remaining)
+    ; chunk = min(cluster size in bytes, remaining)
+    movzx eax, byte [rbp + DPB64.clusmsk]
+    inc eax
+    imul eax, [rbp + DPB64.secsiz]
+    mov r8, rax           ; r8 = cluster size in bytes
     mov rax, r9
     sub rax, r11
-    cmp rax, 512
+    cmp rax, r8
     jbe .have_chunk
-    mov rax, 512
+    mov rax, r8
 .have_chunk:
     lea rsi, [rel fs_vol_iobuf]
     mov rdi, r12

@@ -82,7 +82,17 @@ endstruc
 ; Single source of truth: the Makefile disk-layout block generates
 ; build/include/layout.inc, which defines FS_VOL_LBA / FS_VOL_TOTSEC
 ; (aliases of VOL_LBA / VOL_SECTORS). Do not hardcode values here.
-%include "build/include/layout.inc"
+; LAYOUT_INC_PATH lets an alternate kernel build (e.g. the dos64-tools.img
+; variant's bigger FAT12 volume, PLAN.md N4A.3) point this same source
+; file at a second generated layout without touching the canonical
+; build/include/layout.inc or its single-source guard in the Makefile:
+; pass -D LAYOUT_INC_PATH="\"build/tools/include/layout.inc\"" to the
+; NASM_ELF invocation for that variant's objects only. Default (no -D)
+; is unchanged: build/include/layout.inc, exactly as before.
+%ifndef LAYOUT_INC_PATH
+%define LAYOUT_INC_PATH "build/include/layout.inc"
+%endif
+%include LAYOUT_INC_PATH
 
 ; --- Mounted-volume cache policy (fs_mount_volume64, fs_vol_validate64) ---
 ; The mount path caches the volume in fixed BSS buffers (see fs64.asm).

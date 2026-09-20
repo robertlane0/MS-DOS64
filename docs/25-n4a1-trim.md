@@ -198,3 +198,354 @@ corpus → N5 integration. The 2 KB child stack (`PROC_STACK_SIZE`,
 `stack_size` advisory 2048) is the top N4A.4 risk after delivery:
 NASM's preproc/eval recursion ran under an 8 MB Linux stack; measure
 heap/stack high-water on first execution.
+
+(Status update 2026-09-16 — see §7 below: N4A.3 done. N4A.4 attempted;
+not complete. The 2 KB stack risk flagged above was real and is now
+fixed, but running NASM64.COM for the first time surfaced eight other
+real bugs plus one deeper architectural gap that blocks completion.)
+
+## §7 — N4A.3 done, N4A.4 attempted (2026-09-16)
+
+### N4A.3: `dos64-tools.img`
+
+Second FAT12 volume, same `VOL_LBA` (512), bigger: `TOOLS_VOL_SECTORS
+= 12288` (6 MiB), `TOOLS_SEC_PER_CLUS = 4` (2 KiB clusters). Chosen so
+`FATSZ` stays exactly 9 sectors — identical to the canonical volume —
+so `FS_VOL_FAT_BYTES`/`FS_VOL_ROOT_BYTES` (the kernel's fixed BSS
+staging buffers, `include/fs.inc`) need no size change; `FS_VOL_IOBUF_
+BYTES` (32 KiB) already covers up to 64 sec/cluster. `tools/mkfat12.py`
+gained `--sec-per-clus` and now computes `FATSZ` iteratively (the
+classic circular FAT-sizing formula) instead of hardcoding 9 — verified
+byte-identical to the old hardcoded path on the default 2880-sector/
+1-sec-cluster geometry, so no existing image's bytes changed.
+
+The volume needs its own kernel build (different `VOL_SECTORS` baked
+into `layout.inc` at compile time), but `selftest64.asm` hardcodes the
+canonical volume's `2880`-sector geometry in several tests (e.g. test
+82's `cmp eax, 2880`) — those must not be compiled against a different
+`VOL_SECTORS`. Solution: a `SKIP_SELFTEST` variant (`TOOLS_BUILD`,
+mirroring `lean`) compiles that code out entirely, and a new
+`LAYOUT_INC_PATH` indirection in `include/fs.inc` (`%ifndef` guard
+around the `%include`, defaulting to the unchanged literal, overridable
+via `-D`) lets this variant see `build/tools-img/include/layout.inc`
+instead of the canonical `build/include/layout.inc`, without touching
+that file, `check-layout`, or its single-source-of-truth invariant.
+`mbr.bin`/`stage2.bin` are reused as-is (`stage2.asm` only ever reads
+`KERNEL_LBA`/`KERNEL_SECTORS`, never `VOL_LBA`/`VOL_SECTORS`).
+
+Verified: boots, mounts, `DIR` lists all shipped files with correct
+sizes, `NASM64.COM` byte-for-byte matches the source (checked by
+walking the on-disk FAT chain directly in Python, independent of the
+kernel). `make tools-img` / `make run-qemu-tools` do the above from a
+clean tree.
+
+### N4A.4: on-image byte-identity — attempted, not complete
+
+Nobody had actually *run* `NASM64.COM` before this session — N4A.1/
+N4A.2 verified build-time properties only (`readelf` checks, size,
+linking). Running it for real surfaced real bugs. Fixed, in order
+found, each verified against the full regression trio (smoke 89/89 +
+full 95/95) before moving to the next:
+
+1. **`chello.elf` Makefile recipe missing `shim64.o`.** `LIBC_USERLAND`
+   already listed it (added when `crt_envp` moved to `shim64.asm`), but
+   the literal `ld` command line in the recipe was never updated to
+   match — a stale-recipe bug, not a code bug.
+2. **Missing `-z noexecstack`.** Mixing gcc-compiled objects (carry
+   `.note.GNU-stack`) with NASM-assembled ones (don't) trips newer
+   binutils' "implies executable stack" warning, fatal under
+   `--fatal-warnings`. Passed explicitly on the `chello.elf` and
+   `nasm64.elf` links (the objectively correct policy for freestanding
+   binaries anyway).
+3. **Missing `__isoc99_*` shim aliases.** `shim64.asm` had `__isoc23_
+   {strtol,strtoul,sscanf}` (glibc ≥2.38/gcc ≥16 C23 redirect targets)
+   but not the older, still-common `__isoc99_*` targets a gcc-13/
+   glibc-2.39 host redirects `sscanf` to. Added both sets side by side.
+4. **`fs_vol_read_file64` hardcoded 512 B/cluster.** Its copy-out chunk
+   size was `min(512, remaining)` regardless of the volume's actual
+   cluster size — correct only when `SecPerClus == 1`. On
+   `dos64-tools.img` (4 sec/cluster) it silently dropped 3 of every 4
+   sectors per cluster and ran out of FAT chain before satisfying the
+   requested size, so EXEC of any multi-cluster file failed with "Bad
+   command or file name" (a generic `cmd_exec_external64` failure
+   message covering every `proc_spawn64` failure mode alike). This
+   function is used *only* to stage a program image for EXEC; the real,
+   general file-I/O engine used by actual DOS64 programs (`fs_fcb_
+   io64`, used by the handle-based read/write syscalls) already
+   computed cluster size correctly from `DPB64.clusmsk`/`.secsiz` — the
+   staging helper was a parallel, less-audited duplicate of that logic.
+   Fixed to match the same pattern.
+5. **CR4 never set `OSFXSR`/`OSXMMEXCPT` (bits 9/10).** Only `PAE` (bit
+   5) was ever set, in `stage2.asm`'s 32-bit-to-long-mode transition.
+   Per x86 architecture, any SSE instruction with `CR4.OSFXSR == 0`
+   raises `#UD`. gcc emits SSE instructions (e.g. `MOVAPS` for struct
+   init/copy) by default for x86-64 code *regardless of whether the
+   source does floating point* — CHELLO.COM/ASM64.COM's tiny code
+   bodies never happened to trigger this codegen pattern, NASM's did
+   immediately. Diagnosed by adding a QEMU monitor + `pmemsave`
+   memory-signature-search workflow (no debugger available initially):
+   `idt_fault_count` was in the tens of millions (a tight refault loop
+   — the generic exception handler, `exc_common` in `idt64.asm`,
+   records diagnostics and `iretq`s back to the *same* faulting `RIP`,
+   so any unhandled fault loops forever rather than terminating the
+   process). Fixes every future userland C program, not just NASM.
+6. **`PSP64_size` (664 B) wasn't a multiple of 16.** `.COM` images load
+   at `PSP + PSP_SIZE` (`proc_load_image64`), and `PSP` is always
+   16-byte aligned (the heap allocator's own invariant), so the load
+   address was only 8-byte aligned — breaking any SSE instruction with
+   a 16-byte-aligned memory operand (found via the same fault-address
+   → file-offset → disassembly workflow, landing on a `MOVAPS`).
+   Widened `PSP64` to 672 B (`include/psp.inc`, +8 B of `.pad2`). The
+   `664` constant was load-bearing in exactly two other places — both
+   updated to `672` and re-verified: `samples/echo.asm`'s
+   `PSP_SIZE equ 664` (used to recover `PSP` from `RIP` at runtime —
+   `nasm-trim-check`/`asm64-check` re-verified byte-identical after the
+   edit) and a **hand-assembled machine-code byte sequence** in
+   `selftest64.asm` test 86's synthetic child template (`sub rax,664`
+   as raw `db` bytes, `0x98,0x02,0x00,0x00` → `0xA0,0x02,0x00,0x00`).
+   Rejected fixing this from `userland.ld` instead (tried first): GNU
+   ld forces an output section's address to satisfy the *maximum*
+   `sh_addralign` of any input section merged into it, regardless of
+   the linker script's requested origin — NASM's `.text` objects
+   declare align-16 unconditionally (NASM's ELF64 default), so
+   `. = 0x8;` silently got rounded back up to `0x10` and fixed nothing;
+   `ALIGN()`/`SUBALIGN()` overrides on the output section didn't
+   override the *input* sections' own declared alignment either.
+   Fixing the true source of the misalignment (`PSP_SIZE`) sidesteps
+   this entirely.
+7. **`malloc()` didn't zero payload.** Ported C code (NASM's
+   `nasmlib/alloc.c` included) very commonly has a latent, technically-
+   UB "malloc returns zeroed memory" assumption that is silently true
+   on Linux (fresh `mmap` pages are kernel-zeroed) and false on DOS64's
+   real, uninitialized `AH=48h`-backed allocator. Diagnosed via GDB
+   (`qemu -s -S`, `target remote`): a `#GP` inside `fputs`
+   (`stdio64.asm`) reading a garbage `RDI`, traced back through
+   `libc64.asm`'s shared `printf`/`sprintf`/`snprintf` format-string
+   core (`sp_run`) to a `%s` conversion whose `va_next()`-fetched
+   argument was uninitialized heap content — plausibly leftover bytes
+   from a just-freed EXEC staging buffer holding another program's
+   machine code, reinterpreted as a pointer. Fixed by zeroing the
+   payload in `malloc` (`libc64.asm`); `calloc`/`realloc` already
+   correctly zero (or, for `realloc`, transitively benefit from the
+   fix).
+8. **`PROC_STACK_SIZE` was 2 KiB.** Exactly the risk this doc already
+   flagged above ("NASM's preproc/eval recursion ran under an 8 MB
+   Linux stack") — never load-tested until this session. Raised to
+   256 KiB (`proc64.asm`); comfortably under the 6 MiB heap ceiling
+   even alongside a multi-MB EXEC staging buffer for the same spawn.
+
+After all eight, `NASM64.COM` runs *far* further than ever before —
+past boot, load, string/heap operations, real computation — but still
+faults (`#GP`, a garbage `%s` argument reaching `snprintf`). Root-
+caused with GDB attached to QEMU's `-s -S` stub (installed this
+session; the monitor+`pmemsave` workflow above was the only option
+before that, and became impractical for this one — the fault is deep
+inside `main()`'s startup, need real breakpoints + register/stack
+inspection at the exact call site, not fault-loop signature-matching):
+
+**Ninth issue, not fixed — architectural, and the real N4A.4 blocker:**
+gcc-compiled static data that's *initialized to the address of another
+static* (`nasm.c`'s `drivers[]` output-format dispatch table, an array
+of `&of_bin`/`&of_ith`/`&of_srec`) is emitted as a plain compile-time
+constant once the final link resolves it — a completely different
+mechanism from the RIP-relative `lea reg, [rip+disp]` CODE addressing
+that makes the rest of a "slide-safe" binary correctly position-
+independent. `.rela.text`/`.rela.data.rel.ro` entries in the
+*intermediate* `.o` (`R_X86_64_PC32`, computed at RIP-relative CODE
+sites) get folded by `ld`'s final static link into fixed absolute
+*data* values assuming the load address is `0` — exactly what the
+existing N3.5 acceptance check (`readelf -r`: zero relocations, `.got`
+empty) was designed to confirm exists, but that check only proves no
+*dynamic* relocation processing is needed *at base 0*; it does not, and
+cannot, prove correctness at any other load address. DOS64 always
+loads `.COM` images at `PSP + PSP_SIZE`, a nonzero, heap-allocation-
+dependent address that changes from run to run — so any pointer-to-a-
+static baked into `.data`/`.rodata` this way is wrong the instant it's
+dereferenced.
+
+Confirmed live with GDB (`break *0x107360` at `proc_enter64`, reading
+`$rdi` = PSP to compute the run's actual load base, then a breakpoint
+at the exact `call snprintf` site found via the faulting return
+address): the global `ofmt` (set from `drivers[]` by `ofmt_find()`)
+held `0x223ce0` — the raw link-time file offset of `of_bin`, missing
+the run's `load_base` entirely — so `ofmt->shortname` (offset +8) read
+from address `0x223ce8`, unmapped/uninitialized memory between the
+kernel's end and the heap's start, not from `of_bin`'s real,
+correctly-relocatable-if-anyone-relocated-it location.
+`nasm.c`'s `snprintf(temp, 128, "__?OUTPUT_FORMAT?__=%s", ofmt_alias ?
+ofmt_alias->shortname : ofmt->shortname)` (in `define_macros()`,
+inlined into `main`) is the specific call that first hits this; the
+same class of bug likely lurks in NASM's standard-macro tables,
+keyword/directive dispatch tables, and anywhere else the trimmed
+source builds a `static const T * const foo[] = {&bar, ...}`-shaped
+table — this is a common, idiomatic C pattern, not something specific
+to one call site.
+
+The N1/N4B hand-written-asm corpus (and CHELLO.COM/ASM64.COM) never
+triggers this: hand-written NASM assembly naturally addresses other
+symbols via `[rel foo]` (RIP-relative) at every use site, with no
+reason to ever build a table *of* addresses as a data value. Real C
+programs of any size routinely do.
+
+Two real fixes, neither attempted this session (both are new
+architectural work, not another isolated bug):
+
+- **(a) Genuine load-time relocation processing.** Link `NASM64` (and
+  in general, any non-trivial future userland C program) as a real
+  position-independent executable, keeping `.rela.dyn`
+  `R_X86_64_RELATIVE` entries instead of letting `ld` resolve them away
+  assuming base 0. `objcopy -O binary` discards ELF metadata entirely,
+  so the flat `.COM` format has nowhere to carry a relocation table —
+  this likely means extending the existing `EXE64`/`MZ64`-header path
+  (`proc_load_image64` already branches on it) with an embedded
+  relocation table the loader walks once after copying the image in,
+  adding the true load bias to each entry (the classic technique every
+  real OS with position-independent loading uses). Larger scope: new
+  header format, new linker-script output, new loader code, new
+  verification (replacing the current "zero relocations" check with
+  "relocations present and all correctly applied" some way).
+- **(b) Fixed, deterministic load address.** This shell is single-
+  tasking (one child process at a time) — link `userland.ld` at a
+  reserved constant address instead of `0x0`, and have the loader place
+  `PSP`+payload *there* directly instead of via `mem_alloc64`'s
+  address-agnostic placement, so link-time and run-time addresses
+  always coincide (no relocation needed because the assumption "loads
+  at 0" becomes "loads at `FIXED`" and stays true). Smaller in scope
+  than (a), but: shrinks the general heap by however much is reserved,
+  needs its own size budget check against NASM's *internal* `malloc()`
+  usage (unmeasured — a real assembler's symbol tables/token lists for
+  a nontrivial source file could be substantial even though the 6 MiB
+  ceiling comfortably covers `hello.asm`), and shifts the well-
+  established "PSP is allocated, entry = PSP + PSP_SIZE follows from
+  it" convention (relied on by `samples/echo.asm` et al.) to "entry is
+  fixed, PSP = entry − PSP_SIZE follows from it" — a convention
+  inversion touching the loader, not just a constant.
+
+N4A.4 (on-image `NASM -f bin` byte-identity vs. host NASM 3.02) remains
+open pending one of the above.
+
+## §8 — Option (a) implemented: EXE64 relocations (2026-09-18)
+
+Implemented the "genuine load-time relocation processing" option from
+§7's closing list. `NASM64.COM` now ships in **EXE64 format** (magic
+`'MZ64'`) instead of a plain `-f bin` flat COM — same filename, no
+other userland program's format changed, kernel loader tells the two
+apart by the magic bytes already present at offset 0 (`proc_verify_
+image64`, unchanged logic, just extended fields).
+
+**Header widened 32 → 48 bytes** (`EXE64_HDR_SIZE`, `src/kernel/
+proc64.asm`), backward-compatible in spirit (`reloc_count == 0` behaves
+exactly like the old format did) but not in bytes — `hdr_size` itself
+is part of the validated header, so old 32-byte hand-built headers
+would (correctly) now be rejected. Only test fixtures exist in that
+shape (selftest64.asm tests 31/73), both updated to the new layout and
+re-verified. New fields:
+- `+24 reloc_count` (4B): 0 for every existing plain image.
+- `+28 reloc_off` (4B): file offset to the reloc table; validated to
+  equal `hdr_size + image_size` (the table always immediately follows
+  the payload — no gap, nothing to configure).
+- `+32 mem_size` (8B): total memory footprint from the load address,
+  covering `.bss` beyond the copied payload. This *also* fixes a
+  separate, independent, pre-existing bug found while designing this:
+  `proc_spawn64` sized its allocation from `image_size` alone (COM:
+  file size; old EXE64: same field) with no accounting for `.bss` —
+  `objcopy -O binary` never emits file bytes for `.bss` (NOBITS), so
+  any program whose `.bss` extends past its own file size was already
+  under-allocating its own process block, letting `crt0.asm`'s BSS-
+  zeroing loop write past the allocated region into whatever heap
+  content came next. Never observed failing in practice (`CHELLO.COM`'s
+  ~1.3 KiB overflow apparently always landed in free heap space) but a
+  real, general-purpose memory-safety gap independent of NASM. EXE64
+  images now size their allocation from `mem_size`; plain COM images
+  are unaffected (still no header, still no way to tell the loader
+  about a `.bss` need) — this specific fix only reaches programs
+  shipped as EXE64, i.e. currently just `NASM64.COM`.
+- Each reloc table entry: 16B, `(dest-relative offset: 8B, base-0-
+  linked addend: 8B)`. Loader (`proc_load_image64`) writes `dest +
+  addend` to `dest + offset` for every entry, once, right after copying
+  the payload in and zeroing the `.bss` gap — the standard
+  `R_X86_64_RELATIVE` fixup, applied by hand (no ELF/dynamic-linker
+  machinery exists in this kernel; this is the whole of what it needs).
+
+**Build side**: `NASM_X_ELF` now links with `-pie` (`Makefile`) instead
+of a plain link, so `ld` keeps `.rela.dyn`'s `R_X86_64_RELATIVE`
+entries instead of resolving them away assuming load address 0 — the
+exact mechanism that made every prior attempt at running `NASM64.COM`
+read garbage from `nasm.c`'s `drivers[]` output-format dispatch table
+(`static const struct ofmt * const drivers[] = {&of_bin, ...}`: `&of_
+bin` is computed correctly at any address via a RIP-relative `lea` at
+the *use* site, but *storing* that computed value into a static array
+element bakes in a plain number, correct only for whatever load base
+the linker assumed — verified live with GDB, see §7). `-pie` alone
+isn't enough: it also pulls in real-dynamic-linker scaffolding this
+loader has no use for (`.interp`/`.dynsym`/`.dynstr`/`.hash`/`.gnu.
+hash`/`.dynamic`, ~350 B, harmless) and, materially, positions `.rela.
+dyn` itself address-contiguous with `.rodata`/`.data` by default —
+since every image here extracts its flat payload via `objcopy -O
+binary`, which copies every byte from the lowest to the highest
+*loaded* address, `.rela.dyn` left in the middle would be copied into
+the payload as inert bytes *as well as* being correctly parsed into
+the new EXE64 reloc table, wastefully double-counting it (measured:
++1.6 MiB, roughly matching `.rela.dyn`'s own size counted twice). Fixed
+in `src/libc/userland.ld`: `.rela.dyn` is placed in its own output
+section assigned to `:NONE` (no `PT_LOAD` segment) — note `:NONE` is
+required, not just omitting a `:text`/`:data` suffix, since GNU ld's
+default orphan-section placement otherwise silently continues the
+*preceding* section's segment (confirmed via `readelf -l`, twice, the
+first attempt without `:NONE` didn't work) — and `elf2exe64.py` passes
+`objcopy -R .rela.dyn` on top, since `:NONE` only fixes `mem_size`
+(what a real loader would map), not `image_size` (what `objcopy`'s
+flat extraction still sees as address-contiguous SHF_ALLOC content
+regardless of segment membership).
+
+**New tool**: `tools/nasm-dos64/elf2exe64.py` — reads the `-pie`-linked
+ELF's program headers (for `mem_size` and to sanity-check the `-pie`
+link actually happened, i.e. `ET_DYN`) and `.rela.dyn`'s raw content
+(rejecting anything other than `R_X86_64_RELATIVE`, which would mean a
+real dynamic symbol import/export snuck into the `-nostdlib` link and
+this loader genuinely cannot satisfy it), calls `objcopy -O binary -R
+.rela.dyn` for the flat payload (byte-identical to the plain-COM path
+for the parts it already got right), and assembles the final EXE64
+file: 48B header + payload + reloc table.
+
+**Verified**: `readelf -l` confirms `.rela.dyn` outside both `PT_LOAD`
+segments post-fix; `elf2exe64.py` reports `image_size` byte-identical
+to the plain non-`-pie` build (2,326,420 B, matching the pre-`-pie`
+measurement exactly) with 40,336 relocations (645,376 B table) and
+5,856 B of `.bss` (matching the `text+data+bss` ELF summary within
+alignment rounding); smoke (89/89) and full (95/95) suite re-verified
+green with `NASM64.COM` rebuilt in the new format; `nasm-samples`
+(`CHELLO.COM`/`ASM64.COM`, both still plain COM) re-verified unaffected
+by the `userland.ld` changes; live with GDB, confirmed `ofmt` (global,
+set from `drivers[]`) now holds `load_base + 0x223ce0` (the correctly
+relocated address) rather than the raw `0x223ce0` file offset seen
+before the fix.
+
+**Not yet fixed — N4A.4 still open**: with the position-independence
+bug fixed, `NASM64.COM` progresses measurably further (through the
+`ofmt`/`drivers[]`-dependent startup code that used to fail
+immediately) but still eventually faults (`#GP`, `cmpb $0x0,(%rsi,
+%rcx,1)` — a generic strlen-style loop, confirmed instruction-accurate
+by disassembling starting exactly at the live fault address rather
+than trusting a linear sweep from offset 0, which desyncs into
+garbage across the large data regions nearby). This looks like a
+*shared* helper called from many sites — a GDB breakpoint on the raw
+address caught an early, successful call (a valid `RSI`) rather than
+the one specific invocation that eventually receives a bad pointer and
+faults, so pinning down the actual bad *caller* needs a conditional
+breakpoint or watchpoint keyed on the bad value, not the address alone
+— not yet attempted. Given the `ofmt`/`drivers[]` bug is now fixed and
+was verified to be exactly the "static data initialized to the address
+of another static" pattern the relocation mechanism targets, and NASM
+has many more instances of that same C idiom (standard-macro tables,
+keyword/directive dispatch, output-driver tables beyond just `ofmt`),
+the leading hypothesis is a *different instance of a bug the
+relocation fix does not itself have room to leave unfixed* — i.e. most
+likely a *second, distinct* uninitialized-memory or argument-count
+issue (in the vein of the `malloc`-zeroing fix from §7) rather than a
+gap in the relocation mechanism itself, though this is not yet
+confirmed. Recommended next step: a conditional GDB breakpoint at the
+fault address that stops only when `RSI` is non-canonical or points
+outside `[load_base, load_base+mem_size)`, to isolate the specific
+call site the way the return-address technique in §7 isolated the
+`ofmt` bug.

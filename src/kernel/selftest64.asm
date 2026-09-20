@@ -4463,33 +4463,35 @@ test_neg_verify:
     push r9
     push r10
     push r11
-    ; Build a valid EXE64 header + payload size 160 (32 hdr + 128 image)
+    ; Build a valid EXE64 header + payload size 176 (48 hdr + 128 image)
     lea rdi, [rel p8_exe_src]
     mov dword [rdi+0], 0x34365A4D
-    mov dword [rdi+4], 32
+    mov dword [rdi+4], 48
     mov qword [rdi+8], 128
     mov dword [rdi+16], 0x10
     mov dword [rdi+20], 1024
     mov qword [rdi+24], 0
+    mov qword [rdi+32], 128
+    mov qword [rdi+40], 0
     ; Valid EXE64 -> 1
     lea rsi, [rel p8_exe_src]
-    mov rdx, 160
+    mov rdx, 176
     call proc_verify_image64
     cmp rax, 1
     jne .fail73
-    ; image_size larger than file (1000 > 160) -> 2
+    ; image_size larger than file (1000 > 176) -> 2
     lea rdi, [rel p8_exe_src]
     mov qword [rdi+8], 1000
     lea rsi, [rel p8_exe_src]
-    mov rdx, 160
+    mov rdx, 176
     call proc_verify_image64
     cmp rax, 2
     jne .fail73
-    ; image_size == file size (160 > 160-32 allowed) -> 2
+    ; image_size == file size (176 > 176-48 allowed) -> 2
     lea rdi, [rel p8_exe_src]
-    mov qword [rdi+8], 160
+    mov qword [rdi+8], 176
     lea rsi, [rel p8_exe_src]
-    mov rdx, 160
+    mov rdx, 176
     call proc_verify_image64
     cmp rax, 2
     jne .fail73
@@ -4500,7 +4502,7 @@ test_neg_verify:
     lea rdi, [rel p8_exe_src]
     mov dword [rdi+16], 128
     lea rsi, [rel p8_exe_src]
-    mov rdx, 160
+    mov rdx, 176
     call proc_verify_image64
     cmp rax, 2
     jne .fail73
@@ -4508,7 +4510,7 @@ test_neg_verify:
     lea rdi, [rel p8_exe_src]
     mov dword [rdi+16], 1000
     lea rsi, [rel p8_exe_src]
-    mov rdx, 160
+    mov rdx, 176
     call proc_verify_image64
     cmp rax, 2
     jne .fail73
@@ -4519,7 +4521,7 @@ test_neg_verify:
     lea rdi, [rel p8_exe_src]
     mov dword [rdi+20], 65537
     lea rsi, [rel p8_exe_src]
-    mov rdx, 160
+    mov rdx, 176
     call proc_verify_image64
     cmp rax, 2
     jne .fail73
@@ -4530,7 +4532,7 @@ test_neg_verify:
     lea rdi, [rel p8_exe_src]
     mov dword [rdi+4], 16
     lea rsi, [rel p8_exe_src]
-    mov rdx, 160
+    mov rdx, 176
     call proc_verify_image64
     cmp rax, 2
     jne .fail73b
@@ -4538,12 +4540,12 @@ test_neg_verify:
     ; dummy non-zero PSP (fails at verify, before any copy).
     mov rdi, 0x200000
     lea rsi, [rel p8_exe_src]
-    mov rdx, 160
+    mov rdx, 176
     call proc_load_image64
     jnc .fail73b
-    ; Restore hdr_size 32
+    ; Restore hdr_size 48
     lea rdi, [rel p8_exe_src]
-    mov dword [rdi+4], 32
+    mov dword [rdi+4], 48
     ; zero size -> 2
     lea rsi, [rel p8_exe_src]
     xor edx, edx
@@ -4552,7 +4554,7 @@ test_neg_verify:
     jne .fail73
     ; null src -> 2
     xor esi, esi
-    mov rdx, 160
+    mov rdx, 176
     call proc_verify_image64
     cmp rax, 2
     jne .fail73
@@ -4579,7 +4581,7 @@ test_neg_verify:
     jne .fail73
     ; valid EXE64 again after restores -> 1
     lea rsi, [rel p8_exe_src]
-    mov rdx, 160
+    mov rdx, 176
     call proc_verify_image64
     cmp rax, 1
     jne .fail73
@@ -4589,7 +4591,7 @@ test_neg_verify:
     ; restore hdr_size before failing (leave buffer valid for later)
     push rax
     lea rdi, [rel p8_exe_src]
-    mov dword [rdi+4], 32
+    mov dword [rdi+4], 48
     pop rax
 .fail73:
     mov rax, 1
@@ -7685,12 +7687,14 @@ test_loader:
     ; build EXE64: header + 128 payload in p8_exe_src
     lea rdi, [rel p8_exe_src]
     mov dword [rdi+0], 0x34365A4D
-    mov dword [rdi+4], 32
+    mov dword [rdi+4], 48
     mov qword [rdi+8], 128
     mov dword [rdi+16], 0x10
     mov dword [rdi+20], 1024
     mov qword [rdi+24], 0
-    lea rbx, [rel p8_exe_src+32]
+    mov qword [rdi+32], 128
+    mov qword [rdi+40], 0
+    lea rbx, [rel p8_exe_src+48]
     mov rcx, 128
     mov al, 0xC0
 .fill_exe31:
@@ -7700,13 +7704,13 @@ test_loader:
     dec rcx
     jnz .fill_exe31
     lea rsi, [rel p8_exe_src]
-    mov rdx, 160
+    mov rdx, 176
     call proc_verify_image64
     cmp rax, 1
     jne .fail31
     mov rdi, r12
     lea rsi, [rel p8_exe_src]
-    mov rdx, 160
+    mov rdx, 176
     call proc_load_image64
     jc .fail31
     mov rbx, r12
@@ -7714,10 +7718,10 @@ test_loader:
     add rbx, 0x10
     cmp rax, rbx
     jne .fail31
-    ; verify payload at psp+SIZE matches src+32
+    ; verify payload at psp+SIZE matches src+48
     mov rsi, r12
     add rsi, PSP64_size
-    lea rdi, [rel p8_exe_src+32]
+    lea rdi, [rel p8_exe_src+48]
     mov rcx, 128
 .verify_exe31:
     mov al, [rdi]
@@ -7739,7 +7743,7 @@ test_loader:
     push rax
     mov dword [rdi+4], 16
     lea rsi, [rel p8_exe_src]
-    mov rdx, 160
+    mov rdx, 176
     call proc_verify_image64
     cmp rax, 2
     jne .fail31_restore
@@ -7750,7 +7754,7 @@ test_loader:
     push rax
     mov qword [rdi+8], 1000
     lea rsi, [rel p8_exe_src]
-    mov rdx, 160
+    mov rdx, 176
     call proc_verify_image64
     cmp rax, 2
     jne .fail31_restore2
@@ -7760,11 +7764,11 @@ test_loader:
     mov dword [rdi+4], 16
     mov rdi, r12
     lea rsi, [rel p8_exe_src]
-    mov rdx, 160
+    mov rdx, 176
     call proc_load_image64
     jnc .fail31
     lea rdi, [rel p8_exe_src]
-    mov dword [rdi+4], 32
+    mov dword [rdi+4], 48
     mov rdi, r12
     call mem_free64
     jc .fail31
@@ -7825,15 +7829,17 @@ test_spawn:
     inc al
     dec rcx
     jnz .fill_c32
-    ; build EXE 32+64
+    ; build EXE 48+64
     lea rdi, [rel p8_exe_src]
     mov dword [rdi+0], 0x34365A4D
-    mov dword [rdi+4], 32
+    mov dword [rdi+4], 48
     mov qword [rdi+8], 64
     mov dword [rdi+16], 0
     mov dword [rdi+20], 512
     mov qword [rdi+24], 0
-    lea rbx, [rel p8_exe_src+32]
+    mov qword [rdi+32], 64
+    mov qword [rdi+40], 0
+    lea rbx, [rel p8_exe_src+48]
     mov rcx, 64
     mov al, 0x77
 .fill_e32:
@@ -7923,7 +7929,7 @@ test_spawn:
     call print_char_vga_serial
     ; spawn EXE
     lea rdi, [rel p8_exe_src]
-    mov rsi, 96
+    mov rsi, 112
     xor edx, edx
     xor ecx, ecx
     xor r8d, r8d
@@ -12045,13 +12051,15 @@ t87_wild db "*.TXT",0
 t87_sub db "SUB\F.TXT",0
 t87_empty db 0
 ; Test 86 child template (56 bytes, nasm-verified; imm64 placeholder +29).
-;   lea rax,[rel start] / sub rax,664 / movzx ecx,[rax+0xA0] /
+;   lea rax,[rel start] / sub rax,672 / movzx ecx,[rax+0xA0] /
 ;   lea rsi,[rax+0xA1] / mov rdx,imm64 / copy loop / ret
-;   664 = PSP64_size: .COM entry = PSP+PSP_SIZE (proc_load_image64), NOT
+;   672 = PSP64_size: .COM entry = PSP+PSP_SIZE (proc_load_image64), NOT
 ;   the PSP+512 of stale comments (test 86 caught this; see N2a notes).
+;   672, not 664 (PLAN.md N4A.3/N4A.4 finding): PSP_SIZE must be a
+;   multiple of 16 so PSP+PSP_SIZE stays 16-aligned for SSE-using .COMs.
 t86_template:
     db 0x48,0x8D,0x05,0xF9,0xFF,0xFF,0xFF
-    db 0x48,0x2D,0x98,0x02,0x00,0x00
+    db 0x48,0x2D,0xA0,0x02,0x00,0x00
     db 0x0F,0xB6,0x88,0xA0,0x00,0x00,0x00
     db 0x48,0x8D,0xB0,0xA1,0x00,0x00,0x00
     db 0x48,0xBA,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00

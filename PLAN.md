@@ -449,6 +449,112 @@ Then, towards NASM running on DOS64 (breakdown: `docs/23-…`):
       at 255/256 sectors (smoke+full) — next kernel change opens with
       slot growth. Remaining: N4A.3 `dos64-tools.img` →
       N4A.4 on-image byte-identity → N5. Record: `docs/25` §5/§6.)
+      (N4A.3 done 2026-09-16: `dos64-tools.img` — second FAT12 volume,
+      same `VOL_LBA`, `TOOLS_VOL_SECTORS=12288`/`TOOLS_SEC_PER_CLUS=4`
+      (FATSZ stays 9, no kernel buffer-size change needed), dynamic
+      FAT-size calc added to `tools/mkfat12.py` (byte-identical on the
+      default geometry — verified). Own `SKIP_SELFTEST` kernel variant
+      (`TOOLS_BUILD`) via a new `LAYOUT_INC_PATH` indirection in
+      `include/fs.inc` (default unchanged; overridable per NASM_ELF
+      invocation) — `stage2.bin`/`mbr.bin` reused as-is (stage2 never
+      reads `VOL_LBA`/`VOL_SECTORS`). `NASM64.COM` + N1 corpus ship and
+      the image boots/mounts/loads correctly (byte-for-byte verified via
+      direct FAT-chain walk). N4A.4 attempted, not complete: got
+      `NASM64.COM` running for the first time ever (previous sessions
+      only did static/build-time checks), which surfaced 8 real,
+      independently-fixed, regression-tested (smoke 89/89 + full 95/95
+      after each) kernel/build bugs the N1/N4B hand-written-asm corpus
+      never triggered: (1) `chello.elf` Makefile link recipe missing
+      `shim64.o`; (2) missing `-z noexecstack` on mixed gcc+NASM object
+      links (newer binutils `--fatal-warnings` compat); (3) missing
+      `__isoc99_*` libc shim aliases; (4) `fs_vol_read_file64` hardcoded
+      "512 B/cluster" — broke on `dos64-tools.img`'s 4-sec/cluster
+      volume, fixed to read cluster size from the DPB (the *real*
+      per-process I/O path, `fs_fcb_io64`, was already generic); (5)
+      **CR4 never set OSFXSR/OSXMMEXCPT** — any SSE instr (gcc emits
+      these by default even for non-FP code, e.g. struct init/copy)
+      faulted #UD; fixed in `stage2.asm`'s long-mode entry (benefits
+      every future userland C program, not just NASM); (6) **PSP64_size
+      (664 B) wasn't a multiple of 16** — `PSP+PSP_SIZE` (the .COM load
+      address) was only 8-byte aligned, breaking any SSE instr with an
+      aligned memory operand; widened to 672 B (`include/psp.inc`), the
+      one other correctness-carrying use (`samples/echo.asm`'s
+      `PSP_SIZE equ 664`) and a hand-assembled test-86 machine-code byte
+      sequence (`selftest64.asm`) updated to match; (7) **`malloc()`
+      didn't zero payload** — NASM (like many portable C codebases) has
+      a latent "fresh malloc is zeroed" assumption, silently true on
+      Linux (kernel-zeroed mmap pages) and false on DOS64's real,
+      uninitialized `AH=48h`-backed allocator; fixed in `libc64.asm`;
+      (8) **`PROC_STACK_SIZE` was 2 KiB** — flagged in `docs/25-n4a1-
+      trim.md` §6 as "the top N4A.4 risk" but never load-tested until
+      now; raised to 256 KiB. After all eight, `NASM64.COM` boots and
+      runs *far* further (real computation, not an instant crash) but
+      still faults (#GP, garbage `%s` argument reaching `snprintf`) —
+      root-caused with GDB (`qemu -s -S`) to a *ninth*, architectural
+      issue that is NOT yet fixed: static data initialized to the
+      **address of another static** (e.g. `nasm.c`'s `drivers[]`
+      output-format dispatch table, `&of_bin` etc.) is emitted by gcc as
+      a plain `R_X86_64_PC32` **code**-side reloc (a `lea reg,[rip+…]`
+      computing the address correctly at *any* load address) that then
+      gets *copied into a data slot* at link time as a fixed numeric
+      constant assuming load base 0 — this is a completely different
+      mechanism from the RIP-relative CODE addressing that makes
+      "slide-safe" work for everything else, and the existing N3.5
+      verification (`readelf -r` shows zero relocations, checked in the
+      Makefile) only proves no *dynamic* relocation processing is
+      needed at base 0 — it does not prove correctness at any other
+      base. DOS64 always loads .COM images at `PSP+PSP_SIZE`, a
+      nonzero, heap-allocation-dependent address, so any such
+      stored-pointer-to-a-static reads garbage once dereferenced. Traced
+      live with GDB: `ofmt` (a global set from `drivers[]`) held
+      `0x223ce0` (a raw file offset) instead of `load_base+0x223ce0`;
+      `ofmt->shortname` therefore read from unrelated, uninitialized
+      memory between the kernel and the heap. The N1/N4B hand-written
+      asm corpus never triggers this (hand-written asm naturally uses
+      RIP-relative refs everywhere and has no reason to build a static
+      pointer-to-pointer table); NASM's output-format dispatch table
+      (and likely its standard-macro/keyword tables) does immediately.
+      Real fix needs either (a) genuine load-time relocation processing
+      — link NASM64 as a real PIE keeping `.rela.dyn`
+      `R_X86_64_RELATIVE` entries (objcopy's flat `-O binary` currently
+      discards this table entirely, so it would need embedding in a
+      loader-readable format, e.g. extending the existing `EXE64`
+      'MZ64' header path instead of plain `-f bin`-style COM), with
+      `proc_load_image64` walking it and adding the true load bias after
+      copying; or (b) a fixed, deterministic load address for the one
+      process this single-tasking shell ever runs at a time (link
+      `userland.ld` at a reserved constant instead of `0x0`, with the
+      loader placing PSP+payload there directly instead of via
+      `mem_alloc64`'s address-agnostic placement) — smaller in scope but
+      shrinks the general heap and needs its own budget check against
+      NASM's internal `malloc()` usage. Neither attempted this session;
+      N4A.4 (on-image byte-identical assemble) remains open.)
+      (Option (a) implemented 2026-09-18 — full design/verification in
+      `docs/25-n4a1-trim.md` §8: `NASM64.COM` now ships as EXE64
+      (`'MZ64'`) with an embedded relocation table; `NASM_X_ELF` links
+      `-pie` so `ld` keeps `.rela.dyn`'s `R_X86_64_RELATIVE` entries
+      instead of resolving them assuming load address 0, a new
+      `tools/nasm-dos64/elf2exe64.py` extracts the flat payload +
+      relocations into the widened (32→48B) `EXE64_HDR_SIZE` header
+      format, `proc_load_image64` applies them once after copying the
+      image in. Also fixed in the same header-widening pass, found
+      while designing it: `proc_spawn64` sized process allocations from
+      `image_size` alone with no accounting for `.bss` beyond the
+      copied file — a real, general (not NASM-specific) memory-safety
+      gap, now closed for EXE64 images via a new `mem_size` header
+      field (plain COM images, unaffected, still have no header to
+      carry this). Verified live with GDB: `ofmt` (set from `nasm.c`'s
+      `drivers[]` dispatch table — a `static const T * const []`
+      pointer-to-pointer table, the textbook case this whole mechanism
+      exists for) now correctly holds `load_base + <link-time offset>`
+      instead of the raw, un-adjusted link-time offset seen before the
+      fix. Smoke 89/89 + full 95/95 re-verified; `nasm-samples`
+      (`CHELLO.COM`/`ASM64.COM`, both still plain COM, unaffected by
+      the `userland.ld` changes) re-verified. `NASM64.COM` now runs
+      measurably further (past the `ofmt`/`drivers[]`-dependent
+      startup that used to fail immediately) but still faults later —
+      N4A.4 remains open; see docs/25 §8's closing paragraph for the
+      current best lead.)
 - [ ] 12. **N5** integration + hardening (HELP/PATH/`ERRORLEVEL`, harness
       round-trips, README/AGENTS/syscall-ref updates, G1–G6-style audit,
       full regression trio).
@@ -459,4 +565,8 @@ Then, towards NASM running on DOS64 (breakdown: `docs/23-…`):
 *Baseline refs: `Makefile` layout block (`IMG_MB=10, VOL_LBA=512,
 VOL_SECTORS=2880, KERNEL_LBA=16, KERNEL_SECTORS=256`), `src/kernel/
 proc64.asm:1277`, `src/kernel/syscall64.asm:319`, `include/psp.inc`
-(664 B `PSP64`), `include/mcb.inc` (40 B `MCB64`), `nasm/` @ 3.02.*
+(672 B `PSP64`, widened from 664 2026-09-16 — see item 11 N4A.3/N4A.4
+record — so `PSP+PSP_SIZE` stays 16-byte aligned), `include/mcb.inc`
+(40 B `MCB64`), `src/kernel/proc64.asm` `EXE64_HDR_SIZE` (48 B,
+widened from 32 2026-09-18 — see item 11 record §8 — for the
+`reloc_count`/`reloc_off`/`mem_size` fields), `nasm/` @ 3.02.*

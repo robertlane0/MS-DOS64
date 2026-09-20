@@ -253,7 +253,7 @@ struct MCB64 {
 ```
 
 **64-bit PSP Redesign**:
-- 664 bytes actual (`include/psp.inc`, `PSP64_size`; 512-byte DOS-compatible prefix + 64-bit extensions)
+- 672 bytes actual (`include/psp.inc`, `PSP64_size`; widened from 664 2026-09-16 so `PSP+PSP_SIZE` — the `.COM` load address — stays a multiple of 16, needed once real ported C (not just hand-written asm) started using SSE instructions with aligned data operands; 512-byte DOS-compatible prefix + 64-bit extensions + 8 B pad)
 - Convert segment pointers to 64-bit linear addresses
 - Add fields for 64-bit process state:
   - R8-R15 register storage
@@ -498,6 +498,26 @@ endstruc
    wrmsr
    ```
 
+4. **CR4.OSFXSR/OSXMMEXCPT for SSE** (found the hard way, PLAN.md item
+   11 N4A.3/N4A.4 record, 2026-09-16): setting `CR4.PAE` (bit 5) is
+   enough for long mode itself, but any SSE instruction (`MOVAPS` etc.)
+   executed with `CR4.OSFXSR` (bit 9) clear raises `#UD` — and gcc
+   emits SSE instructions by default for ordinary x86-64 code (struct
+   init/copy, not just floating point), so any real C program will hit
+   this, even though hand-written NASM asm never does. Set both bits
+   alongside `PAE` in the same 32-bit-mode `mov cr4, eax`:
+   ```nasm
+   mov eax, cr4
+   or eax, (1 << 5) | (1 << 9) | (1 << 10)   ; PAE | OSFXSR | OSXMMEXCPT
+   mov cr4, eax
+   ```
+   This alone isn't sufficient for a loaded `.COM`-style image to use
+   SSE safely, either: the memory operand also needs to be 16-byte
+   aligned, which depends on the *load address* being 16-aligned (see
+   `PSP64_size` above — it must be a multiple of 16, since `.COM`
+   images load at `PSP + PSP_SIZE` and `PSP` itself is always 16-byte
+   aligned by the heap allocator's own invariant).
+
 ### Memory Layout Recommendations
 ```
 0x00000000 - 0x000003FF : Real Mode IVT (preserved for compatibility)
@@ -550,6 +570,34 @@ mov qword [rsi], 0x1000   ; Explicit qword size
 3. **RIP-Relative Addressing**: Default addressing mode in 64-bit
    - `mov rax, [variable]` may assemble to `mov rax, [rel variable]`
    - Useful for position-independent code
+   - **But this only makes CODE position-independent, not DATA that
+     stores an address as a value** (PLAN.md item 11 N4A.3/N4A.4
+     record, 2026-09-16, fixed 2026-09-18): `static const T *table[] =
+     {&foo, &bar}` gets the *value* of `&foo` computed via a RIP-
+     relative `lea` at compile time, but that resulting number is then
+     written into `table[]` as a plain constant, and constants don't
+     re-adjust themselves at a different load address the way a
+     RIP-relative instruction does. `readelf -r` showing zero
+     relocations only proves the *linker* assumed the final load
+     address correctly (usually 0) when it resolved everything — not
+     that the result is correct at any other load address. This bit
+     real, ported C code hard (NASM's output-format dispatch table)
+     the first time anything past trivial hand-written asm or tiny
+     demo C ran on this OS; hand-written asm has no reason to ever
+     build a table *of* addresses as a data value, but it's an
+     extremely common C idiom (dispatch tables, vtables, string
+     tables). Fixed for `NASM64.COM` (`docs/25-n4a1-trim.md` §8): link
+     with `-pie` so `ld` keeps `.rela.dyn`'s `R_X86_64_RELATIVE`
+     entries instead of resolving them away, embed them in an extended
+     EXE64 (`'MZ64'`) header via `tools/nasm-dos64/elf2exe64.py`, apply
+     them by hand in `proc_load_image64` (add the true load bias to
+     each) right after copying the image in — this kernel has no ELF
+     loader or dynamic linker, so this is the entirety of what
+     "applying a relocation" means here. Plain `-f bin`-style COM
+     images (every other userland program) are unaffected and still
+     rely on the "no relocations needed" property actually holding,
+     which is only true when nothing in the program builds this kind
+     of table.
 
 4. **Stack Alignment**: Must maintain 16-byte alignment before CALL instructions
    - Modern x86-64 ABI requirement
@@ -758,7 +806,7 @@ authoritative.
   `extent*128+nr` exactly for `recsiz=128`, other sizes address by `RR`.
   DMA defaults to unset and fails honestly — set with `AH=1Ah` before FCB
   transfers. Writes are record-granular (`COPY` truncates to exact length).
-- Processes: 664-byte PSP64 (`include/psp.inc`, 512-byte DOS-compatible
+- Processes: 672-byte PSP64 (`include/psp.inc`, 512-byte DOS-compatible
   prefix + 64-bit extensions: R8–R15 storage, CR3, 64-bit RSP, extended
   handle table) + environment blocks; raw-`.COM` and `MZ64` loaders via
   `proc_spawn64` (no MZ/PE loader; EXEC spawns but does not

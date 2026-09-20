@@ -5,8 +5,8 @@
 ;
 ; The shell stores the command tail in PSP64 (+0xA0 len, +0xA1 127 bytes)
 ; via psp_set_cmdtail64 at spawn. A .COM image is loaded at PSP+PSP_SIZE
-; (664, include/psp.inc) with entry = PSP+PSP_SIZE (proc_load_image64),
-; so PSP = entry - 664. Derive it from RIP instead of trusting any
+; (672, include/psp.inc) with entry = PSP+PSP_SIZE (proc_load_image64),
+; so PSP = entry - 672. Derive it from RIP instead of trusting any
 ; register (N2a pins RDI=PSP as the authoritative entry convention; the
 ; subtraction holds by construction as fallback).
 ;
@@ -18,7 +18,7 @@ default rel
 
 PSP_CMD_LEN equ 0xA0
 PSP_CMD_TAIL equ 0xA1
-PSP_SIZE equ 664            ; == PSP64_size (proc_load_image64 loads at PSP+PSP_SIZE)
+PSP_SIZE equ 672            ; == PSP64_size (proc_load_image64 loads at PSP+PSP_SIZE)
 
 start:
     lea rax, [rel start]   ; RAX = entry = PSP+PSP_SIZE
