@@ -572,3 +572,60 @@ old code — the exact shape (bad pointer into a shared string helper)
 §8 observed. Smoke 89/89 + full 95/95 + `nasm-cross` re-verified;
 kernel still 255/256 sectors. On-device `NASM64.COM` run (tools-img)
 still needed to confirm N4A.4 closes.
+
+## §10 — N4A.4 closed: argv + text-mode fixes, on-device byte-identity (2026-09-20)
+
+First on-device run after §9 (QEMU `dos64-tools.img`, QMP `send-key`
+typing, VGA read back via GDB dump of `0xB8000` — see below for why
+GDB was needed) showed `NASM64.COM` alive but sick: bare/`-v` runs
+exited 1 printing `nasm: fatal: no input file specified` (correct
+behavior for zero args — but `-v` was passed), and any real assemble
+died with `unable to open input file`. Two independent bugs, both in
+code no earlier program had ever exercised:
+
+1. **`crt0 `_start` never set `RDI=PSP` before `crt_parse_args`.**
+   After the BSS-zeroing `rep stosb`, `RDI` holds `_bss_end`; the
+   existing `mov rdi, rbx` sat one call too late (before
+   `crt_parse_env`, which always worked). The parser therefore read
+   `cmd_len` from zeroed BSS as 0 and every C program silently saw
+   `argc=1`. One-line fix (`mov rdi, rbx` before the argv call).
+   Why hidden until NASM: the N3.4 host harness calls the parsers
+   directly with explicit `RDI` (correct), `CHELLO.COM` ignores
+   `argv`, and `WRITE.COM` reads the PSP tail by hand, never via
+   `crt0` — NASM is the first crt0 program that uses `argv`.
+2. **`stdio64 `fopen` rejected text mode.** NASM opens inputs
+   `NF_TEXT` (`"rt"`, and `"rtm"` first — the glibc mmap hint,
+   emitted because `__linux__` stays defined under `-ffreestanding`).
+   `fopen` accepted only `""`/`"b"` as `mode[1]` and returned `NULL`
+   before ever reaching `3Dh` (confirmed: GDB breakpoint at
+   `handler_open_file` never fired). Fix: accept `'t'`
+   (translation-free — DOS64 does no CRLF mapping, binary-clean),
+   ignore a trailing `'m'` (streams always slurp, so the hint is a
+   no-op), set `errno=EINVAL` on genuinely bad modes, and map
+   open/create failures via `fo_syserr` (`2→ENOENT/4→EMFILE/5→EACCES`)
+   so C diagnostics (`strerror(errno)` fatals) read correctly.
+
+Test 92 (destructive) covers both: the §(d) readback now opens
+`"rtm"` (`t92_rtm`, content-verified by the existing
+`fread`+`memcmp`), and §(f) asserts a missing-file open returns
+`NULL` with `errno==ENOENT`. Kernel still fits: smoke 255.25/256,
+full 255.72/256 (384/144 B free — the next kernel change still opens
+with slot growth per §6).
+
+**N4A.4 acceptance, all on `dos64-tools.img` under QEMU:**
+`NASM64 -v` → `NASM version 3.02 ...`, `Exit 0`; `NASM64 -f bin
+<HELLO,ECHO,CAT,WRITE>.ASM -o O<...>.COM` → four `Exit 0`s;
+extracting the outputs by direct on-disk FAT-chain walk and `cmp`
+against host NASM 3.02 output: **4/4 byte-identical**
+(37/63/186/137 B). Closing the self-hosting loop, the
+on-device-assembled `OHELLO.COM` runs: `Hello from DOS64`, `Exit 0`.
+Regression trio green: smoke 89 + 6 SKIP, full 95/95, lean boots;
+`check_volume_clean.py` CLEAN on all three base images;
+`asm64-check` 4/4; `dos64-nasm.img` smoke 89 + `HELLO` `Exit 0`.
+
+Known limitation surfaced by this diagnosis (not fixed here):
+child console output (`AH=02h/09h`, `AH=40h` fds 1/2 via
+`handler_conout`) is **VGA-only** — absent from `-serial stdio`,
+so NASM's messages were read via a GDB VGA dump. N5 candidate:
+mirror `handler_conout` through the bounded `serial_try_putc64`
+(check-serial-compatible by construction).

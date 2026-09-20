@@ -81,6 +81,8 @@ _start:
                                   ; trampoline (parent state) + keep RSP
                                   ; 16-aligned for the calls below
     call stdio_init               ; console objects + stdin/out/err pointers
+    mov rdi, rbx                  ; PSP for the arg parser (RDI still holds
+                                  ; _bss_end from the rep stosb above)
     lea rsi, [rel crt_argv]
     mov edx, MAX_ARGS
     call crt_parse_args           ; RAX = argc

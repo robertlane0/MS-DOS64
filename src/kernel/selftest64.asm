@@ -11115,8 +11115,8 @@ test_stdio_roundtrip:
     test rax, rax
     jnz .fail92
     lea rdi, [rel t88_scratch]
-    lea rsi, [rel t92_r]
-    call fopen
+    lea rsi, [rel t92_rtm]          ; N4A.4: "rtm" (glibc text+mmap-hint
+    call fopen                      ; modes NASM uses) reads identically
     test rax, rax
     jz .fail92
     mov r15, rax
@@ -11207,11 +11207,14 @@ test_stdio_roundtrip:
     test rax, rax
     jnz .fail92
     ; ---- (f) open-mode honesty + NULL streams + isatty ----
-    lea rdi, [rel t87_nope]       ; missing file -> NULL
+    mov dword [rel errno], 0
+    lea rdi, [rel t87_nope]       ; missing file -> NULL + ENOENT
     lea rsi, [rel t92_r]
     call fopen
     test rax, rax
     jnz .fail92
+    cmp dword [rel errno], 2        ; N4A.4: fo_syserr maps kernel 2
+    jne .fail92
     lea rdi, [rel t88_scratch]    ; append unsupported -> NULL (no truncate!)
     lea rsi, [rel t92_a]
     call fopen
@@ -12011,6 +12014,7 @@ t93_ref: incbin "build/hello93.ref"
 t93_reflen equ ($ - t93_ref)
 t92_w db "w",0
 t92_r db "r",0
+t92_rtm db "rtm",0                  ; N4A.4: NASM's text+mmap-hint open mode
 t92_a db "a",0
 t92_rp db "r+",0
 t92_wp db "w+",0

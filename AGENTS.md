@@ -34,6 +34,15 @@
 > bar as `CHELLO.COM`); ships on `dos64-nasm.img` with `HELLO.ASM` —
 > on-device `ASM64 HELLO.ASM -o AHELLO.COM` → working 37 B `AHELLO.COM`.
 > Smoke 89+6 SKIP / full 95 PASS on QEMU, volumes CLEAN.
+> N4A (PLAN.md item 11) done 2026-09-20: full NASM 3.02 port runs on
+> `dos64-tools.img` (`NASM64.COM`, EXE64 + relocations): `NASM64 -v` →
+> version + `Exit 0`, `-f bin` over the 4-file corpus 4/4 byte-identical
+> to host NASM, on-device-assembled `OHELLO.COM` runs. Needed two
+> first-run fixes — `crt0 _start` `RDI=PSP` for `crt_parse_args`
+> (argc was always 1) and `stdio64 fopen` text mode `"rt"`/`"rtm"` +
+> honest `errno` (test 92 covers `"rtm"` + `ENOENT`); kernels 255.25
+> (smoke) / 255.72 (full) of 256 sectors. Record: `docs/25-n4a1-trim.md`
+> §10. Known gap: child console output is VGA-only (no serial mirror).
 > The phase plan below is kept as the build record; every checklist item is done.
 > Current entry points: `README.md` (what works / memory / disk / shell),
 > `docs/18-truth-gap-analysis.md` + `docs/19-closure-g1-g6.md` (audit trail for

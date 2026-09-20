@@ -550,11 +550,26 @@ Then, towards NASM running on DOS64 (breakdown: `docs/23-…`):
       instead of the raw, un-adjusted link-time offset seen before the
       fix. Smoke 89/89 + full 95/95 re-verified; `nasm-samples`
       (`CHELLO.COM`/`ASM64.COM`, both still plain COM, unaffected by
-      the `userland.ld` changes) re-verified. `NASM64.COM` now runs
-      measurably further (past the `ofmt`/`drivers[]`-dependent
-      startup that used to fail immediately) but still faults later —
-      N4A.4 remains open; see docs/25 §8's closing paragraph for the
-      current best lead.)
+       the `userland.ld` changes) re-verified. `NASM64.COM` now runs
+       measurably further (past the `ofmt`/`drivers[]`-dependent
+       startup that used to fail immediately) but still faults later —
+       N4A.4 remains open; see docs/25 §8's closing paragraph for the
+       current best lead.)
+       (N4A.4 done 2026-09-20: §9's `vsnprintf`/`vfprintf` fix plus two
+       new first-run bugs — `crt0 _start` never set `RDI=PSP` before
+       `crt_parse_args` (every C program silently saw `argc=1`; one-line
+       fix) and `stdio64 fopen` rejected text mode (NASM opens inputs
+       `"rt"`/`"rtm"`; now accepted translation-free with honest
+       `errno`: `EINVAL` bad mode, `ENOENT`/`EMFILE`/`EACCES` via
+       `fo_syserr`). Test 92 extended (`"rtm"` readback + `ENOENT`
+       check, destructive). Acceptance, all on `dos64-tools.img` under
+       QEMU: `NASM64 -v` → version + `Exit 0`; `-f bin` over the 4-file
+       corpus → 4/4 byte-identical to host NASM 3.02 (direct FAT-chain
+       extraction + `cmp`); on-device-assembled `OHELLO.COM` runs
+       (`Hello from DOS64`, `Exit 0`). Trio green (smoke 89+6 SKIP,
+       full 95/95, lean boots, volumes CLEAN; kernels 255.25/255.72 of
+       256 sectors). Full record: `docs/25-n4a1-trim.md` §10. Remaining
+       towards self-hosted dev: N5.)
 - [ ] 12. **N5** integration + hardening (HELP/PATH/`ERRORLEVEL`, harness
       round-trips, README/AGENTS/syscall-ref updates, G1–G6-style audit,
       full regression trio).

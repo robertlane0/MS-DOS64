@@ -27,10 +27,14 @@
 ;   no 42h is needed anywhere in this file).
 ; - Counts are 16-bit on the trap path (handlers mask to CX: 0x10000
 ;   wraps to 0), so 40h flush uses 0x8000 chunks, slurp 4096 B chunks.
-; - Modes: "r" and "w" only (+ trailing "b" tolerated, C89 style). "a" /
-;   "r+" / "w+" / "+" return NULL: the kernel has no open-for-write-
-;   existing (3Dh denies write modes, 3Ch truncates), so append cannot be
-;   honored — failing honestly beats silently truncating user data.
+; - Modes: "r" and "w" (+ trailing "b" tolerated, C89 style; "t"
+;   accepted translation-free, N4A.4: NASM opens inputs "rt"/"rtm" —
+;   the glibc 'm' mmap hint is ignored since streams always slurp).
+;   Bad modes set errno=EINVAL; missing files ENOENT, denied EMFILE/
+;   EACCES. "a" / "r+" / "w+" / "+" return NULL: the kernel has no
+;   open-for-write-existing (3Dh denies write modes, 3Ch truncates),
+;   so append cannot be honored — failing honestly beats silently
+;   truncating user data.
 ;
 ; N4A.2b additions (buffered char I/O for the NASM port):
 ; - FILE64.pb: one-byte pushback (-1 empty, else 0..255). ungetc NEVER
@@ -86,6 +90,12 @@ extern hexdig_lo
 extern hexdig_hi
 extern pf_pctch
 extern octdig
+extern errno                      ; N4A.4: owned by shim64 (single BSS cell)
+
+%define EINVAL_NO 22              ; N4A.4: bad mode string (glibc numbers)
+%define ENOENT_NO 2               ; N4A.4: open of a missing file
+%define EACCES_NO 13              ; N4A.4: denied (kernel code 5)
+%define EMFILE_NO 24              ; N4A.4: table full (kernel code 4)
 
 %define F_INUSE    1
 %define F_WRITE    2
@@ -334,13 +344,26 @@ fopen:
 .fo_read:
     mov byte [rsp+16], 0
 .fo_mode1:
-    mov al, [rsi+1]               ; mode[1]: NUL or 'b' only (never touch
+    mov al, [rsi+1]               ; mode[1]: NUL, 'b', or 't' (never touch
     test al, al                   ; mode[2] for 1-char modes: "w",0 is only
     jz .fo_mode_ok                ; 2 bytes; [rsi+2] would be the NEXT string
     cmp al, 'b'
-    jne .fo_null
-    cmp byte [rsi+2], 0           ; "rb"/"wb" must end here ("r+"/junk out)
-    jne .fo_null
+    je .fo_mode2
+    cmp al, 't'                   ; text mode (N4A.4: NASM opens inputs
+    jne .fo_badmode               ; "rt"): accepted, translation-free —
+                                  ; DOS64 does no CRLF mapping, binary-clean
+.fo_mode2:
+    mov al, [rsi+2]               ; mode[2]: NUL, or glibc 'm' (mmap hint —
+    test al, al                   ; NASM emits "rtm" under __linux__; our
+    jz .fo_mode_ok                ; streams always slurp, so ignore it)
+    cmp al, 'm'
+    jne .fo_badmode
+    cmp byte [rsi+3], 0           ; "rtm" must end here ("r+b"/junk out)
+    jne .fo_badmode
+    jmp .fo_mode_ok
+.fo_badmode:
+    mov dword [rel errno], EINVAL_NO   ; bad mode (lets retry loops like
+    jmp .fo_null                  ; NASM's rtm->rt fall back honestly)
 .fo_mode_ok:
     ; find a free slot
     lea r13, [rel file_table]
@@ -367,7 +390,7 @@ fopen:
     or dword [r13 + FILE64.flags], F_WRITE
     mov rdi, [rsp+0]
     call fd_create
-    jc .fo_release                ; create failed (dir full / bad name)
+    jc .fo_create_fail            ; create failed (dir full / bad name)
     mov [r13 + FILE64.fd], eax
     mov rax, r13
     add rsp, 24
@@ -380,7 +403,7 @@ fopen:
     ; ---- "r": 3Dh + eager slurp + immediate close ----
     mov rdi, [rsp+0]
     call fd_open
-    jc .fo_release                ; missing/unreadable -> NULL
+    jc .fo_open_fail              ; missing/unreadable -> NULL (+errno)
     mov [rsp+8], rax              ; fd
     xor r12d, r12d                ; buf = NULL
     xor ebx, ebx                  ; len = 0
@@ -438,6 +461,12 @@ fopen:
     jz .fo_release
     mov rdi, r12
     call free
+.fo_create_fail:
+    call fo_syserr                 ; EAX=kernel code -> errno (R13 slot
+    jmp .fo_release                ; untouched; RAX ignored below)
+.fo_open_fail:
+    call fo_syserr                 ; same (open path)
+    jmp .fo_release
 .fo_release:
     mov dword [r13 + FILE64.flags], 0
 .fo_null:
@@ -447,6 +476,23 @@ fopen:
     pop r13
     pop r12
     pop rbx
+    ret
+
+; fo_syserr(EAX=kernel code 2/4/5) — set errno (ENOENT/EMFILE/EACCES).
+; N4A.4: lets C diagnostics (NASM's strerror(errno) fatals) read
+; correctly. Clobbers RAX/flags only (fopen's R13 slot untouched).
+fo_syserr:
+    cmp eax, 2
+    je .fse_noent
+    cmp eax, 4
+    je .fse_mfile
+    mov dword [rel errno], EACCES_NO   ; 5 denied (and unknown: closest)
+    ret
+.fse_noent:
+    mov dword [rel errno], ENOENT_NO
+    ret
+.fse_mfile:
+    mov dword [rel errno], EMFILE_NO
     ret
 
 ; fread(RDI=ptr, RSI=size, RDX=nmemb, RCX=fp) -> RAX=items (0 at EOF/error).
