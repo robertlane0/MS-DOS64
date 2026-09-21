@@ -305,8 +305,9 @@ first — never squeeze the 256-sector kernel slot.**
 - [ ] Solve size: if N0 shows overflow, grow image (`IMG_MB` /
       `VOL_SECTORS` in `Makefile:23-28` + `check-layout` disk geometry) **or** ship `NASM.COM` on a second optional image
       (`dos64-tools.img`). Never silently squeeze the kernel slot.
-- [ ] `NDISASM` port explicitly deferred (needs no new syscalls; file it
-      as follow-up).
+- [x] `NDISASM` port follow-up done 2026-09-21 (`make ndisasm-cross` +
+      `make ndisasm-check`, ships on `dos64-tools.img`; needed no new
+      syscalls, as predicted — record: `docs/25-n4a1-trim.md` §11).
 
 Acceptance (B): on-image `ASM64` assembles `HELLO.ASM` → working
 `HELLO.COM` with no host involvement. Acceptance (A): on-image `NASM -f

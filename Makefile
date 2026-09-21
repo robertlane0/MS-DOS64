@@ -315,17 +315,18 @@ $(TOOLS_BUILD)/kernel.bin: $(TOOLS_BUILD)/kernel.elf | $(BUILD)
 	@test $$(stat -c %s $@) -le $$(expr $(KERNEL_SECTORS) \* $(IMG_SECTOR_SIZE)) || (echo "Tools kernel too large for $(KERNEL_SECTORS) sectors! Increase KERNEL_SECTORS in the Makefile disk-layout block"; rm -f $@; exit 1)
 
 # dos64-tools.img (N4A.3 acceptance: image boots, NASM64.COM + the N1
-# corpus ship on it). mbr.bin/stage2.bin are the CANONICAL ones (reused
+# corpus ship on it; NDISASM.COM + HELLO.COM joined in §11 as the
+# disassembler and its demo input). mbr.bin/stage2.bin are the CANONICAL ones (reused
 # as-is: stage2 never reads VOL_LBA/VOL_SECTORS, only KERNEL_LBA/
 # KERNEL_SECTORS, which are unchanged for this variant). The volume
 # itself is stamped with TOOLS_VOL_SECTORS/TOOLS_SEC_PER_CLUS instead of
 # the canonical VOL_SECTORS/1-sector-cluster geometry.
-$(BUILD)/dos64-tools.img: $(BUILD)/mbr.bin $(BUILD)/stage2.bin $(TOOLS_BUILD)/kernel.bin $(BUILD)/NASM64.COM check-layout check-kbc check-serial | $(BUILD)
+$(BUILD)/dos64-tools.img: $(BUILD)/mbr.bin $(BUILD)/stage2.bin $(TOOLS_BUILD)/kernel.bin $(BUILD)/NASM64.COM $(BUILD)/NDISASM.COM $(BUILD)/nasm-samples/HELLO.COM check-layout check-kbc check-serial | $(BUILD)
 	dd if=/dev/zero of=$@ bs=1M count=$(TOOLS_IMG_MB) status=none
 	dd if=$(BUILD)/mbr.bin of=$@ conv=notrunc status=none
 	dd if=$(BUILD)/stage2.bin of=$@ bs=$(IMG_SECTOR_SIZE) seek=1 conv=notrunc status=none
 	dd if=$(TOOLS_BUILD)/kernel.bin of=$@ bs=$(IMG_SECTOR_SIZE) seek=$(KERNEL_LBA) conv=notrunc status=none
-	python3 -W error tools/mkfat12.py --vol-lba $(VOL_LBA) --vol-totsec $(TOOLS_VOL_SECTORS) --sector-size $(IMG_SECTOR_SIZE) --kernel-lba $(KERNEL_LBA) --kernel-sectors $(KERNEL_SECTORS) --sec-per-clus $(TOOLS_SEC_PER_CLUS) --extra-file NASM64.COM=$(BUILD)/NASM64.COM --extra-file HELLO.ASM=samples/hello.asm --extra-file ECHO.ASM=samples/echo.asm --extra-file CAT.ASM=samples/cat.asm --extra-file WRITE.ASM=samples/write.asm $@
+	python3 -W error tools/mkfat12.py --vol-lba $(VOL_LBA) --vol-totsec $(TOOLS_VOL_SECTORS) --sector-size $(IMG_SECTOR_SIZE) --kernel-lba $(KERNEL_LBA) --kernel-sectors $(KERNEL_SECTORS) --sec-per-clus $(TOOLS_SEC_PER_CLUS) --extra-file NASM64.COM=$(BUILD)/NASM64.COM --extra-file NDISASM.COM=$(BUILD)/NDISASM.COM --extra-file HELLO.ASM=samples/hello.asm --extra-file HELLO.COM=$(BUILD)/nasm-samples/HELLO.COM --extra-file ECHO.ASM=samples/echo.asm --extra-file CAT.ASM=samples/cat.asm --extra-file WRITE.ASM=samples/write.asm $@
 	@echo "Created $@ ($$(stat -c %s $@) bytes)"
 
 # Verify the single-sourced layout before any image bytes are written.
@@ -791,12 +792,72 @@ $(NASM_X_COM): $(NASM_X_ELF)
 
 nasm-cross: $(NASM_X_COM)
 
+# NDISASM port (PLAN §5 N4A deferred follow-up; docs/25-n4a1-trim.md
+# §11). Same throwaway-tree + cross-target pattern as nasm-cross (nasm/
+# never modified), but the link set is NDISASM_KEEP (tools/nasm-dos64/
+# trim.mk: the NASMLIB-subset upstream's ndisasm link uses) plus the 5
+# disasm/*.c sources compiled into their own obj dir (no basename
+# collisions with the pool, but separation keeps `rm -rf build/nasm-x`
+# rebuilds safe). Depends on $(NASM_X_ELF), so the configured tree +
+# cross-compiled pool exist without rebuilding them. Same EXE64 wrap +
+# slide-safety bar as NASM64 (entry 0, no .got, no Linux syscalls).
+# Opt-in like nasm-cross: `make ndisasm-cross`. `make nasm-clean` drops it.
+NDISASM_X_OBJ := $(BUILD)/ndisasm-x/obj
+NDISASM_X_ELF := $(BUILD)/ndisasm.elf
+NDISASM_X_COM := $(BUILD)/NDISASM.COM
+NDISASM_HOST := $(NASM_X_SRC)/ndisasm
+
+$(NDISASM_X_ELF): $(NASM_X_ELF)
+	mkdir -p $(NDISASM_X_OBJ)
+	@for f in $(NASM_X_SRC)/disasm/ndisasm.c $(NASM_X_SRC)/disasm/disasm.c $(NASM_X_SRC)/disasm/sync.c $(NASM_X_SRC)/disasm/prefix.c $(NASM_X_SRC)/disasm/diserror.c; do \
+		o=$(NDISASM_X_OBJ)/$$(basename $$f .c).o; \
+		gcc $(NASM_XCFLAGS) -I$(NASM_X_SRC) -I$(NASM_X_SRC)/include -I$(NASM_X_SRC)/x86 -I$(NASM_X_SRC)/asm -I$(NASM_X_SRC)/disasm -I$(NASM_X_SRC)/output -c $$f -o $$o || exit 1; \
+	done
+	@for k in $(NDISASM_KEEP); do \
+		test -f $(NASM_X_OBJ)/$$k.o || (echo "NDISASM FAIL: pool object $$k.o missing (nasm-x cache stale? re-run make nasm-cross)"; exit 1); \
+	done
+	ld -pie -T $(SRC_LIBC)/userland.ld -z noexecstack -o $@ $(BUILD)/libc/crt0.o $(addprefix $(NASM_X_OBJ)/,$(addsuffix .o,$(NDISASM_KEEP))) $(NDISASM_X_OBJ)/ndisasm.o $(NDISASM_X_OBJ)/disasm.o $(NDISASM_X_OBJ)/sync.o $(NDISASM_X_OBJ)/prefix.o $(NDISASM_X_OBJ)/diserror.o $(filter-out $(BUILD)/libc/crt0.o,$(LIBC_USERLAND)) -nostdlib
+	@echo "ndisasm linked: $$(stat -c %s $@) bytes"
+
+$(NDISASM_X_COM): $(NDISASM_X_ELF)
+	python3 tools/nasm-dos64/elf2exe64.py $< $@ --stack-size 1024
+	@test $$(readelf -h $< | grep Entry | grep -q '0x0$$' && echo yes) = yes || (echo "NDISASM entry != 0 (crt0.o not linked first?)"; exit 1)
+	@! readelf -S $< | grep -q '\.got' || (echo "NDISASM has .got (not slide-safe — real GOT/PLT machinery snuck into the link)"; exit 1)
+	@! objdump -b binary -m i386:x86-64 -d $@ | grep -q syscall || (echo "NDISASM has Linux syscalls"; exit 1)
+	@size $<
+
+ndisasm-cross: $(NDISASM_X_COM)
+
+# Host ndisasm from the same configured throwaway tree (reference for
+# the byte-identity check below; build/nasm-x is gitignored scratch).
+$(NDISASM_HOST): $(NASM_X_ELF)
+	$(MAKE) -C $(NASM_X_SRC) -j ndisasm
+
+# NDISASM on-device acceptance (docs/25-n4a1-trim.md §11): boots
+# dos64-tools.img twice (SKIP_SELFTEST kernel, fast boot), runs
+# `NDISASM -v` (version line + Exit 0) and `NDISASM -b 64 HELLO.COM`,
+# and cmps the serial disassembly (CRLF-normalized) byte-for-byte
+# against host ndisasm on the same input. No kernel change, no new
+# harness tests (budget wall: full kernel has 16 B free) — this target
+# IS the regression test for NDISASM.
+ndisasm-check: $(BUILD)/dos64-tools.img $(NDISASM_HOST)
+	@$(NDISASM_HOST) -b 64 $(SAMPLE_OUTDIR)/HELLO.COM > $(BUILD)/ndisasm-ref.txt
+	@printf '\rNDISASM -v\rEXIT\r' | timeout 150 qemu-system-x86_64 -drive file=$(BUILD)/dos64-tools.img,format=raw -serial stdio -display none > $(BUILD)/ndisasm-v.log 2>&1 || true
+	@grep -q 'NDISASM version 3.02' $(BUILD)/ndisasm-v.log || (echo "ndisasm-check FAIL: -v version line missing"; exit 1)
+	@grep -q '^Exit 0' $(BUILD)/ndisasm-v.log || (echo "ndisasm-check FAIL: -v Exit 0 missing"; exit 1)
+	@echo "ndisasm -v OK"
+	@printf '\rNDISASM -b 64 HELLO.COM\rEXIT\r' | timeout 150 qemu-system-x86_64 -drive file=$(BUILD)/dos64-tools.img,format=raw -serial stdio -display none > $(BUILD)/ndisasm-bin.log 2>&1 || true
+	@grep -q '^Exit 0' $(BUILD)/ndisasm-bin.log || (echo "ndisasm-check FAIL: disasm Exit 0 missing"; exit 1)
+	@sed -n '/^Loaded, pid 1\r\?$$/,/^Exit 0\r\?$$/p' $(BUILD)/ndisasm-bin.log | sed '1d;$$d' | sed 's/\r$$//' > $(BUILD)/ndisasm-dev.txt
+	@cmp $(BUILD)/ndisasm-ref.txt $(BUILD)/ndisasm-dev.txt || (echo "ndisasm-check FAIL: on-device output differs from host ndisasm"; exit 1)
+	@echo "ndisasm-check PASS: on-device output byte-identical to host ndisasm ($$(wc -l < $(BUILD)/ndisasm-dev.txt) lines)"
+
 nasm-clean:
-	rm -rf $(BUILD)/nasm-sub $(BUILD)/nasm-trim $(BUILD)/nasm-raw $(BUILD)/nasm-x $(NASM_TRIM_OUT) $(SAMPLE_OUTDIR) $(NASM_IMG) $(NASM_IMG).lock
+	rm -rf $(BUILD)/nasm-sub $(BUILD)/nasm-trim $(BUILD)/nasm-raw $(BUILD)/nasm-x $(BUILD)/ndisasm-x $(BUILD)/ndisasm-*.log $(BUILD)/ndisasm-*.txt $(NASM_TRIM_OUT) $(SAMPLE_OUTDIR) $(NASM_IMG) $(NASM_IMG).lock
 
 clean:
 	rm -rf $(BUILD)/*.bin $(BUILD)/*.o $(BUILD)/*.img $(BUILD)/*.elf $(BUILD)/*.map $(BUILD)/*.lock $(BUILD)/*.ref $(BUILD)/*.COM $(BUILD)/*.bssend
 	rm -rf $(BUILD)/src $(BUILD)/lean $(BUILD)/full $(BUILD)/tools-img $(BUILD)/include $(BUILD)/libc $(TOOL_BUILD)
 	rm -rf $(ASM64_CHECK) $(ASM64_CORE_O) $(ASM64_REFDIR)
 
-.PHONY: all lean full tools-img clean run-qemu run-qemu-lean run-qemu-full run-qemu-tools check-layout check-layout-neg check-kbc check-serial check-selftest-modes check-debug-symbols nasm-samples run-qemu-nasm nasm-clean nasm-trim-check nasm-stdmac-raw nasm-cross libc-userland asm64-check asm64-tool
+.PHONY: all lean full tools-img clean run-qemu run-qemu-lean run-qemu-full run-qemu-tools check-layout check-layout-neg check-kbc check-serial check-selftest-modes check-debug-symbols nasm-samples run-qemu-nasm nasm-clean nasm-trim-check nasm-stdmac-raw nasm-cross ndisasm-cross ndisasm-check libc-userland asm64-check asm64-tool

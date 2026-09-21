@@ -91,6 +91,15 @@ A> OHELLO                          (runs the on-device assembled program)
 `NASM64 -f bin` output is byte-identical to host NASM 3.02 over the
 `HELLO/ECHO/CAT/WRITE` corpus. Record: `docs/25-n4a1-trim.md`.
 
+The tools image also ships the disassembler (`make ndisasm-cross`):
+
+```
+A> NDISASM -v                       (prints version, exits 0)
+A> NDISASM -b 64 HELLO.COM          (byte-identical to host ndisasm)
+```
+
+`make ndisasm-check` runs the on-device acceptance automatically.
+
 Batch files work with `REM`, `%1`–`%9`, and `%%` escapes. Keyboard and
 serial input both work.
 

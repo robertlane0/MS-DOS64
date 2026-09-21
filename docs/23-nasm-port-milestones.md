@@ -35,7 +35,9 @@ libz path (→ drop), `isatty` (→ honest stub).
 | N4A.3 | size solution from N0 numbers: (a) accept mini-assembler as the on-image tool, or (b) grow `VOL_SECTORS`/`IMG_MB` via the layout block + `check-layout` disk geometry, or (c) ship `NASM.COM` on `dos64-tools.img`. Never squeeze the 224-sector kernel slot | S | decision recorded + image boots |
 | N4A.4 | on-image `NASM -f bin` assembles the N1+N4B corpus byte-identically to host NASM 3.02 | L | byte-identical corpus |
 
-`NDISASM` explicitly deferred (no new syscalls; file as follow-up).
+`NDISASM` follow-up done 2026-09-21 (docs/25-n4a1-trim.md §11):
+`make ndisasm-cross` + `make ndisasm-check` (`-v` + `-b 64` byte-identical
+to host ndisasm, ships on `dos64-tools.img`). Needed no new syscalls, as predicted.
 
 ## N5 — Integration + hardening
 

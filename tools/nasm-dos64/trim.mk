@@ -19,7 +19,22 @@ NASM_TRIM_PPFLAGS := -DOF_ONLY -DOF_BIN -DOF_ELF
 # everything not listed above): outmacho/outcoff/outobj/outas86/outieee/
 # outaout/outdbg/codeview/dwarf, debug formats. outelf stays IFF the MZ64
 # output path wants it (cost: 152 B text — keep).
-# NDISASM is a separate binary and is explicitly deferred (PLAN §5 N4A).
+# NDISASM is a separate binary (PLAN §5 N4A follow-up, done 2026-09-21 —
+# docs/25-n4a1-trim.md §11). It links the 5 disasm/*.c sources plus the
+# NASMLIB-subset below, NOT the full assembler pool: upstream links
+# ndisasm as NDISASM + LIBOBJ_DIS + NASMLIB (nasm/Makefile.in), i.e.
+# LIBOBJ_COM + x86 tables + disasm lib, excluding every assembler-only
+# object (LIBOBJ_ASM, output backends, asm/nasm.c's main). Two structural
+# reasons a flat link of the whole pool fails: disasm/diserror.c
+# duplicates asm/error.c + warnings.o symbols (upstream survives via
+# archive-member pulling — DISLIB first wins; flat ld errors out), and
+# assemble.o/parser.o reference nasm.o globals (ofmt/dfmt/cpu/location)
+# a disassembler never provides. Keep-list mirrors LIBOBJ_COM (+ the
+# x86 tables the pool already carries: insnsa/insnsb/insnsn/regs/
+# regvals/regflags/iflag for the assembler side, insnsd/regdis for the
+# disassembler side) + dos64-nasm-shim.o; pinned to the submodule, so
+# drift fails loudly at link time on re-pin (port policy, ../README.md).
+NDISASM_KEEP := alloc badenum bsi common crc32b crc64 dos64_nasm_shim errstubs file fileio files hashtbl iflag ilog2 insnsa insnsb insnsd insnsn md5c mmap nctype numstr path perfhash raa rbtree readnum regdis regflags regs regvals saa snprintf string strlcpy strlist strnlen ver zerobuf
 NASM_TRIM_CUTS := outmacho outcoff outobj outas86 outieee outaout dwarf codeview
 # Source files dropped from the DOS64 build list (N4A.2):
 # nasmlib/mmap.c KEPT (compiles to the NULL stub under dos64-config.h),

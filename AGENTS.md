@@ -53,6 +53,11 @@
 > growth. Record: `docs/26-n5-audit.md` (N2–N5 surface audit + budget
 > wall + regression); `docs/06-syscall-reference.md` gains the DOS 2+
 > extension table (`3Ch/3Dh/3Eh/3Fh/40h/42h/35h/48h–4Ch`).
+> NDISASM follow-up done 2026-09-21 (was PLAN §5-deferred): `NDISASM.COM`
+> (2.6 MB EXE64, `make ndisasm-cross`) ships on `dos64-tools.img` with
+> `HELLO.COM`; `make ndisasm-check` proves `-v` + `-b 64` byte-identical
+> to host ndisasm (record: `docs/25-n4a1-trim.md` §11). Zero kernel
+> change — full kernel still 255.97/256 (16 B free).
 > The phase plan below is kept as the build record; every checklist item is done.
 > Current entry points: `README.md` (what works / memory / disk / shell),
 > `docs/18-truth-gap-analysis.md` + `docs/19-closure-g1-g6.md` (audit trail for

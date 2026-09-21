@@ -629,3 +629,40 @@ child console output (`AH=02h/09h`, `AH=40h` fds 1/2 via
 so NASM's messages were read via a GDB VGA dump. N5 candidate:
 mirror `handler_conout` through the bounded `serial_try_putc64`
 (check-serial-compatible by construction).
+
+## §11 — NDISASM follow-up done (2026-09-21; was "explicitly deferred", PLAN §5 N4A)
+
+The one deferred NASM-suite item needed no new syscalls, and it showed:
+`NDISASM.COM` (2,642,692 B EXE64) ships on `dos64-tools.img` beside
+`NASM64.COM`, with host-assembled `HELLO.COM` (37 B) as demo input.
+Build (`make ndisasm-cross`): the 5 `disasm/*.c` sources cross-compiled
+with `NASM_XCFLAGS` into `build/ndisasm-x/`, linked against
+`NDISASM_KEEP` (`tools/nasm-dos64/trim.mk` — the NASMLIB-subset mirror
+of upstream's `ndisasm = NDISASM + LIBOBJ_DIS + NASMLIB` link) plus
+`crt0`/`libc64`/`stdio64`/`shim64`, `-pie` + `elf2exe64.py`
+(`--stack-size 1024`), same slide-safety bar as NASM64 (entry 0, no
+`.got`, no `syscall`). Two structural facts forced the keep-list over
+a flat whole-pool link (both found by trying the flat link first):
+`disasm/diserror.c` duplicates `asm/error.c` + `warnings.o` symbols
+(upstream survives via archive-member pulling, DISLIB-first-wins),
+and `assemble.o`/`parser.o` reference `nasm.o` globals
+(`ofmt`/`dfmt`/`cpu`/`location`) a disassembler never provides.
+`ld --start-lib` was tried as the archive-faithful alternative and
+rejected: this toolchain's `--start-lib` does not re-scan for
+newly-undefined symbols the way real archives do (spurious undefined
+`reset_global_defaults`/`nasm_malloc`/…), while the explicit
+keep-list links first try. Keep-list is pinned-submodule-safe: drift
+fails loudly at link time on re-pin.
+
+Acceptance (`make ndisasm-check`, the regression test — no kernel
+change, no new harness tests per the §10/N5 budget wall): `NDISASM -v`
+→ `NDISASM version 3.02 ...`, `Exit 0`; `NDISASM -b 64 HELLO.COM` →
+16-line disassembly `Exit 0`, serial output (CRLF-normalized) `cmp`
+**byte-identical** to host ndisasm on the same input. On-image
+`NDISASM.COM` re-verified by direct FAT-chain walk against the build
+artifact (MATCH). No `nasm/` modification (`git -C nasm status` clean,
+pin unchanged). Regression trio re-verified after the Makefile/wiring
+change: smoke 89 + 6 SKIP, full 95/95, lean boots, base volumes CLEAN;
+rebuilt `NASM64.COM` re-verified on the new tools image (`-v` + `-f bin
+HELLO.ASM -o OHELLO.COM` + `OHELLO` runs, all `Exit 0`). `HELP` text
+unchanged (full kernel has 16 B free — no room for another line).
