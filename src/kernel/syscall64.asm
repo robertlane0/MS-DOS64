@@ -30,6 +30,7 @@ extern kbd_scancode_to_ascii
 extern kbd_init
 extern idt_set_vector64
 extern idt_get_vector64
+extern serial_try_putc64 ; N5.1: child console mirror (VGA + bounded serial)
 ; time64 leaf module (owns software clock + CMOS RTC; syscall date/time + FAT
 ; timestamps delegate). Layering: syscall64 -> time64, never the command
 ; interpreter clock (see AGENTS.md source map). No cmd64 clock externs here.
@@ -515,6 +516,8 @@ handler_conout:             ; AH=02 CONOUT DL=char (MSDOS.ASM OUT->BIOSOUT)
     push rax
     mov al, dl              ; vga_putc takes AL (was movzx rdi,dl which left AL stale)
     call vga_putc
+    mov al, dl              ; N5.1: mirror to serial (bounded, CF ignored: drop
+    call serial_try_putc64  ; on timeout — child output visible on -serial stdio)
     pop rax
     pop rdi
     ret

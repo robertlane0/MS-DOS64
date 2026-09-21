@@ -101,7 +101,9 @@ sh_dtbuf:   resb 16
 section .rodata
 sh_banner:  db 13,10,"MS-DOS64 shell (COMMAND64). Type HELP for commands.",13,10,0
 sh_help:    db "Builtins: DIR TYPE COPY DEL REN CLS VER PROMPT PATH ECHO REM PAUSE DATE TIME HELP EXIT",13,10
-            db "External: <name> runs <name>.COM from the FAT12 volume.",13,10,0
+            db "External: <name> runs <name>.COM from the volume root (no subdirs).",13,10
+            db "Tools: ASM64 src -o out [-l lst] (nasm-img); NASM64 -f bin (tools-img).",13,10
+            db "Exit code of last program in %ERRORLEVEL%.",13,10,0
 sh_bad:     db "Bad command or file name",13,10,0
 sh_nofile:  db "File not found",13,10,0
 sh_nomem:   db "Insufficient memory",13,10,0
