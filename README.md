@@ -78,6 +78,19 @@ A> AHELLO              (runs the on-device assembled program)
 Exit codes: `0` ok, `1` assembly errors (`FILE:LINE: message`), `2`
 file/usage errors — batch-friendly via `%ERRORLEVEL%`.
 
+On the tools image (`make tools-img` → `build/dos64-tools.img`, 8 MiB
+with a bigger FAT12 volume for the ~3 MB binary), the full NASM 3.02
+port is available:
+
+```
+A> NASM64 -v                       (prints version, exits 0)
+A> NASM64 -f bin HELLO.ASM -o OHELLO.COM
+A> OHELLO                          (runs the on-device assembled program)
+```
+
+`NASM64 -f bin` output is byte-identical to host NASM 3.02 over the
+`HELLO/ECHO/CAT/WRITE` corpus. Record: `docs/25-n4a1-trim.md`.
+
 Batch files work with `REM`, `%1`–`%9`, and `%%` escapes. Keyboard and
 serial input both work.
 
@@ -95,10 +108,15 @@ Exact memory/disk addresses, the syscall list, and source map are in
 ## Good to know
 
 - ATA is polling PIO; no DMA. Disk interrupts just count and acknowledge.
-- Only raw `.COM` / `MZ64` programs run; EXEC spawns but doesn't
-  context-switch.
+- Raw `.COM` and `MZ64`/EXE64 programs run; EXEC enters cooperatively
+  (child `RET`/`AH=4Ch` returns to the shell with an exit code).
+- Executable lookup is volume-root-only (`<name>.COM`); `PATH` is stored
+  and defaulted into child environments, but there are no subdirectories
+  to search.
 - Serial output is best-effort (dropped, never hangs); the screen is
-  authoritative. Serial input is one byte deep, so pasting can overrun.
+  authoritative. Console output (shell and child `AH=02h/09h/40h`) goes
+  to both VGA and serial. Serial input is one byte deep, so pasting can
+  overrun.
 - `TYPE` shows the first 4 KiB; printer output goes to COM1.
 
 ## Origin and license

@@ -570,11 +570,22 @@ Then, towards NASM running on DOS64 (breakdown: `docs/23-…`):
        full 95/95, lean boots, volumes CLEAN; kernels 255.25/255.72 of
        256 sectors). Full record: `docs/25-n4a1-trim.md` §10. Remaining
        towards self-hosted dev: N5.)
-- [ ] 12. **N5** integration + hardening (HELP/PATH/`ERRORLEVEL`, harness
+- [x] 12. **N5** integration + hardening (HELP/PATH/`ERRORLEVEL`, harness
       round-trips, README/AGENTS/syscall-ref updates, G1–G6-style audit,
       full regression trio).
-- [ ] 13. Re-estimate whatever remains from N2 actuals after each slice;
+      (Done 2026-09-21: `handler_conout`→`serial_try_putc64` mirror
+      (closes docs/25 §10 VGA-only gap) + `HELP` tools/`%ERRORLEVEL%`
+      lines (lookup root-only, `PATH` stored/defaulted, no dir search);
+      pipe demos green (`HELLO`, `ASM64→AHELLO`, `NASM64 -v` all on
+      serial); no new harness tests (full kernel 255.97/256, 16 B free
+      — next change opens with slot growth); `docs/26-n5-audit.md` +
+      `docs/06` extension table; trio green, volumes CLEAN.)
+- [x] 13. Re-estimate whatever remains from N2 actuals after each slice;
       confirm Track B scope vs full-port funding at N2d.
+      (Done 2026-09-21: nothing remains — C→B→A all landed; N5 closes
+      the plan. Any future kernel work (tests/handlers/strings) opens
+      with `KERNEL_SECTORS` growth per the `docs/26-n5-audit.md`
+      budget wall.)
 
 ---
 *Baseline refs: `Makefile` layout block (`IMG_MB=10, VOL_LBA=512,

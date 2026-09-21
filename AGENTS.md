@@ -43,6 +43,16 @@
 > honest `errno` (test 92 covers `"rtm"` + `ENOENT`); kernels 255.25
 > (smoke) / 255.72 (full) of 256 sectors. Record: `docs/25-n4a1-trim.md`
 > §10. Known gap: child console output is VGA-only (no serial mirror).
+> N5 (PLAN.md item 12) done 2026-09-21: `handler_conout` mirrors to
+> bounded `serial_try_putc64` (CF ignored — covers `02h/06h/09h/0Ah-echo/
+> `40h` fds 1/2; §10 gap closed: `HELLO`, `NASM64 -v`, on-device `AHELLO`
+> all visible on `-serial stdio`) + `HELP` tools/`%ERRORLEVEL%` lines
+> (lookup documented root-only; `PATH` stored + defaulted to child env,
+> no dir search — no subdirs). No new harness tests: full kernel at
+> 255.97/256 sectors (16 B free) — next kernel change opens with slot
+> growth. Record: `docs/26-n5-audit.md` (N2–N5 surface audit + budget
+> wall + regression); `docs/06-syscall-reference.md` gains the DOS 2+
+> extension table (`3Ch/3Dh/3Eh/3Fh/40h/42h/35h/48h–4Ch`).
 > The phase plan below is kept as the build record; every checklist item is done.
 > Current entry points: `README.md` (what works / memory / disk / shell),
 > `docs/18-truth-gap-analysis.md` + `docs/19-closure-g1-g6.md` (audit trail for
