@@ -82,7 +82,7 @@ You are tasked with converting the MIT-licensed MS-DOS v1.25 assembly code to cr
 - **Boot Method**: Legacy BIOS (not UEFI) - must use MBR boot sector
 - **Processor Mode Progression**: Real Mode → Protected Mode → Long Mode (64-bit)
 - **Memory Model**: Flat 64-bit addressing (no segmentation)
-- **Assembler**: NASM ≥ 2.15 (`nasm -f bin` for boot, `nasm -f elf64` + `ld -T linker.ld` + `objcopy -O binary` for the kernel, per `Makefile`)
+- **Assembler**: NASM 3.02 — **required** (must be exactly 3.02, the version pinned as the `nasm` git submodule) (`nasm -f bin` for boot, `nasm -f elf64` + `ld -T linker.ld` + `objcopy -O binary` for the kernel, per `Makefile`)
 - **Testing Platform**: QEMU `qemu-system-x86_64` (`-serial stdio` proof path, BIOS firmware)
 
 ## Conversion Strategy
@@ -390,7 +390,7 @@ endstruc
 
 ### Pre-Conversion Setup
 - [x] Clone MS-DOS v1.25 source from official Microsoft repository
-- [x] Install NASM 2.15+ (`nasm`, `ld`, `objcopy`, `python3` for `tools/mkfat12.py`)
+- [x] Install NASM 3.02 (required; use the pinned `nasm` git submodule) (`nasm`, `ld`, `objcopy`, `python3` for `tools/mkfat12.py`)
 - [x] Set up QEMU x86-64 BIOS support for testing
 - [x] Create project structure for 64-bit rewrite (`src/boot|kernel|drivers|lib`, `include/`, `tools/`, `build/`)
 - [x] Set up version control for tracking changes

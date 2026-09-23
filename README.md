@@ -15,7 +15,7 @@ Design notes live in `docs/`; `AGENTS.md` has the full build record.
 
 ## Requirements
 
-- `nasm >= 2.15`, `ld` / `objcopy`, `python3`
+- `nasm` 3.02 (required — must be exactly 3.02, the version pinned as the `nasm` git submodule), `ld` / `objcopy`, `python3`
 - `qemu-system-x86_64`
 
 ## Build and run

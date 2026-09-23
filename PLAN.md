@@ -26,7 +26,7 @@ tier 3 broken into fundable milestones, not attempted in one jump.
 
 | Area | State | Reference |
 |---|---|---|
-| Host build | Uses host `nasm >= 2.15` (`-f bin` boot, `-f elf64` + `ld -T linker.ld` kernel) | `Makefile:53-67`, `AGENTS.md` Phase 2 |
+| Host build | Requires host `nasm` 3.02 (exact — the version pinned as the `nasm` git submodule) (`-f bin` boot, `-f elf64` + `ld -T linker.ld` kernel) | `Makefile:53-67`, `AGENTS.md` Phase 2 |
 | NASM source | Vendored as git submodule at `nasm/`, v3.02, **host build tool only**, not shipped on the image | `.gitmodules`, `nasm/version` |
 | Executable loading | Raw `.COM` (any non-`MZ64` image) + `MZ64` (32 B hdr: magic `0x34365A4D`, `hdr_size 32`, `image_size`, `entry_off`, `stack_size ≤ 64 KiB`) via `proc_spawn64` | `src/kernel/proc64.asm:1277-1428`, `docs/13-phase8-process.md §2.3` |
 | `EXEC` semantics | **Spawns but does not context-switch.** `proc_spawn64` allocates PSP+payload+stack, inits PSP64/env, copies image, records pid/entry — it never `call`/`jmp` the entry, and the shell never transfers control | `AGENTS.md` Phase 10 (“EXEC spawns but does not context-switch”), `src/kernel/cmd64.asm:1459-1475` (`cmd_exec_external64` returns pid/psp only) |
