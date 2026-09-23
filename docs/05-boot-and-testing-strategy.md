@@ -3,7 +3,7 @@
 > **As built (2026-09-07):** this strategy is implemented — MBR → stage2 →
 > kernel at `0x100000` boots smoke 89 + 6 SKIP (`make`) or full 95 PASS
 > (`make full`, destructive 71/83/88/89/92 in the reserved namespace with recovery)
-> + `COMMAND64` REPL on QEMU. Concrete sizes/layout
+> + `COMMAND64` REPL on QEMU and Bochs. Concrete sizes/layout
 > below reflect the code; the step rationale is unchanged. See `README.md`
 > + `docs/19-closure-g1-g6.md` for the final state (chunked loads,
 > `KERNEL_SECTORS 256`, FAT12 volume at LBA 512+, PIC master `0x28`/slave
@@ -307,11 +307,19 @@ drops RAM caches so each remount behaves like a reboot. Power-loss
 consistency here is ordering + healing, NOT transactional (torn
 multi-sector writes stay deterministic via `FAT1`-wins).
 
-## 8. QEMU run (only supported emulator)
+## 8. QEMU + Bochs runs (both supported emulators)
 
-QEMU is the sole test path (`qemu-system-x86_64 -drive
+QEMU is the primary test path (`qemu-system-x86_64 -drive
 file=build/dos64.img,format=raw -serial stdio -display none` carries the
-suite transcript and the shell).
+suite transcript and the shell interactively). Bochs is the second
+target: `bochsrc.txt` boots the smoke image with serial TX captured to
+`serial.log`, and the `run-bochs*` Make targets boot each image variant
+through its own rendered `build/bochsrc-<variant>.txt` (from
+`bochsrc.txt.in`; see `make check-bochsrc`). For pipe-driven automation
+under Bochs, render a config with `com1:` switched to `mode=term,
+dev=<pty-slave>` and feed the same `DIR\rTYPE HELLO.TXT\rEXIT\r` script
+over the pty at ≥0.5 s per byte (kernel serial RX is 1 byte deep);
+suite output is identical to QEMU on all five image variants.
 
 Build scripts (see `Makefile`):
 
@@ -326,15 +334,33 @@ dd if=build/mbr.bin of=build/dos64.img conv=notrunc
 dd if=build/stage2.bin of=build/dos64.img bs=512 seek=1 conv=notrunc
 dd if=build/kernel.bin of=build/dos64.img bs=512 seek=16 conv=notrunc  # or via stage2 LBA loader
 python3 tools/mkfat12.py --vol-lba 512 --vol-totsec 2880 --sector-size 512 --kernel-lba 16 --kernel-sectors 256 build/dos64.img  # stamps FAT12 volume (canonical values: Makefile disk-layout block)
-make run-qemu
+make run-qemu   # or: bochs -f build/bochsrc-dos64.txt -q
+```
+
+Bochs config (checked in as `bochsrc.txt`; `bochsrc.txt.in` is the
+per-variant template the `run-bochs*` targets render):
+
+```
+megs: 256
+romimage: file=$BXSHARE/BIOS-bochs-latest
+vgaromimage: file=$BXSHARE/VGABIOS-lgpl-latest.bin
+ata0-master: type=disk, path="build/dos64.img", mode=flat, cylinders=20, heads=16, spt=63
+boot: disk
+log: bochs.log
+cpu: model=ryzen, count=1, ips=50000000, reset_on_triple_fault=1, ignore_bad_msrs=1
+panic: action=report
+magic_break: enabled=1
+com1: enabled=1, mode=file, dev=serial.log
+display_library: nogui
 ```
 
 ## 9. Debugging Tools
 
 * QEMU monitor / GDB stub: `-s -S` + `target remote :1234`; `info registers`, `x/10xb 0x7c00`, `stepi`.
+* Bochs internal debugger: `b 0x7C00`, `c`, `r`, `x /10xb 0x7C00`, `s`, `creg`.
 * Serial port logging: `mov dx,0x3F8; out dx,al` fallback.
 * VGA dump: `mov rax,0xB8000; mov word [rax],0x0F44` (white-on-black 'D').
-* Triple-fault: QEMU resets; check the serial transcript for `exception` lines.
+* Triple-fault: QEMU resets; Bochs `reset_on_triple_fault=1` does the same — check the serial transcript / `bochs.log` for `exception` lines.
 
 ## 10. Success Criteria (Phase 1 → Phase 12)
 

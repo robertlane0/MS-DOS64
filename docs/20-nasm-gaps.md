@@ -178,7 +178,7 @@ syscalls in the binary.
   `EXEC-from-path` + `call entry` + argv/exit-code plumbing. Order:
   `3Eh`-first slice (close is the smallest useful end-to-end test),
   then `3Ch/3Dh/42h`, then enter/return. Each step keeps `make` /
-  `make full` / `make lean` + Bochs trio green and extends
+  `make full` / `make lean` + Bochs trio (`run-bochs*`) green and extends
   `check_volume_clean.py` + self-tests 84+ in the scratch namespace.
 - **N3 (weeks, after N2 stable):** `libc64` (`memcpy/memset/strcmp/
   strlen`, `malloc/realloc/free` over `48h/49h/4Ah`, `printf`-subset

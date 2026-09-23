@@ -9,14 +9,14 @@ Boot runs a short self-test, then drops you at an `A>` prompt.
 
 ## Status
 
-Works on QEMU. Default build passes 89 checks
+Works on QEMU and Bochs. Default build passes 89 checks
 with 6 skipped; `make full` runs all 95, then starts the shell either way.
 Design notes live in `docs/`; `AGENTS.md` has the full build record.
 
 ## Requirements
 
 - `nasm` 3.02 (required — must be exactly 3.02, the version pinned as the `nasm` git submodule), `ld` / `objcopy`, `python3`
-- `qemu-system-x86_64`
+- `qemu-system-x86_64` (primary) and/or `bochs`
 
 ## Build and run
 
@@ -27,6 +27,9 @@ make full         # full destructive test image (build/dos64-full.img)
 make run-qemu-full
 make lean         # skip self-test entirely, straight to shell
 make run-qemu-lean
+make run-bochs    # boot smoke image via Bochs (serial captured to serial.log)
+make run-bochs-full  # boot full image via Bochs
+make run-bochs-lean  # boot lean image via Bochs
 make clean
 ```
 
@@ -38,10 +41,13 @@ To check a boot quickly:
 
 ```bash
 timeout 25 qemu-system-x86_64 -drive file=build/dos64.img,format=raw -serial stdio -display none
+# or, via Bochs (serial is captured to serial.log; see docs/05 §8):
+make run-bochs && tail serial.log
 ```
 
 You should end at `MS-DOS64 shell (COMMAND64)`. The shell also accepts
-serial input, so this works:
+serial input, so this works (under Bochs, drive the same commands through
+the `com1: mode=term` pty — see docs/05 §8):
 
 ```bash
 printf '\rDIR\rTYPE HELLO.TXT\rHELP\rEXIT\r' | timeout 25 qemu-system-x86_64 -drive file=build/dos64.img,format=raw -serial stdio -display none
