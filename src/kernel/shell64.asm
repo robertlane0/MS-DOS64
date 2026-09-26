@@ -12,6 +12,7 @@ default rel
 
 %include "include/dpb.inc"
 %include "include/fcb.inc"
+%include "include/psp.inc"
 
 section .text
 global shell_repl64
@@ -733,6 +734,12 @@ sh_do_exec:
     call cmd_exec_external64     ; -> RAX=pid RDX=psp
     test rax, rax
     jz .exec_fail_ex
+    ; Record the invocation name in the child's first file control block.
+    ; The loader zeroes both FCBs, so a program has no other way to learn the
+    ; name it was started under, and the DOS FCB1 contract expects the name
+    ; there. sh_fcb already holds the parsed name used to find the file.
+    mov rdi, rdx
+    call sh_record_fcb1
     mov r8, rax
     push rax                     ; pid (enter clobbers R8-R11)
     push rdx                     ; psp (prints clobber RDX)
@@ -1143,3 +1150,21 @@ section .rodata
 sh_s_exit:  db "EXIT",0
 sh_s_help:  db "HELP",0
 sh_verstr:  db "1.25-64",0
+
+; sh_record_fcb1 — RDI=child psp. Records the parsed invocation name in the
+; child's first file control block so the program can read the name it was
+; started under. sh_fcb holds the raw eleven-byte name in this path (no drive
+; byte); the child's FCB1 keeps the DOS layout, drive byte first, so the name
+; goes at offset one and the drive defaults to the current drive.
+; Placed after the shell body to keep the shell's own code layout stable.
+sh_record_fcb1:
+    push rax
+    lea rdi, [rdi + PSP64.fcb1]
+    mov byte [rdi], 0
+    inc rdi
+    lea rsi, [rel sh_fcb]
+    cld
+    mov rcx, 11
+    rep movsb
+    pop rax
+    ret
