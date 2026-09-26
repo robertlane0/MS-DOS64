@@ -661,6 +661,13 @@ sh_do_copy:
     ret
 
 ; sh_do_exec — RDI=cmd name (upper, <=8), RSI=tail. Runs <name>.COM.
+;
+; The tail pointer is live across mem_alloc64/fs_vol_read_file64 below, and
+; those helpers use R9 as scratch (mem_alloc64: mov r9,r8 / add r9,MCBSIZ64).
+; Holding the tail in R9 therefore handed proc_spawn64 a clobbered pointer, so
+; the child PSP recorded a command length taken from unrelated memory. R12 is
+; callee-saved under the target ABI and unused here, so the tail rides in R12
+; and is restored on every exit.
 sh_do_exec:
     push rbx
     push rcx
@@ -670,8 +677,9 @@ sh_do_exec:
     push r8
     push r9
     push r10
+    push r12
     mov r8, rdi                  ; cmd
-    mov r9, rsi                  ; tail
+    mov r12, rsi                 ; tail (survives the staging calls)
     ; build 11-byte name in sh_fcb
     lea rdi, [rel sh_fcb]
     mov rcx, 11
@@ -719,7 +727,7 @@ sh_do_exec:
     jne .free_bad_ex              ; short read: never run a partial image
     mov rdi, rbx
     mov rsi, r10
-    mov rdx, r9                  ; cmdline tail (may be empty string)
+    mov rdx, r12                 ; cmdline tail (may be empty string)
     call sh_tail_len
     mov rcx, rax
     call cmd_exec_external64     ; -> RAX=pid RDX=psp
@@ -776,6 +784,7 @@ sh_do_exec:
     call sh_print
     mov rax, 1
 .done_ex:
+    pop r12
     pop r10
     pop r9
     pop r8
