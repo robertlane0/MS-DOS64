@@ -22,15 +22,19 @@ SRC_LIB := src/lib
 # rebuild from clean.
 IMG_MB := 10
 IMG_SECTOR_SIZE := 512
-VOL_LBA := 512
+VOL_LBA := 1024
 VOL_SECTORS := 2880
 KERNEL_LBA := 16
-# 256 (was 224): N4B-pre size plan — asm64_core (~15 KB text+rodata,
-# test 93) needs ~30 sectors past the 199-sector N3.5 kernel, and only 25
-# were free. Extent [16,272) stays clear of ATA scratch 400, FS scratch
-# 500-511, and volume 512+ (no relocation needed this time). Never grow
-# the slot by squeezing scratch: relocate first, then bump (PLAN N4A.3).
-KERNEL_SECTORS := 256
+# 512 (was 256, was 224): the kernel slot is doubled so the full selftest
+# builds again and so a kernel that keeps growing has room, which is the
+# "relocate first, then bump" order PLAN N4A.3 asks for. Doubling from 256
+# would have put the kernel extent at [16,528), so the volume moved from LBA
+# 512 to 1024 and the scratch block moved out of the kernel's new extent.
+# [16,528) now clears ATA scratch 600, FS scratch 700..711, and the volume at
+# 1024+, and the freed band [528,1024) is the headroom the bump bought. Never
+# grow the slot by squeezing scratch or the volume: relocate them first, then
+# bump.
+KERNEL_SECTORS := 512
 LAYOUT_INC := $(BUILD)/include/layout.inc
 
 # Reject unsupported layout overrides. (Environment values are already

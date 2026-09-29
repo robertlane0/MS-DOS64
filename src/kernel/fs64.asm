@@ -919,7 +919,7 @@ fs_file_read_cluster64:
 ; ============================================================
 ; Phase 7 self-tests [22]..[27] — each returns RAX 0 pass, 1 fail.
 ; Synthetic geometries avoid touching real kernel LBAs 16..79;
-; ATA scratch uses FS_SCRATCH_LBA 500..511 (10M image, 20480 sectors).
+; ATA scratch uses FS_SCRATCH_LBA 700..711 (10M image, 20480 sectors).
 ; ============================================================
 
 ; ------------------------------------------------------------
@@ -1579,7 +1579,7 @@ fs_test_lba_io:
     inc al
     dec rcx
     jnz .verify_dir
-    ; cleanup scratch LBAs (zero 500,502)
+    ; cleanup scratch LBAs (zero FS_SCRATCH_LBA, FS_SCRATCH_LBA+2)
     lea rdi, [rel fs_scratch_buf]
     mov rcx, 512
     xor eax, eax
@@ -1613,7 +1613,7 @@ fs_test_lba_io:
 
 ; ------------------------------------------------------------
 ; fs_test_file_read [26] — multi-cluster file via chain + ATA
-;   DPB remapped firrec=FS_FILE_LBA_BASE (510) so clusters hit scratch.
+;   DPB remapped firrec=FS_FILE_LBA_BASE (710) so clusters hit scratch.
 ; ------------------------------------------------------------
 fs_test_file_read:
     push rbx
@@ -1652,7 +1652,7 @@ fs_test_file_read:
     call fs_set_cluster64
     test rax, rax
     jnz .fail
-    ; write cluster2 data "CLUS2-" pattern to LBA 510
+    ; write cluster2 data "CLUS2-" pattern to FS_FILE_LBA_BASE
     lea rdi, [rel fs_file_buf]
     mov rcx, 512
     mov al, 'A'
@@ -1759,7 +1759,7 @@ fs_test_file_read:
     call fs_file_read_cluster64
     test rax, rax
     jz .fail
-    ; cleanup 510/511
+    ; cleanup FS_FILE_LBA_BASE and +1
     lea rdi, [rel fs_file_buf]
     mov rcx, 512
     xor eax, eax

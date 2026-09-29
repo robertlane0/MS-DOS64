@@ -14,7 +14,7 @@
 ;     87 (N2b handle open/close read-only + scrub/mirror invariance).
 ;   SCRATCH-DEVICE (bounded ATA writes to reserved LBAs outside the volume,
 ;     cleaned up): 14 (ATA_SCRATCH_LBA pattern + zero restore),
-;     25 (FS_SCRATCH 500/502 + zero), 26 (FS_FILE_LBA_BASE 510 file-data
+;     25 (FS_SCRATCH +2 + zero), 26 (FS_FILE_LBA_BASE file-data
 ;     scratch). Safe every boot.
 ;   REAL-VOLUME READ-ONLY (mount + reads, no FAT/root/data writes): 67 (mount +
 ;     HELLO/README reads), 70 (FCB open/rndread/search/close), 72 (shell DIR/
@@ -46,7 +46,7 @@
 ;     by the next boot's pre-clean.
 ;   -DSKIP_SELFTEST (`make lean`): no suite, straight to shell.
 ; NOTE: RUN_SELFTEST (even smoke) performs bounded device writes: scratch-LBA
-;   patterns (400/500-511, zeroed after) and optional FAT2 heal on a diverged
+;   patterns (600/700-711, zeroed after) and optional FAT2 heal on a diverged
 ;   mount. Only SKIP_SELFTEST performs zero device writes. Full destructive
 ;   mode additionally creates/writes/deletes reserved files on the volume.
 bits 64
@@ -6357,15 +6357,15 @@ test_queue_interleave:
 
 ; ------------------------------------------------------------
 ; Test 82: Layout invariants — same arithmetic as make check-layout.
-;   Locks the canonical disk layout ( IMG 10M, secsiz 512, kernel 16+256,
-;   volume 512+2880, FAT 4608 / root 7168 / iobuf 32768 ) and proves the
+;   Locks the canonical disk layout ( IMG 10M, secsiz 512, kernel 16+512,
+;   volume 1024+2880, FAT 4608 / root 7168 / iobuf 32768 ) and proves the
 ;   build-time predicates at runtime, pure arithmetic, no disk I/O:
-;     kernel_end=16+256<=512, volume_end=3392*512<=10M, aliases
-;     FS_VOL_LBA==VOL_LBA, scratch 400/500/501/510/511 clear of kernel
-;     [16,272) and volume [512,3392), FAT 9sec / root 14sec <=64 (ATA
+;     kernel_end=16+512<=1024, volume_end=3904*512<=10M, aliases
+;     FS_VOL_LBA==VOL_LBA, scratch 600/700/701/710/711 clear of kernel
+;     [16,528) and volume [1024,3904), FAT 9sec / root 14sec <=64 (ATA
 ;     1..64 contract for the mount reads). Negative tables prove the same
-;   predicates reject off-by-one overlaps (511, 500+extents) and oversize
-;   volumes (1M image, 20000 sectors). Deterministic, no timing.
+;   predicates reject a kernel one sector past what the volume allows, and
+;   oversize volumes (1M image, 20000 sectors). Deterministic, no timing.
 ; ------------------------------------------------------------
 test_layout:
     push rbx
@@ -6389,16 +6389,16 @@ test_layout:
     cmp eax, 16
     jne .fail82
     mov eax, KERNEL_SECTORS
-    cmp eax, 256
+    cmp eax, 512
     jne .fail82
     mov eax, VOL_LBA
-    cmp eax, 512
+    cmp eax, 1024
     jne .fail82
     mov eax, VOL_SECTORS
     cmp eax, 2880
     jne .fail82
     mov eax, FS_VOL_LBA
-    cmp eax, 512
+    cmp eax, 1024
     jne .fail82
     mov eax, FS_VOL_TOTSEC
     cmp eax, 2880
@@ -6452,66 +6452,66 @@ test_layout:
     cmp eax, ebx
     jb .fail82
 .sAtaok82:
-    mov eax, 500
+    mov eax, FS_SCRATCH_LBA
     cmp eax, KERNEL_LBA
-    jb .s500v82
+    jb .sFsScratchV82
     mov ebx, KERNEL_LBA
     add ebx, KERNEL_SECTORS
     cmp eax, ebx
     jb .fail82
-.s500v82:
+.sFsScratchV82:
     cmp eax, VOL_LBA
-    jb .s500ok82
+    jb .sFsScratchOk82
     mov ebx, VOL_LBA
     add ebx, VOL_SECTORS
     cmp eax, ebx
     jb .fail82
-.s500ok82:
-    mov eax, 501
+.sFsScratchOk82:
+    mov eax, FS_SCRATCH_LBA2
     cmp eax, KERNEL_LBA
-    jb .s501v82
+    jb .sFsScratch2V82
     mov ebx, KERNEL_LBA
     add ebx, KERNEL_SECTORS
     cmp eax, ebx
     jb .fail82
-.s501v82:
+.sFsScratch2V82:
     cmp eax, VOL_LBA
-    jb .s501ok82
+    jb .sFsScratch2Ok82
     mov ebx, VOL_LBA
     add ebx, VOL_SECTORS
     cmp eax, ebx
     jb .fail82
-.s501ok82:
-    mov eax, 510
+.sFsScratch2Ok82:
+    mov eax, FS_FILE_LBA_BASE
     cmp eax, KERNEL_LBA
-    jb .s510v82
+    jb .sFileBaseV82
     mov ebx, KERNEL_LBA
     add ebx, KERNEL_SECTORS
     cmp eax, ebx
     jb .fail82
-.s510v82:
+.sFileBaseV82:
     cmp eax, VOL_LBA
-    jb .s510ok82
+    jb .sFileBaseOk82
     mov ebx, VOL_LBA
     add ebx, VOL_SECTORS
     cmp eax, ebx
     jb .fail82
-.s510ok82:
-    mov eax, 511
+.sFileBaseOk82:
+    mov eax, FS_FILE_LBA_BASE+1
     cmp eax, KERNEL_LBA
-    jb .s511v82
+    jb .sFileEndV82
     mov ebx, KERNEL_LBA
     add ebx, KERNEL_SECTORS
     cmp eax, ebx
     jb .fail82
-.s511v82:
+.sFileEndV82:
     cmp eax, VOL_LBA
-    jb .s511ok82
+    jb .sFileEndOk82
     mov ebx, VOL_LBA
     add ebx, VOL_SECTORS
     cmp eax, ebx
     jb .fail82
-.s511ok82:
+.sFileEndOk82:
     mov eax, FS_VOL_FAT_BYTES
     xor edx, edx
     mov ecx, 512
@@ -12272,6 +12272,8 @@ align 8
 ; Test 82: kernel extent predicate (k_lba, k_sec, v_lba, expected).
 ; Predicate (same as make check-layout): k_lba+k_sec <= v_lba.
 layout82_ext_table:
+    dd 16, 512, 1024, 0
+    dd 16, 512, 527, 1
     dd 16, 176, 512, 0
     dd 16, 176, 191, 1
     dd 16, 500, 512, 1
@@ -12285,9 +12287,9 @@ align 8
 ; Test 82: volume-fits predicate (v_lba, v_sec, img_mb, expected).
 ; Predicate: (v_lba+v_sec)*512 <= img_mb*1M, no 64-bit wrap.
 layout82_fit_table:
-    dd 512, 2880, 10, 0
-    dd 512, 2880, 1, 1
-    dd 512, 20000, 10, 1
+    dd 1024, 2880, 10, 0
+    dd 1024, 2880, 1, 1
+    dd 1024, 20000, 10, 1
     dd 0, 2880, 10, 0
 layout82_fit_table_end:
 layout82_fit_count equ (layout82_fit_table_end - layout82_fit_table)/16

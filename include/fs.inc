@@ -48,15 +48,16 @@ endstruc
 
 ; --- Phase 7 scratch LBAs on dos64.img (IMG_MB, see Makefile) ---
 ; Kernel occupies [KERNEL_LBA, KERNEL_LBA+KERNEL_SECTORS).
-; ATA Phase-5 test uses ATA_SCRATCH_LBA (moved 200->400 by the N3-pre size
-; plan so the kernel slot could grow past 184; 400 is clear of boot (0-15),
-; kernel even at 256 extents (ends 272), FS scratch (500+) and volume (512+);
-; QEMU is LBA-only so no CHS placement constraint applies).
-; Phase-7 FS tests use 500..511 (12 sectors) — safely beyond kernel, below end.
-%define ATA_SCRATCH_LBA  400
-%define FS_SCRATCH_LBA   500
-%define FS_SCRATCH_LBA2  501
-%define FS_FILE_LBA_BASE 510  ; file-data base when DPB firrec remapped for test [26]
+; The whole block moved from 400/500..511 to 600/700..711 when the kernel slot
+; was doubled to 512 sectors: the kernel extent is now [16,528), which covered
+; the old block. The band [528,1024) freed between the kernel and the volume
+; holds the new addresses, so boot < kernel < ATA scratch < FS scratch < volume
+; still holds and each stays clear of the others. QEMU is LBA-only, so no CHS
+; placement constraint applies.
+%define ATA_SCRATCH_LBA  600
+%define FS_SCRATCH_LBA   700
+%define FS_SCRATCH_LBA2  701
+%define FS_FILE_LBA_BASE 710  ; file-data base when DPB firrec remapped for test [26]
 
 ; --- Reserved filesystem test namespace (destructive self-tests only) ---
 ; Tests 71/83/88/89 (SELFTEST_DESTRUCTIVE) are the ONLY writers to the live
@@ -78,7 +79,7 @@ endstruc
 ; Extent [FS_VOL_LBA, FS_VOL_LBA+FS_VOL_TOTSEC): boot+BPB, 2x9 FAT,
 ; 14-sec root, data clusters 2..2848. Must stay clear of the kernel
 ; extent [KERNEL_LBA, KERNEL_LBA+KERNEL_SECTORS), ATA scratch
-; (ATA_SCRATCH_LBA), and FS scratch (500..511).
+; (ATA_SCRATCH_LBA), and FS scratch (FS_SCRATCH_LBA..FS_FILE_LBA_BASE+1).
 ; Single source of truth: the Makefile disk-layout block generates
 ; build/include/layout.inc, which defines FS_VOL_LBA / FS_VOL_TOTSEC
 ; (aliases of VOL_LBA / VOL_SECTORS). Do not hardcode values here.

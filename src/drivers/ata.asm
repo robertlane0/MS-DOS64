@@ -787,8 +787,9 @@ ata_test_mbr_read:
     ret
 
 ; Test write LBA then read back (uses safe scratch ATA_SCRATCH_LBA)
-; We pick ATA_SCRATCH_LBA (400: clear of kernel even grown, boot, FS scratch
-; 500+ and volume 512+; QEMU is LBA-only). Image 10M (~20480 sectors).
+; We pick ATA_SCRATCH_LBA (600: clear of boot, the kernel extent [16,528),
+; FS scratch 700+ and the volume at 1024+; QEMU is LBA-only). Image 10M
+; (~20480 sectors).
 ; (Was LBA 100, which overlapped kernel once kernel grew past 84 sectors in Phase10.)
 ata_test_write_readback:
     push rdi

@@ -16,8 +16,16 @@ org 0x7E00
 %include "build/include/layout.inc"
 ; Heap extent and derived page-directory count, shared with the kernel.
 %include "include/mcb.inc"
-KERNEL_STAGING_SEG  equ 0x7000
-KERNEL_STAGING_OFF  equ 0x0000  ; linear 0x70000 - staging buffer in low memory
+; The staging buffer holds the whole kernel before it is copied to
+; KERNEL_DEST_LINEAR, which real mode cannot reach, so it has to be at least
+; KERNEL_SECTORS long. It used to start at 0x7000, which capped the slot at
+; 256 sectors because the BIOS INT 13h stack at 0x90000 and the VGA window at
+; 0xA0000 leave nothing contiguous that long above it. Starting at 0x1000 puts
+; a 512-sector slot in conventional memory at 0x10000..0x50000, clear of the
+; MBR and stage2 below it, the BIOS stack and the VGA window above it, and the
+; page tables at 0x1000 built later.
+KERNEL_STAGING_SEG  equ 0x1000
+KERNEL_STAGING_OFF  equ 0x0000  ; linear 0x10000 - staging buffer in low memory
 KERNEL_DEST_LINEAR  equ 0x100000
 PML4_ADDR        equ 0x1000
 PDPT_ADDR        equ 0x2000
@@ -216,11 +224,11 @@ load_kernel:
 
     ; LBA path — chunked DAP reads (<=16 sectors each: conservative for
     ; old BIOS 64K/DMA limits; 16*512=8KiB never spans 64K from 16B-aligned
-    ; staging). Staging linear 0x70000+: seg = 0x7000 + done*32.
+    ; staging). Staging linear 0x10000+: seg = 0x1000 + done*32.
     ; NOTE: staging MUST stay clear of 0x90000 — BIOS INT 13h uses a stack
     ; at 0x90000 that overwrites the last bytes of any transfer ending
     ; there (corrupted shift-table TYUI -> Shift+T/Y/U/I dead, see QEMU
-    ; GUI "PE HELLO.X" bug). 0x70000-0x86000 avoids it.
+    ; GUI "PE HELLO.X" bug). 0x10000-0x50000 avoids it.
     mov ebx, KERNEL_SECTORS      ; remaining
     xor ebp, ebp                 ; done
 .lba_chunk:
@@ -267,7 +275,7 @@ load_kernel:
 .ok:
     ret
 
-; CHS fallback: read KERNEL_SECTORS sectors 1-by-1, converting LBA->CHS -> staging 0x70000
+; CHS fallback: read KERNEL_SECTORS sectors 1-by-1, converting LBA->CHS -> staging 0x10000
 load_kernel_chs:
     push es
     push bx
@@ -502,8 +510,8 @@ long_entry:
     and rsp, ~15
     cld
 
-    ; Copy kernel from staging 0x70000 to dest 0x100000 (identity mapped 0-8MiB)
-    mov rsi, 0x70000
+    ; Copy kernel from staging 0x10000 to dest 0x100000 (identity mapped 0-14MiB)
+    mov rsi, 0x10000
     mov rdi, KERNEL_DEST_LINEAR
     mov rcx, KERNEL_SECTORS * 512 / 8   ; qwords
     rep movsq
