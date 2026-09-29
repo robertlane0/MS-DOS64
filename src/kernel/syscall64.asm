@@ -2894,7 +2894,7 @@ STUB_HANDLER handler_usercode
 ;   RSI byte sizes stay on the mem_alloc64/mem_resize64 path, which already
 ;   rejects size+15 wrap and over-capacity. The fail-path max-free
 ;   bytes->para uses the fast helper only because max-free is heap-bounded
-;   (<6 MiB, trusted); see the TRUSTED ONLY note in mem64.asm.
+;   (<12 MiB, trusted); see the TRUSTED ONLY note in mem64.asm.
 ; ------------------------------------------------------------
 handler_alloc_mem:
     push rbx

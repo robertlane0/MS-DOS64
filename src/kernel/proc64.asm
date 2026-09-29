@@ -80,7 +80,7 @@ extern mem_validate64
                                   ; N1/N4B asm samples never approached
                                   ; 2 KiB of stack use, so this never
                                   ; surfaced before. 256 KiB leaves ample
-                                  ; headroom under the 6 MiB heap ceiling
+                                  ; headroom under the 12 MiB heap ceiling
                                   ; even alongside a multi-MB EXEC staging
                                   ; buffer for the same spawn.
 %define PROC_ENV_SIZE 1024
@@ -122,7 +122,6 @@ extern mem_validate64
 ; the pointer VALUE itself, once computed, is stored as inert data and
 ; never re-adjusts itself for wherever it ends up loaded.
 %define EXE64_HDR_SIZE 48
-%define MEM_END_ADDR 0x800000
 
 section .bss
 align 16
@@ -441,7 +440,7 @@ psp_init64:
     push r9
     push r10
     push r11
-    ; validate: psp non-zero, canonical low, top > psp+PSP_SIZE, top <= 0x800000
+    ; validate: psp non-zero, canonical low, top > psp+PSP_SIZE, top <= 0xE00000
     test rdi, rdi
     jz .bad
     cmp rsi, rdi
@@ -450,7 +449,7 @@ psp_init64:
     add rax, PSP_SIZE
     cmp rsi, rax
     jb .bad
-    cmp rsi, MEM_END_ADDR
+    cmp rsi, MEM_END
     ja .bad
     ; zero entire 512 bytes first
     mov rbx, rdi
@@ -547,13 +546,13 @@ psp_validate64:
     add rbx, PSP_SIZE
     cmp rax, rbx
     jb .bad_top
-    cmp rax, MEM_END_ADDR
+    cmp rax, MEM_END
     ja .bad_top
     ; env 0 or within 0..MEM_END and 16-aligned? just bounds
     mov rcx, [rdi + PSP64.env_ptr]
     test rcx, rcx
     jz .ok
-    cmp rcx, MEM_END_ADDR
+    cmp rcx, MEM_END
     jae .bad_env
     ; canonical: bit47 sign extend? All <8M are canonical low, ok
 .ok:
@@ -1323,7 +1322,7 @@ proc_load_image64:
     add rbx, PSP_SIZE     ; dest
     mov rax, rbx
     add rax, rcx          ; dest+size
-    cmp rax, MEM_END_ADDR
+    cmp rax, MEM_END
     jae .fail_l
     ; copy
     mov rdi, rbx
@@ -1353,7 +1352,7 @@ proc_load_image64:
     mov r12, rax
     mov rdi, r11
     add rdi, r12          ; dest+mem_size
-    cmp rdi, MEM_END_ADDR
+    cmp rdi, MEM_END
     jae .fail_l
     ; copy image_size bytes from src+EXE64_HDR_SIZE to dest
     mov rdi, r11          ; dest
@@ -1476,8 +1475,9 @@ proc_spawn64:
     mov rax, r15
     add rax, PSP_SIZE
     add rax, PROC_STACK_SIZE
-    ; sanity: total < 6M heap?
-    cmp rax, 6*1024*1024
+    ; sanity: the process block must fit the heap, stated as the heap's own
+    ; size so the bound cannot drift from it
+    cmp rax, MEM_SIZE
     jae .fail_spawn_total
     mov r13, rax         ; total
     ; alloc proc block

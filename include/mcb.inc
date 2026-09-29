@@ -28,4 +28,22 @@ endstruc
 ; Recommended in docs/03: first free after kernel. Example 0x200000 (2 MiB).
 %define MCB_CHAIN_START  0x200000
 
+; Heap extent. The chain runs from MCB_CHAIN_START to MEM_END and the identity
+; map covers the same range, so the two are stated together here: the map has
+; to reach as far as the chain, and a chain that ends past the last mapped page
+; lets an allocation near its top write to an address with no page behind it.
+; The chain was 0x200000-0x800000 (6 MiB) under a four-entry map until it was
+; extended to 0x200000-0xE00000 (12 MiB) under a seven-entry map.
+%define MEM_START  MCB_CHAIN_START  ; 0x200000 (2 MiB)
+%define MEM_END    0xE00000         ; 14 MiB (identity map covers 0-14M)
+%define MEM_SIZE   (MEM_END - MEM_START)
+
+; Number of 2MiB page-directory entries that cover the identity map, derived
+; so a wider heap widens the map with it. Every helper that indexes a PD entry
+; must bound its index by this, not by a literal: a bound left at the old
+; four-entry count reports an address in the upper heap as unmapped when it is
+; mapped, which turns a page-protection request into a failure.
+%define PD_PAGESIZE  0x200000
+%define PD_ENTRIES   ((MEM_END + PD_PAGESIZE - 1) / PD_PAGESIZE)
+
 %endif

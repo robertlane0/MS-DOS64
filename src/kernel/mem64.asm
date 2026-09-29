@@ -8,9 +8,15 @@
 ;           BX/CX word sizes -> RBX/RCX byte sizes
 ;           DS:BP etc. -> flat RBP/RBX, RIP-relative, R8-R15 temps
 ;
-; Memory layout: identity map 0-8MiB via PML4 0x1000 -> PDPT 0x2000 -> PD 0x3000 (4x2MiB)
-;   Heap: 0x200000-0x800000 (6 MiB) as single MCB64 chain. Chosen to avoid kernel at 0x100000
+; Memory layout: identity map 0-14MiB via PML4 0x1000 -> PDPT 0x2000 -> PD 0x3000 (7x2MiB)
+;   Heap: 0x200000-0xE00000 (12 MiB) as single MCB64 chain. Chosen to avoid kernel at 0x100000
 ;   and stage2 stacks at 0x90000, covering 0x1000 page tables.
+;   The heap was 0x200000-0x800000 (6 MiB) until the extension below. Nothing
+;   was resident above 0x800000, so the identity map had four 2MiB entries and
+;   the chain ended at the eighth mebibyte. Both were raised together: a chain
+;   that ends past the last mapped page lets an allocation near its top write to
+;   an address with no page behind it, and mapping past the chain wastes a page
+;   frame the kernel does not own.
 ;
 ; MCB64: 32B header, type 'M'/'Z', owner dq (0 free, 1 kernel, else PSP linear), size dq bytes
 ;         name 8B. Owner expanded from 16-bit PSP segment to 64-bit linear.
@@ -61,9 +67,8 @@ extern serial_print64
 ; ------------------------------------------------------------
 ; Constants — flat 64-bit, byte-based
 ; ------------------------------------------------------------
-%define MEM_START  MCB_CHAIN_START  ; 0x200000 (2 MiB)
-%define MEM_END    0x800000         ; 8 MiB (identity map covers 0-8M)
-%define MEM_SIZE   (MEM_END - MEM_START)
+; MEM_START / MEM_END / MEM_SIZE come from include/mcb.inc with the chain
+; start, so the chain and the loader cannot disagree about the heap.
 %define PAGE_SIZE  4096
 %define PAGE_SHIFT 12
 %define PARA_SHIFT 4                ; paragraph = 16 bytes
@@ -277,7 +282,7 @@ mem_pages_to_para_checked64:
 ; mem_init64 — initialize MCB chain with single large free block
 ;   Demonstrates 64-bit pointer handling vs 16-bit segment calc:
 ;   Original DOSINIT did MEMSCAN loops with NOT AL / CMP [BX],AL to find top
-;   64-bit: trust identity map 0-8MiB, set one MCB 'Z'
+;   64-bit: trust identity map 0-14MiB, set one MCB 'Z'
 ; ------------------------------------------------------------
 mem_init64:
     push rax
@@ -1144,7 +1149,7 @@ mem_count_blocks64:
 
 ; ------------------------------------------------------------
 ; Page table protection helpers — 2MiB PS pages at PD_ADDR 0x3000
-;   PML4 0x1000, PDPT 0x2000, PD 0x3000 mapping 0-8MiB (4 entries)
+;   PML4 0x1000, PDPT 0x2000, PD 0x3000 mapping 0-14MiB (7 entries)
 ;   Entry flags: bit0 P, bit1 RW, bit7 PS, bit63 NX (if NXE enabled)
 ; ------------------------------------------------------------
 
@@ -1170,7 +1175,7 @@ mem_get_pd_entry64:
     push rcx
     mov rax, rdi
     shr rax, 21           ; /2M
-    cmp rax, 4
+    cmp rax, PD_ENTRIES
     jae .oob
     shl rax, 3            ; *8
     mov rbx, PD_ADDR
@@ -1200,9 +1205,9 @@ mem_set_rw64:
     add rcx, 1            ; at least one page; caller should ensure size covers? For demo we protect single page containing addr
     dec rcx
     shr rcx, 21
-    cmp rax, 4
+    cmp rax, PD_ENTRIES
     jae .fail_rw
-    cmp rcx, 4
+    cmp rcx, PD_ENTRIES
     jae .fail_rw
     sub rcx, rax
     inc rcx               ; count
@@ -1248,7 +1253,7 @@ mem_set_nx64:
     mov rdx, rsi
     mov rax, rdi
     shr rax, 21
-    cmp rax, 4
+    cmp rax, PD_ENTRIES
     jae .fail_nx
     shl rax, 3
     mov rbx, PD_ADDR
@@ -1296,9 +1301,9 @@ mem_protect_range64:
     dec rcx
     shr rbx, 21
     shr rcx, 21
-    cmp rbx, 4
+    cmp rbx, PD_ENTRIES
     jae .fail_pr
-    cmp rcx, 4
+    cmp rcx, PD_ENTRIES
     jae .fail_pr
     sub rcx, rbx
     inc rcx

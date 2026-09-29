@@ -14,6 +14,8 @@ org 0x7E00
 ; Makefile disk-layout block and generated into build/include/layout.inc
 ; (112 KiB = 224 sectors of shell+tests+libc headroom). Do not hardcode here.
 %include "build/include/layout.inc"
+; Heap extent and derived page-directory count, shared with the kernel.
+%include "include/mcb.inc"
 KERNEL_STAGING_SEG  equ 0x7000
 KERNEL_STAGING_OFF  equ 0x0000  ; linear 0x70000 - staging buffer in low memory
 KERNEL_DEST_LINEAR  equ 0x100000
@@ -420,6 +422,16 @@ pmode:
     mov dword [PD_ADDR + 2*8 +4], 0x00
     mov dword [PD_ADDR + 3*8], 0x600000 | 0x83
     mov dword [PD_ADDR + 3*8 +4], 0x00
+    ; PD[4..PD_ENTRIES-1] continue the map: the heap runs to MEM_END, so the
+    ; remaining 2MiB entries take the map as far as the chain. Mapping only as
+    ; far as the heap reaches would leave a program that allocates near the top
+    ; of the heap writing to an address with no page behind it.
+%assign PD_NEXT 4
+%rep PD_ENTRIES - PD_NEXT
+    mov dword [PD_ADDR + PD_NEXT*8], (PD_NEXT * PD_PAGESIZE) | 0x83
+    mov dword [PD_ADDR + PD_NEXT*8 +4], 0x00
+%assign PD_NEXT PD_NEXT + 1
+%endrep
 
     ; Load PML4 base into CR3
     mov eax, PML4_ADDR

@@ -2999,7 +2999,7 @@ test_coalesce:
     jz .fail18
     cmp rax, 0x200000
     jb .fail18
-    cmp rax, 0x800000
+    cmp rax, 0xE00000
     jae .fail18
     mov r9, rax
     ; Free A,C,D in order to test coalesce both directions
@@ -3020,7 +3020,7 @@ test_coalesce:
     cmp rax, 1
     jne .fail18
     call mem_max_free64
-    cmp rax, 6*1024*1024 - 1024
+    cmp rax, 12*1024*1024 - 1024
     jb .fail18
     ; Also test double-free detection
     mov rdi, r8
@@ -3083,9 +3083,9 @@ test_resize:
     call mem_validate64
     test rax, rax
     jnz .fail19
-    ; Grow too large should fail (needs 10M > heap)
+    ; Grow too large should fail (needs 14M > the 12M heap)
     mov rdi, rbx
-    mov rsi, 10*1024*1024
+    mov rsi, 14*1024*1024
     call mem_resize64
     test rax, rax
     jz .fail19           ; should fail
@@ -3338,7 +3338,7 @@ test_stress:
     shl rsi, 32             ; align = 2^32, valid power of two
     call mem_alloc_aligned64
     test rax, rax
-    jnz .fail21             ; 4 GiB alignment cannot fit 6 MiB heap
+    jnz .fail21             ; 4 GiB alignment cannot fit the 12 MiB heap
     call mem_validate64
     test rax, rax
     jnz .fail21
@@ -3400,7 +3400,7 @@ test_stress:
     jnz .fail21
     ; Normal max-heap alloc still governed by capacity, not wrap:
     ; Largest 16-aligned request fitting the empty heap succeeds.
-    mov rdi, 6*1024*1024 - 48
+    mov rdi, 12*1024*1024 - 48
     call mem_alloc64
     test rax, rax
     jz .fail21
@@ -3415,7 +3415,7 @@ test_stress:
     test rax, rax
     jnz .fail21
     ; MEM_SIZE (header + data exceeds heap) must fail via capacity.
-    mov rdi, 6*1024*1024
+    mov rdi, 12*1024*1024
     call mem_alloc64
     test rax, rax
     jnz .fail21
@@ -5705,12 +5705,12 @@ test_chain_bounds:
 ; Test 80: Allocator arithmetic table — near-UINT64_MAX boundaries.
 ;   Table-driven mem_alloc64 sizes (each from an empty heap via
 ;   mem_reset64, so success is deterministic): 0 fail, 1/16 ok,
-;   6M-48 ok (max fitting: header 40 + 16-align), 6M fail (capacity),
+;   12M-48 ok (max fitting: header 40 + 16-align), 12M fail (capacity),
 ;   100M fail, UINT64_MAX / MAX-14 (wraps size+15 to 0) / MAX-15
 ;   (rounds huge) / 2^63-1 fail via overflow-or-capacity with the chain
 ;   intact (validate 0, single Z after fails). Then aligned (4096 ok +
 ;   aligned, huge/4G-align fail), pages (1 ok, MAX/2^52 fail), resize
-;   (512 ok, MAX/MAX-14/10M fail with CF, chain intact). Then AH=48h/49h/
+;   (512 ok, MAX/MAX-14/14M fail with CF, chain intact). Then AH=48h/49h/
 ;   4Ah compat overflow: checked para->bytes just below/at MAX>>4,
 ;   overflow by one/many bits, valid large (1M para=16M, MAX>>4) rejected
 ;   by heap capacity rather than wrap, plus FREE/RESIZE compat overflow
@@ -5869,7 +5869,7 @@ test_alloc_table:
     test rax, rax
     jnz .fail80
     mov rdi, rbx
-    mov rsi, 10*1024*1024
+    mov rsi, 14*1024*1024
     call mem_resize64
     jnc .fail80
     test rax, rax
@@ -5913,7 +5913,8 @@ test_alloc_table:
     test rax, rax
     jnz .fail80
     ; valid large convertible but over-capacity: 1M para = 16M bytes
-    ; (0x100000<<4 = 0x1000000, no wrap) must fail via capacity
+    ; (0x100000<<4 = 0x1000000, no wrap) must fail via capacity, since the
+    ; 12M heap is smaller than 16M
     call mem_reset64
     call mem_validate64
     test rax, rax
@@ -5929,7 +5930,7 @@ test_alloc_table:
     cmp rax, 1
     jne .fail80
     ; max convertible para (MAX>>4) -> bytes MAX-15: checked ok, alloc
-    ; must fail via capacity (heap 6M), never wrap to a small success
+    ; must fail via capacity (12M heap), never wrap to a small success
     call mem_reset64
     call mem_validate64
     test rax, rax
@@ -6089,7 +6090,7 @@ test_alloc_table:
     test rax, rax
     jnz .fail80
     ; RESIZE compat large convertible but over-capacity (1M para=16M)
-    ; must fail via capacity, heap intact
+    ; must fail via capacity, heap intact (16M > the 12M heap)
     mov rdi, r10
     xor rsi, rsi
     mov rbx, 0x100000
@@ -8295,9 +8296,10 @@ test_proc_stress:
     call proc_spawn64
     test rax, rax
     jnz .fail34
-    ; oversize spawn fails
+    ; oversize spawn fails: 14M is past the 12M heap, where the test's 10M
+    ; would have fitted before the heap was extended
     lea rdi, [rel p8_com_src]
-    mov rsi, 10*1024*1024
+    mov rsi, 14*1024*1024
     xor edx, edx
     xor ecx, ecx
     xor r8d, r8d
@@ -12249,15 +12251,15 @@ ata78_count equ (ata78_table_end - ata78_table)/24
 align 8
 ; Test 80: mem_alloc64 sizes (size, expected 0 fail/1 success).
 ; Each case runs from an empty heap (mem_reset64 first), so success is
-; deterministic. 6M heap: 6291456 bytes; max fitting request is 6M-48
+; deterministic. 12M heap: 12582912 bytes; max fitting request is 12M-48
 ; (header 32 + 16-align). Near-UINT64_MAX sizes must fail via
 ; size+15 overflow or capacity, never corrupt the chain.
 alloc80_table:
     dq 0, 0
     dq 1, 1
     dq 16, 1
-    dq 6291408, 1
-    dq 6291456, 0
+    dq 12582864, 1
+    dq 12582912, 0
     dq 104857600, 0
     dq 0xFFFFFFFFFFFFFFFF, 0
     dq 0xFFFFFFFFFFFFFFF1, 0
