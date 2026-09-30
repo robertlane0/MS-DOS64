@@ -766,6 +766,15 @@ rtc_set_date64:
     mov al, 0x0B
     call cmos_read
     mov bl, al             ; status B: bit2=binary (RBX is pushed, safe)
+    ; Put the day at 1 before writing the month. The month write lands on
+    ; whatever day the RTC still holds, and that can name a date which does not
+    ; exist -- the 29th of a 28-day month, for instance -- which the RTC then
+    ; has to resolve, carrying the month forward and losing the day the caller
+    ; asked for. The 1st exists in every month, so every intermediate date this
+    ; writes is a real one and the fields land exactly as given.
+    mov ah, 0x01
+    mov al, 0x07
+    call cmos_write
     mov rax, r12
     mov rcx, 100
     xor rdx, rdx
